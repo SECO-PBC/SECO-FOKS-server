@@ -41,10 +41,18 @@ type teamEditor struct {
 	tokTeamID *proto.TeamID
 }
 
+type teamCreatorNameArg struct {
+	NameUtf8              proto.NameUtf8
+	TeamnameCommitmentKey proto.RandomCommitmentKey
+	Rnr                   rem.ReserveNameRes
+}
+
 type teamCreator struct {
 	*teamEditor
 	openEldestRes *team.OpenEldestRes
-	arg           rem.CreateTeamArg
+	commonArg     rem.CreateTeamCommonArg
+	nameArg       *teamCreatorNameArg
+	successHooks  []func(m shared.MetaContext) error
 }
 
 type teamEditInterface interface {
@@ -72,18 +80,29 @@ func (c *UserClientConn) CreateTeam(
 	}
 	defer db.Release()
 
-	return shared.RetryTx(m, db, "signup", func(m shared.MetaContext, tx pgx.Tx) error {
-		obj := &teamCreator{
-			arg: arg,
-			teamEditor: &teamEditor{
-				UserClientConn: c,
-				arg:            arg.Eta,
-				tx:             tx,
-			},
-		}
-		obj.teamEditor.vtab = obj
-		return obj.run(m)
-	})
+	return shared.RetryTx2(
+		m, db, "createTeam",
+		func(m shared.MetaContext, tx pgx.Tx) (func(shared.MetaContext), error) {
+			obj := &teamCreator{
+				nameArg: &teamCreatorNameArg{
+					NameUtf8:              arg.NameUtf8,
+					TeamnameCommitmentKey: arg.TeamnameCommitmentKey,
+					Rnr:                   arg.Rnr,
+				},
+				commonArg: rem.CreateTeamCommonArg{
+					Eta:                      arg.Eta,
+					TeamMembershipLink:       arg.TeamMembershipLink,
+					SubchainTreeLocationSeed: arg.SubchainTreeLocationSeed,
+				},
+				teamEditor: &teamEditor{
+					UserClientConn: c,
+					arg:            arg.Eta,
+					tx:             tx,
+				},
+			}
+			obj.teamEditor.vtab = obj
+			return obj.run(m)
+		})
 }
 
 func (c *teamCreator) handleNameReservation(
@@ -92,11 +111,27 @@ func (c *teamCreator) handleNameReservation(
 	proto.Name,
 	error,
 ) {
-	expectedName, err := core.NormalizeName(proto.NameUtf8(c.arg.NameUtf8))
+
+	if c.nameArg == nil {
+		succHook, err := m.G().AdHocTeamNamesManager().InsertPlaceholderTeamName(m, c.tx)
+		if err != nil {
+			return "", err
+		}
+		// The success hook can only be called if the transaction commits successfully.
+		// If the transaction rolls back, the name reservation is not valid, and we
+		// should not mark it as inserted. The hook is nil on the fast path (the
+		// placeholder was already known-inserted for this host).
+		if succHook != nil {
+			c.successHooks = append(c.successHooks, succHook)
+		}
+		return team.AdHocTeamName, nil
+	}
+
+	expectedName, err := core.NormalizeName(proto.NameUtf8(c.nameArg.NameUtf8))
 	if err != nil {
 		return "", err
 	}
-	err = shared.ClaimReservation(m, c.tx, m.HostID(), expectedName, c.arg.Rnr, rem.NameType_Team)
+	err = shared.ClaimReservation(m, c.tx, m.HostID(), expectedName, c.nameArg.Rnr, rem.NameType_Team)
 	if err != nil {
 		return "", err
 	}
@@ -190,19 +225,28 @@ func (c *teamEditor) editMembers(
 func (c *teamCreator) insertCreateTeam(
 	m shared.MetaContext,
 ) error {
-	err := shared.InsertName(
-		m,
-		c.tx,
-		c.teamID.EntityID(),
-		c.signer,
-		m.HostID(),
-		c.name,
-		c.arg.NameUtf8,
-		&c.arg.TeamnameCommitmentKey,
-		c.openEldestRes.Tnc,
-		c.arg.Rnr.Seq,
-		rem.NameType_Team,
-	)
+
+	// Ad-hoc teams don't have a name, so we don't need to insert a name.
+	// We use the default name "-" for all ad-hoc teams, which should already
+	// be in the database.
+	var err error
+	if c.nameArg != nil {
+		err = shared.InsertName(
+			m,
+			c.tx,
+			c.teamID.EntityID(),
+			c.signer,
+			m.HostID(),
+			c.name,
+			c.nameArg.NameUtf8,
+			&c.nameArg.TeamnameCommitmentKey,
+			c.openEldestRes.Tnc,
+			c.nameArg.Rnr.Seq,
+			rem.NameType_Team,
+		)
+	} else {
+		err = shared.InsertAdHocTeam(m, c.tx, c.teamID, c.openEldestRes.Gc.Changes)
+	}
 	if err != nil {
 		return err
 	}
@@ -212,7 +256,7 @@ func (c *teamCreator) insertCreateTeam(
 	}
 
 	err = shared.InsertSubchainTreeLocationSeed(m, c.tx, c.teamID.ToPartyID(),
-		c.arg.SubchainTreeLocationSeed, c.openEldestRes.Stltc)
+		c.commonArg.SubchainTreeLocationSeed, c.openEldestRes.Stltc)
 	if err != nil {
 		return err
 	}
@@ -401,7 +445,42 @@ func (c *teamCreator) checkSigner(
 	return nil
 }
 
+func (c *teamCreator) checkArgs(m shared.MetaContext) error {
+
+	typ := c.teamID.Type()
+	if c.nameArg == nil && typ != proto.EntityType_AdHocTeam {
+		return core.BadArgsError("bad team ID type; expected AdHocTeam")
+	}
+	if c.nameArg != nil && typ != proto.EntityType_NamedTeam {
+		return core.BadArgsError("bad team ID type; expected NamedTeam")
+	}
+	return nil
+}
+
 func (c *teamCreator) run(
+	m shared.MetaContext,
+) (
+	func(shared.MetaContext),
+	error,
+) {
+	err := c.runInner(m)
+	if err != nil {
+		return nil, err
+	}
+	if len(c.successHooks) == 0 {
+		return nil, nil
+	}
+	hook := func(m shared.MetaContext) {
+		for _, h := range c.successHooks {
+			if err := h(m); err != nil {
+				m.Warnw("teamCreator.success", "err", err)
+			}
+		}
+	}
+	return hook, err
+}
+
+func (c *teamCreator) runInner(
 	m shared.MetaContext,
 ) error {
 	m = m.WithLogTag("TEAM.CREATE")
@@ -412,11 +491,11 @@ func (c *teamCreator) run(
 	if err != nil {
 		return err
 	}
-	hepks, err := core.ImportHEPKSet(&c.arg.Eta.Obd.Hepks)
+	hepks, err := core.ImportHEPKSet(&c.commonArg.Eta.Obd.Hepks)
 	if err != nil {
 		return err
 	}
-	openRes, err := team.OpenEldestLink(&c.arg.Eta.Link, hepks, m.HostID().Id)
+	openRes, err := team.OpenEldestLink(&c.commonArg.Eta.Link, hepks, m.HostID().Id)
 	if err != nil {
 		return err
 	}
@@ -428,6 +507,11 @@ func (c *teamCreator) run(
 		return err
 	}
 	c.seqno = openRes.Gc.Chainer.Base.Seqno
+
+	err = c.checkArgs(m)
+	if err != nil {
+		return err
+	}
 
 	// Usually the signer is already in the chain, but for the first link,
 	// we need to check the signer against database.
@@ -441,7 +525,7 @@ func (c *teamCreator) run(
 		return err
 	}
 
-	err = shared.InsertTeamMembershipLink(m, c.tx, c.arg.TeamMembershipLink)
+	err = shared.InsertTeamMembershipLink(m, c.tx, c.commonArg.TeamMembershipLink)
 	if err != nil {
 		return err
 	}
@@ -471,6 +555,16 @@ func (e *teamEditor) runEdit(m shared.MetaContext) error {
 	}
 	e.teamID = *teamid
 	e.seqno = seqno
+
+	// Ad-hoc teams have a fixed membership set at creation; reject any later
+	// edit (add/remove/role-change/rotation). This is the authoritative guard --
+	// the client enforces the same rule, but a client can disable its check, so
+	// the server must independently refuse. Checked before any other validation
+	// so a malformed edit can't slip past.
+	if e.teamID.Type().IsAdHocTeam() {
+		return core.TeamError(team.AdHocTeamImmutableMsg)
+	}
+
 	return e.runEditCommon(m)
 }
 
@@ -971,6 +1065,44 @@ func (u *UserClientConn) GetTeamConfig(ctx context.Context) (rem.TeamConfig, err
 	}
 	ret.MaxRoles = uint64(tcfg.MaxRoles())
 	return ret, nil
+}
+
+func (c *UserClientConn) CreateTeamAdHoc(
+	ctx context.Context,
+	arg rem.CreateTeamCommonArg,
+) error {
+	m := shared.NewMetaContextConn(ctx, c)
+
+	// Ad-hoc teams expose their founding membership in the clear, so they are only
+	// permitted on open-viewership hosts.
+	cfg, err := m.G().HostIDMap().Config(m, m.ShortHostID())
+	if err != nil {
+		return err
+	}
+	if cfg.Viewership.User != proto.ViewershipMode_Open {
+		return core.TeamAdhocOpenViewershipError{}
+	}
+
+	db, err := m.Db(shared.DbTypeUsers)
+	if err != nil {
+		return err
+	}
+	defer db.Release()
+
+	return shared.RetryTx2(
+		m, db, "createTeamAdhoc",
+		func(m shared.MetaContext, tx pgx.Tx) (func(shared.MetaContext), error) {
+			obj := &teamCreator{
+				commonArg: arg,
+				teamEditor: &teamEditor{
+					UserClientConn: c,
+					arg:            arg.Eta,
+					tx:             tx,
+				},
+			}
+			obj.teamEditor.vtab = obj
+			return obj.run(m)
+		})
 }
 
 var _ rem.TeamAdminInterface = (*UserClientConn)(nil)

@@ -4,7 +4,10 @@
 package shared
 
 import (
+	"bytes"
 	"errors"
+	"slices"
+	"sync"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/lib/team"
@@ -46,6 +49,51 @@ func EditMembers(
 	}
 	for _, chng := range changes {
 		err := EditMember(m, tx, team, seqno, epno, chng, hepkm)
+		if err != nil {
+			return err
+		}
+	}
+	return bumpUserMembershipVers(m, tx, changes)
+}
+
+// bumpUserMembershipVers records, for every local user member in the change
+// set, that their team memberships changed -- in the same transaction as the
+// team_members writes, which is what makes the signal exact for readers (see
+// user_membership_vers in foks_users.sql). Sorted by UID so concurrent team
+// edits over overlapping member sets take row locks in a consistent order.
+func bumpUserMembershipVers(
+	m MetaContext,
+	tx pgx.Tx,
+	changes []proto.MemberRole,
+) error {
+	var uids []proto.UID
+	for _, chng := range changes {
+		id := chng.Member.Id
+		if !id.Entity.Type().IsUser() {
+			continue
+		}
+		if id.Host != nil && !id.Host.Eq(m.HostID().Id) {
+			continue
+		}
+		uid, err := id.Entity.ToUID()
+		if err != nil {
+			return err
+		}
+		uids = append(uids, uid)
+	}
+	slices.SortFunc(uids, func(a, b proto.UID) int {
+		return bytes.Compare(a[:], b[:])
+	})
+	for _, uid := range uids {
+		_, err := tx.Exec(
+			m.Ctx(),
+			`INSERT INTO user_membership_vers (short_host_id, uid, vers, mtime)
+			 VALUES ($1, $2, 1, NOW())
+			 ON CONFLICT (short_host_id, uid)
+			 DO UPDATE SET vers = user_membership_vers.vers + 1, mtime = NOW()`,
+			m.ShortHostID().ExportToDB(),
+			uid.ExportToDB(),
+		)
 		if err != nil {
 			return err
 		}
@@ -573,7 +621,7 @@ func CheckLocalMembers(
 ) error {
 
 	checkTeamIndexRange := func(chng proto.MemberRole, keys proto.TeamMemberKeys) error {
-		if chng.Member.Id.Entity.Type() != proto.EntityType_Team {
+		if !chng.Member.Id.Entity.Type().IsTeam() {
 			return nil
 		}
 		tid, err := chng.Member.Id.Entity.ToTeamID()
@@ -1226,6 +1274,12 @@ func CheckAndInsertRemovalKeys(
 	rks []rem.TeamRemovalBoxData,
 	changes []proto.MemberRole,
 ) error {
+	if teamID.IsAdHocTeam() {
+		if len(rks) > 0 {
+			return core.TeamError("removal keys are not allowed for adhoc teams")
+		}
+		return nil
+	}
 
 	if len(rks) != len(sched.Additions) {
 		return core.TeamError("wrong number of removal keys; should equal number of new members")
@@ -1896,7 +1950,7 @@ func CheckMemberIndexRangesAgainstTeam(
 	}
 
 	return forAllTeamChanges(changes, func(chng proto.MemberRole, tmk proto.TeamMemberKeys) error {
-		if chng.Member.Id.Entity.Type() != proto.EntityType_Team {
+		if !chng.Member.Id.Entity.Type().IsTeam() {
 			return nil
 		}
 		if tmk.Tir == nil {
@@ -2148,4 +2202,124 @@ func LoadMemberLoadFloor(
 		return nil, err
 	}
 	return proto.ImportRoleFromDB(rk, vl)
+}
+
+type AdHocTeamNamesManager struct {
+	sync.Mutex
+	// inserted[h] means the placeholder name row for host h is known to be
+	// durably committed, so future ad-hoc creations on h may skip the insert.
+	// The flag may safely lag reality (a redundant insert no-ops via ON
+	// CONFLICT DO NOTHING) but must never lead it: if set while the row isn't
+	// committed, later creations skip the insert and their teams insert hits
+	// the teams_short_host_id_name_ascii_fkey FK violation.
+	inserted map[core.ShortHostID]bool
+}
+
+func NewAdHocTeamNamesManager() *AdHocTeamNamesManager {
+	return &AdHocTeamNamesManager{
+		inserted: make(map[core.ShortHostID]bool),
+	}
+}
+
+// InsertPlaceholderTeamName ensures the placeholder ("-") team name row exists
+// for the current host, inserting it into the caller's transaction if this
+// process doesn't already know it to be committed. It returns a success hook
+// (possibly nil) that the caller must run after -- and only after -- tx
+// commits; see the memo-update subtlety below.
+func (a *AdHocTeamNamesManager) InsertPlaceholderTeamName(
+	m MetaContext, tx pgx.Tx,
+) (
+	func(m MetaContext) error,
+	error,
+) {
+	hostID := m.ShortHostID()
+
+	a.Lock()
+	defer a.Unlock()
+	ins := a.inserted[hostID]
+	if ins {
+		// Fast path: the row is known committed. No insert, and no hook --
+		// there's nothing to record at commit time.
+		return nil, nil
+	}
+	err := InsertNameInner(m, tx, m.HostID(),
+		team.AdHocTeamName,
+		proto.NameUtf8(team.AdHocTeamName),
+		rem.NameType_Team,
+		proto.FirstNameSeqno,
+		true, // ON CONFLICT DO NOTHING: the row may exist from a prior process or a concurrent tx
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Do NOT set a.inserted here. The insert above lives inside the caller's
+	// still-open transaction, so the row is not yet durable: the tx can roll
+	// back -- most commonly when RetryTx hits a serialization failure and
+	// retries. If the memo were set now, the retry (and every subsequent
+	// ad-hoc creation on this host) would take the fast path above, skip the
+	// insert, and violate the teams -> names FK. So the memo update is
+	// returned as a hook for the caller to run strictly after a successful
+	// commit (see RetryTx2). If the hook never runs -- rollback, or a commit
+	// whose acknowledgment is lost -- the memo just stays false and the next
+	// creation redundantly (and harmlessly) re-inserts.
+	return func(m MetaContext) error {
+		a.Lock()
+		defer a.Unlock()
+		a.inserted[hostID] = true
+		return nil
+	}, nil
+}
+
+func InsertAdHocTeam(
+	m MetaContext,
+	tx pgx.Tx,
+	teamID proto.TeamID,
+	changes []proto.MemberRole,
+) error {
+
+	uids := make([]proto.UID, 0, len(changes))
+
+	for _, chng := range changes {
+		eid := chng.Member.Id.Entity
+		uid, err := eid.ToUID()
+		if err != nil {
+			return err
+		}
+		host := chng.Member.Id.Host
+		if host != nil && !host.Eq(m.HostID().Id) {
+			return core.BadArgsError("ad hoc team member is not in the same host")
+		}
+		uids = append(uids, uid)
+	}
+
+	mashedID, err := team.MashUIDsIntoAdHocTeamID(uids, m.HostID().Id)
+	if err != nil {
+		return err
+	}
+
+	tag, err := tx.Exec(m.Ctx(),
+		`INSERT INTO teams_adhoc (short_host_id, team_id, mashed_id, creator_party_id, ctime)
+		VALUES($1, $2, $3, $4, NOW())`,
+		m.ShortHostID().ExportToDB(),
+		teamID.ExportToDB(),
+		mashedID.ExportToDB(),
+		m.UID().ExportToDB(),
+	)
+	if err != nil {
+		// The mashed_id is H(sorted party IDs), so a repeat creation with the exact
+		// same membership collides on the teams_adhoc_mashed_idx unique index (the
+		// team_id primary key differs each attempt, so it won't be that one). Map
+		// only that specific index violation to a friendly duplicate error; anything
+		// else propagates as-is.
+		if IsDuplicateKeyError(err, "teams_adhoc_mashed_idx") {
+			return core.TeamAdhocDuplicateError{}
+		}
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return core.InsertError("teams_adhoc")
+	}
+	// no op for now as we confirm we haven't broken anything with this change
+	return nil
 }

@@ -3,7 +3,6 @@ package librt
 import (
 	"errors"
 	"fmt"
-	"math/rand"
 	"slices"
 	"strings"
 	"sync"
@@ -64,33 +63,11 @@ type Minder struct {
 
 	msgIDCache *LRU[proto.RTMsgID, proto.RTMsgSeq]
 
-	// usernameCache memoizes UID -> display-name resolutions (each a full user
-	// chain load), which would otherwise be issued per message-sender on every
-	// thread read. Entries expire after a jittered ~6h TTL; see usernameCacheTTL.
-	usernameMu    sync.Mutex
-	usernameCache map[proto.UID]usernameCacheEntry
+	// UID -> display-name resolutions are memoized in the GlobalContext-level
+	// libclient.UsernameLoader (shared with, e.g., ad-hoc team explore/reindex,
+	// which pre-warms it); see resolveSenderName.
 
 	testHooks *MinderTestHooks
-}
-
-type usernameCacheEntry struct {
-	name      proto.NameUtf8
-	expiresAt time.Time
-}
-
-const (
-	// usernameCacheTTLBase is the central lifetime of a cached UID->name entry;
-	// usernameCacheTTLJitter is the random spread added on top so a burst of
-	// entries cached together don't all expire at once and stampede the server.
-	usernameCacheTTLBase   = 6 * time.Hour
-	usernameCacheTTLJitter = 2 * time.Hour
-)
-
-// jitteredUsernameTTL returns a lifetime uniformly in
-// [base - jitter/2, base + jitter/2), centered on base (~6h).
-func jitteredUsernameTTL() time.Duration {
-	return usernameCacheTTLBase - usernameCacheTTLJitter/2 +
-		time.Duration(rand.Int63n(int64(usernameCacheTTLJitter)))
 }
 
 // MinderTestHooks lets tests perturb a Minder. A nil Minder.testHooks, or a nil
@@ -150,9 +127,8 @@ func NewMinderWithCacheSettings(
 		panic("nil active user")
 	}
 	ret := &Minder{
-		au:            au,
-		msgIDCache:    NewLRU[proto.RTMsgID, proto.RTMsgSeq](10_000),
-		usernameCache: make(map[proto.UID]usernameCacheEntry),
+		au:         au,
+		msgIDCache: NewLRU[proto.RTMsgID, proto.RTMsgSeq](10_000),
 	}
 	ret.base = libclient.NewBaseMinder(
 		au,
@@ -171,7 +147,7 @@ type MakeChannelTestHooks struct {
 
 func (d *Minder) MakeChannel(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 	appId proto.RTAppID,
 	nm proto.RTChannelName,
 	desc proto.RTChannelDesc,
@@ -185,7 +161,7 @@ func (d *Minder) MakeChannel(
 
 func (d *Minder) MakeChannelWithTestHooks(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 	appId proto.RTAppID,
 	nm proto.RTChannelName,
 	desc proto.RTChannelDesc,
@@ -222,9 +198,20 @@ func (d *Minder) MakeChannelWithTestHooks(
 	return nil, core.RTRaceError{Which: "channels"}
 }
 
+func assertTeam(team lcl.ConfigTeam) error {
+	typ, err := team.GetT()
+	if err != nil {
+		return err
+	}
+	if typ == lcl.ConfigTeamType_None {
+		return core.InternalError("team is required to make channel in Stage 1a")
+	}
+	return nil
+}
+
 func (d *Minder) makeChannelOneAttempt(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 	appId proto.RTAppID,
 	nm proto.RTChannelName,
 	desc proto.RTChannelDesc,
@@ -234,8 +221,9 @@ func (d *Minder) makeChannelOneAttempt(
 	*proto.RTChannelID,
 	error,
 ) {
-	if team == nil {
-		return nil, core.InternalError("team is required to make channel in Stage 1a")
+	err := assertTeam(team)
+	if err != nil {
+		return nil, err
 	}
 	rtp, err := d.base.GetParty(m.Base(), team)
 	if err != nil {
@@ -552,7 +540,7 @@ func (k *Minder) decryptChannelMetadata(
 
 func (k *Minder) ListAllChannelsForTeam(
 	m MetaContext,
-	tm *proto.FQTeamParsed,
+	tm lcl.ConfigTeam,
 	appID proto.RTAppID,
 ) (
 	*lcl.RTChannelSetForTeam,
@@ -818,7 +806,7 @@ type SendTestHooks struct {
 // the name is unique.
 func (d *Minder) Send(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	channel lcl.RTChannelSpecifier,
 	body []byte,
@@ -827,6 +815,113 @@ func (d *Minder) Send(
 	error,
 ) {
 	return d.SendWithTestHooks(m, team, appID, channel, body, nil)
+}
+
+// ReadThrough advances the caller's read pointer in a channel to seq, so
+// their other devices learn the read state via the resulting inbox-version
+// bump. The pointer is monotonic server-side: a stale or repeated mark is a
+// silent no-op (and bumps nothing).
+func (d *Minder) ReadThrough(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	seq proto.RTMsgSeq,
+) error {
+	err := assertTeam(team)
+	if err != nil {
+		return err
+	}
+	rtp, err := d.base.GetParty(m.Base(), team)
+	if err != nil {
+		return err
+	}
+	ch, err := d.resolveChannel(m, rtp, appID, channel)
+	if err != nil {
+		return err
+	}
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return err
+	}
+	return cli.RtReadThrough(m.Ctx(), rem.RTReadThroughArg{
+		ChannelID: ch.Id,
+		Seq:       seq,
+	})
+}
+
+// GetInboxVersion returns the caller's current global inbox version for the
+// app -- the head that GetChangedThreads pages toward.
+func (d *Minder) GetInboxVersion(
+	m MetaContext,
+	appID proto.RTAppID,
+) (
+	proto.RTInboxVersion,
+	error,
+) {
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return 0, err
+	}
+	return cli.RtGetInboxVersion(m.Ctx(), rem.RTInboxKey{AppID: appID})
+}
+
+// GetChangedThreads fetches one page of the caller's inbox delta: channels
+// whose per-user inbox version bumped past since, oldest bump first, plus the
+// current head. Paginate by re-issuing with since = the highest inboxVersion
+// received, until it reaches the head. max=0 uses the server's default page
+// size.
+func (d *Minder) GetChangedThreads(
+	m MetaContext,
+	appID proto.RTAppID,
+	since proto.RTInboxVersion,
+	max uint64,
+) (
+	*rem.RTInboxDelta,
+	error,
+) {
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return nil, err
+	}
+	res, err := cli.RtGetChangedThreads(m.Ctx(), rem.RTGetChangedThreadsArg{
+		AppID: appID,
+		Since: since,
+		Max:   max,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// PollInbox long-polls the server: it blocks until the caller's inbox version
+// advances past since, or the timeout (0 = server default) elapses, returning
+// the current head with Bumped saying which happened. Re-issue on return,
+// running a GetChangedThreads sync first when Bumped. A stand-in for real
+// server push (Stage 2c).
+func (d *Minder) PollInbox(
+	m MetaContext,
+	appID proto.RTAppID,
+	since proto.RTInboxVersion,
+	timeout time.Duration,
+) (
+	*proto.RTInboxPollRes,
+	error,
+) {
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return nil, err
+	}
+	res, err := cli.RtPollInbox(m.Ctx(), rem.RTPollInboxArg{
+		AppID:   appID,
+		Since:   since,
+		Timeout: proto.ExportDurationMilli(timeout),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &res, nil
 }
 
 func (d *Minder) cacheMsgID(
@@ -843,7 +938,7 @@ func (d *Minder) cacheMsgID(
 // SendWithTestHooks is Send with optional test perturbations.
 func (d *Minder) SendWithTestHooks(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	channel lcl.RTChannelSpecifier,
 	body []byte,
@@ -852,8 +947,9 @@ func (d *Minder) SendWithTestHooks(
 	*rem.RTSendRes,
 	error,
 ) {
-	if team == nil {
-		return nil, core.InternalError("team is required to send in Stage 1a")
+	err := assertTeam(team)
+	if err != nil {
+		return nil, err
 	}
 	rtp, err := d.base.GetParty(m.Base(), team)
 	if err != nil {
@@ -1145,15 +1241,16 @@ type initReqResult struct {
 
 func (d *Minder) initReq(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	channel lcl.RTChannelSpecifier,
 ) (
 	*initReqResult,
 	error,
 ) {
-	if team == nil {
-		return nil, core.InternalError("team is required to read in Stage 1a")
+	err := assertTeam(team)
+	if err != nil {
+		return nil, err
 	}
 	rtp, err := d.base.GetParty(m.Base(), team)
 	if err != nil {
@@ -1185,13 +1282,14 @@ func (d *Minder) initReq(
 // best-effort and tolerate a nil token.
 func (d *Minder) TeamViewToken(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 ) (
 	*rem.TeamVOBearerToken,
 	error,
 ) {
-	if team == nil {
-		return nil, core.InternalError("team is required")
+	err := assertTeam(team)
+	if err != nil {
+		return nil, err
 	}
 	rtp, err := d.base.GetParty(m.Base(), team)
 	if err != nil {
@@ -1200,38 +1298,15 @@ func (d *Minder) TeamViewToken(
 	return rtp.PLCNode().ViewTok(), nil
 }
 
-// usernameCacheGet returns a cached, unexpired display name for uid, if any.
-func (d *Minder) usernameCacheGet(m MetaContext, uid proto.UID) (proto.NameUtf8, bool) {
-	d.usernameMu.Lock()
-	defer d.usernameMu.Unlock()
-	ent, ok := d.usernameCache[uid]
-	if !ok {
-		return "", false
-	}
-	if !m.G().Now().Before(ent.expiresAt) {
-		delete(d.usernameCache, uid)
-		return "", false
-	}
-	return ent.name, true
-}
-
-// usernameCacheSet records uid -> name with a fresh jittered TTL.
-func (d *Minder) usernameCacheSet(m MetaContext, uid proto.UID, nm proto.NameUtf8) {
-	d.usernameMu.Lock()
-	defer d.usernameMu.Unlock()
-	d.usernameCache[uid] = usernameCacheEntry{
-		name:      nm,
-		expiresAt: m.G().Now().Add(jitteredUsernameTTL()),
-	}
-}
-
 // ResolveSenderNames maps each distinct user-sender UID in msgs to its display
-// name. Resolutions are memoized (see usernameCache) since each cache miss is a
-// full user-chain load; in closed viewership mode the load is mediated through
-// the shared team, so a team view bearer token (tok) is presented. Best-effort:
-// a sender that can't be loaded is omitted from the result rather than failing.
+// name. Resolutions are memoized (see libclient.UsernameLoader) since each cache
+// miss is a full user-chain load; in closed viewership mode the load is mediated
+// through the shared team, so a team view bearer token (tok) is presented.
+// Best-effort: a sender that can't be loaded is omitted from the result rather
+// than failing.
 func (d *Minder) ResolveSenderNames(
 	m MetaContext,
+	team lcl.ConfigTeam,
 	tok *rem.TeamVOBearerToken,
 	msgs []ThreadMessage,
 ) map[proto.UID]proto.NameUtf8 {
@@ -1248,35 +1323,43 @@ func (d *Minder) ResolveSenderNames(
 		if _, ok := ret[uid]; ok {
 			continue
 		}
-		if nm, ok := d.resolveSenderName(m, tok, uid); ok {
+		if nm, ok := d.resolveSenderName(m, team, tok, uid); ok {
 			ret[uid] = nm
 		}
 	}
 	return ret
 }
 
-// resolveSenderName returns the display name for a single sender UID -- from the
-// cache if present, otherwise via a (team-mediated) user-chain load whose result
-// is then cached. Returns false if the user can't be loaded.
+// resolveSenderName returns the display name for a single sender UID, via the
+// UsernameLoader: cache tiers first, then a single-flighted user-chain load.
+// Returns false if the user can't be loaded. Ad-hoc teams live on
+// open-viewership hosts and are loaded via LoadModeForAdHoc
+// (open-vhost-or-as-local-user), which resolves symmetrically for any
+// co-member; named teams use the team-mediated (AsLocalTeam) load via the VO
+// bearer token.
 func (d *Minder) resolveSenderName(
 	m MetaContext,
+	team lcl.ConfigTeam,
 	tok *rem.TeamVOBearerToken,
 	uid proto.UID,
 ) (proto.NameUtf8, bool) {
-	if nm, ok := d.usernameCacheGet(m, uid); ok {
-		return nm, true
+	// The loader is keyed by FQUser; senders are always on the active user's
+	// host (see decryptAndVerifyMsg's HostMismatchError check).
+	fqu := proto.FQUser{Uid: uid, HostID: d.au.HostID()}
+	loadMode := libclient.LoadModeOthers
+	if typ, err := team.GetT(); err == nil && typ == lcl.ConfigTeamType_AdHoc {
+		loadMode = libclient.LoadModeForAdHoc
 	}
-	uw, err := libclient.LoadUser(m.Base(), libclient.LoadUserArg{
-		Uid:               uid,
-		LoadMode:          libclient.LoadModeOthers,
-		TeamVOBearerToken: tok,
-	})
+	nm, _, err := m.G().UsernameLoader().Load(m.Base(), fqu,
+		libclient.LoadUserArg{
+			Uid:               uid,
+			LoadMode:          loadMode,
+			TeamVOBearerToken: tok,
+		})
 	if err != nil {
 		m.Warnw("resolveSenderName", "uid", uid, "err", err)
 		return "", false
 	}
-	nm := uw.Name()
-	d.usernameCacheSet(m, uid, nm)
 	return nm, true
 }
 
@@ -1318,7 +1401,7 @@ func newMsgSession() *msgSession {
 //   - cache any newly downloaded messages
 func (d *Minder) GetThreadBookended(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	channel lcl.RTChannelSpecifier,
 	start proto.RTMsgSeq,
@@ -1328,8 +1411,9 @@ func (d *Minder) GetThreadBookended(
 	bool,
 	error,
 ) {
-	if team == nil {
-		return nil, false, core.InternalError("team is required to read in Stage 1a")
+	err := assertTeam(team)
+	if err != nil {
+		return nil, false, err
 	}
 
 	sess := newMsgSession()
@@ -1466,7 +1550,7 @@ func (d *Minder) GetThreadBookended(
 // thread, pass the oldest seq of the previous page as the next `before`.
 func (d *Minder) GetThreadPage(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	channel lcl.RTChannelSpecifier,
 	before proto.RTMsgSeq,
@@ -1476,6 +1560,10 @@ func (d *Minder) GetThreadPage(
 	bool,
 	error,
 ) {
+	err := assertTeam(team)
+	if err != nil {
+		return nil, false, err
+	}
 	if num == 0 {
 		num = 128
 	}
@@ -1522,7 +1610,7 @@ func (d *Minder) GetThreadPage(
 // that can't be loaded simply has a nil name rather than failing the read.
 func (d *Minder) GetThreadView(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	channel lcl.RTChannelSpecifier,
 	before proto.RTMsgSeq,
@@ -1531,6 +1619,10 @@ func (d *Minder) GetThreadView(
 	*lcl.RTThreadView,
 	error,
 ) {
+	err := assertTeam(team)
+	if err != nil {
+		return nil, err
+	}
 	msgs, atBeginning, err := d.GetThreadPage(m, team, appID, channel, before, num)
 	if err != nil {
 		return nil, err
@@ -1539,7 +1631,7 @@ func (d *Minder) GetThreadView(
 	if err != nil {
 		return nil, err
 	}
-	names := d.ResolveSenderNames(m, tok, msgs)
+	names := d.ResolveSenderNames(m, team, tok, msgs)
 
 	ret := lcl.RTThreadView{AtBeginning: atBeginning}
 	for i := range msgs {
@@ -1578,7 +1670,7 @@ func threadMessageToView(
 // Get the num most recent messages that we don't already have.
 func (d *Minder) GetThreadRecentMsgs(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	channel lcl.RTChannelSpecifier,
 	num uint,
@@ -1586,6 +1678,10 @@ func (d *Minder) GetThreadRecentMsgs(
 	[]ThreadMessage,
 	error,
 ) {
+	err := assertTeam(team)
+	if err != nil {
+		return nil, err
+	}
 	if num == 0 {
 		num = 128
 	}
@@ -1848,7 +1944,7 @@ func (d *Minder) decodeAndCacheServerMsgs(
 // name is unique.
 func (d *Minder) GetMsgs(
 	m MetaContext,
-	team *proto.FQTeamParsed,
+	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	channel lcl.RTChannelSpecifier,
 	seqs []proto.RTMsgSeq,
@@ -1856,8 +1952,9 @@ func (d *Minder) GetMsgs(
 	[]ThreadMessage,
 	error,
 ) {
-	if team == nil {
-		return nil, core.InternalError("team is required to read in Stage 1a")
+	err := assertTeam(team)
+	if err != nil {
+		return nil, err
 	}
 	irr, err := d.initReq(m, team, appID, channel)
 	if err != nil {

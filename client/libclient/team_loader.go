@@ -30,6 +30,13 @@ type rosterPackage struct {
 	err      error
 	uw       *UserWrapper
 	tw       *TeamWrapper
+
+	// cachedName is set instead of uw when the member's user-chain load was
+	// skipped (LoadMemberNames) because the username was already in the
+	// UsernameLoader cache. The name is captured here at skip time -- rather than
+	// re-read from the cache later -- so a TTL eviction between the skip
+	// decision and the naming pass can't lose it.
+	cachedName proto.NameUtf8
 }
 
 type HistoricalSenders struct {
@@ -203,6 +210,105 @@ func (t *TeamWrapper) FQTeam() proto.FQTeam { return t.Prot().Fqt }
 
 func (t *TeamWrapper) IndexRange() core.RationalRange {
 	return core.NewRationalRange(t.prot.Tir)
+}
+
+func (t *TeamWrapper) IsAdHocTeam() bool {
+	return t.prot.Fqt.Team.IsAdHocTeam()
+}
+
+// returns {names X UIDs x ID x MashedIDs   } @ { name X ID }
+func (t *TeamWrapper) AllFQAdHocTeamStrings() ([]proto.FQAdHocTeamString, error) {
+
+	if !t.IsAdHocTeam() {
+		return nil, nil
+	}
+
+	var uids []proto.UID
+	var names []proto.NameUtf8
+	host := t.prot.Fqt.Host
+
+	var badNameList bool
+
+	for m := range t.memberMap {
+		if !m.Fqe.Host.Eq(host) {
+			continue
+		}
+		eid := m.Fqe.Entity.Unfix()
+		if !eid.Type().IsUser() {
+			continue
+		}
+		uid, err := eid.ToUID()
+		if err != nil {
+			return nil, err
+		}
+		uids = append(uids, uid)
+		rp := t.rosterDetails[m.Fqe]
+		if len(rp) == 0 {
+			badNameList = true
+		} else {
+			lst := core.Last(rp)
+			switch {
+			case lst.uw != nil:
+				names = append(names, lst.uw.prot.Username.B.NameUtf8)
+			case !lst.cachedName.IsZero():
+				// The user-chain load was skipped (LoadMemberNames); the name
+				// was captured from the cache at skip time.
+				names = append(names, lst.cachedName)
+			default:
+				badNameList = true
+			}
+		}
+		if badNameList {
+			break
+		}
+	}
+	uidsJoined, err := team.UIDsToAdhHocCanonicalString(uids, proto.UID{})
+	if err != nil {
+		return nil, err
+	}
+	mashed, err := team.MashUIDsIntoAdHocTeamID(uids, host)
+	if err != nil {
+		return nil, err
+	}
+	mashedStr, err := mashed.EntityID().StringErr()
+	if err != nil {
+		return nil, err
+	}
+	tid, err := t.prot.Fqt.Team.StringErr()
+	if err != nil {
+		return nil, err
+	}
+	p0s := []proto.AdHocTeamString{
+		uidsJoined,
+		proto.AdHocTeamString(mashedStr),
+		proto.AdHocTeamString(tid),
+	}
+	if !badNameList {
+		namesJoined, err := team.NamesToAdhHocCanonicalString(names, "")
+		if err != nil {
+			return nil, err
+		}
+		p0s = append(p0s, namesJoined)
+	}
+	hosts := []string{
+		string(t.hostname.Normalize()),
+	}
+	hostString, err := t.prot.Fqt.Host.StringErr()
+	if err != nil {
+		return nil, err
+	}
+	hosts = append(hosts, hostString)
+	var ret []proto.FQAdHocTeamString
+	for _, p0 := range p0s {
+		for _, host := range hosts {
+			ret = append(ret,
+				proto.FQAdHocTeamString(
+					string(p0)+"@"+host,
+				),
+			)
+		}
+	}
+	return ret, nil
 }
 
 // returns {name X ID } @ { name X ID }
@@ -581,7 +687,7 @@ func (l *TeamLoader) makeViewToken(m MetaContext) error {
 	idOrName := core.Sel(
 		!l.ntn.IsZero(),
 		proto.NewTeamIDOrNameWithFalse(l.ntn),
-		proto.NewTeamIDOrNameWithTrue(l.Arg.Team.Team),
+		proto.NewTeamIDOrNameWithTrue(l.Arg.LoadEntityID()),
 	)
 
 	req := rem.TeamVOBearerTokenReq{
@@ -835,7 +941,10 @@ func (l *TeamLoader) loadTeamFromServer(m MetaContext) error {
 		Start: proto.ChainEldestSeqno,
 	}
 
-	if l.Arg.Keys != nil && (l.existing == nil || l.existing.RemovalKey == nil) {
+	// Ad-hoc teams have fixed membership and no removal keys, so don't ask the
+	// server for one (it would error with "removal key not found").
+	if l.Arg.Keys != nil && (l.existing == nil || l.existing.RemovalKey == nil) &&
+		!l.TeamID().Type().IsAdHocTeam() {
 		arg.LoadRemovalKey = true
 	}
 
@@ -847,7 +956,7 @@ func (l *TeamLoader) loadTeamFromServer(m MetaContext) error {
 			S: l.existing.Name.S + 1,
 		}
 	}
-	if l.Arg.LoadMembers && (l.existing == nil || len(l.existing.RemoteViewTokens) == 0) {
+	if (l.Arg.LoadMembersFull || l.Arg.LoadMemberNames) && (l.existing == nil || len(l.existing.RemoteViewTokens) == 0) {
 		arg.LoadRemoteViewTokens = true
 	}
 	res, err := l.rpcLoader.LoadTeamChain(m.Ctx(), arg)
@@ -966,7 +1075,26 @@ func (l *TeamLoader) addIndexRangeEldest(rng *core.RationalRange) error {
 	return nil
 }
 
+// rejectAdHocMembershipChange enforces, during chain replay, that an ad-hoc
+// team's membership is fixed at creation: any non-eldest link that carries
+// roster changes is rejected. This is the team player's defense-in-depth behind
+// the client and server edit guards -- even a malicious server cannot smuggle a
+// membership change into an ad-hoc team's chain past the player.
+func rejectAdHocMembershipChange(teamID proto.TeamID, seqno proto.Seqno, nChanges int) error {
+	if !teamID.Type().IsAdHocTeam() || seqno.IsEldest() || nChanges == 0 {
+		return nil
+	}
+	return core.ChainLoaderError{Err: core.TeamError(team.AdHocTeamImmutableMsg)}
+}
+
 func (l *TeamLoader) playLink(m MetaContext, link *proto.LinkOuter, otlr team.OpenTeamLinkRes) error {
+
+	err := rejectAdHocMembershipChange(
+		l.TeamID(), otlr.Gc.Chainer.Base.Seqno, len(otlr.Gc.Changes),
+	)
+	if err != nil {
+		return err
+	}
 
 	// Hold onto all team names
 	if otlr.Tnc != nil {
@@ -1006,7 +1134,7 @@ func (l *TeamLoader) playLink(m MetaContext, link *proto.LinkOuter, otlr team.Op
 			return err
 		}
 	}
-	err := l.addIndexRange(otlr.Range, otlr.Gc.Chainer.Base.Seqno)
+	err = l.addIndexRange(otlr.Range, otlr.Gc.Chainer.Base.Seqno)
 	if err != nil {
 		return err
 	}
@@ -1296,25 +1424,62 @@ func (p *rosterPackage) load(m MetaContext, l *TeamLoader) error {
 	}
 	switch {
 	case uid != nil:
-		mode := core.Sel(l.openView, LoadModeOpenOthers, LoadModeOthers)
 
+		mode := core.Sel(
+			l.openView,
+			LoadModeOpenOthers,
+			LoadModeOthers,
+		)
 		arg := LoadUserArg{Uid: *uid, LoadMode: mode}
-		if p.isRemote {
+
+		switch {
+		case l.Arg.Team.Team.IsAdHocTeam():
+			arg.LoadMode = LoadModeForAdHoc
+		case p.isRemote:
 			arg.Host = &LoadUserHost{
 				HostID: p.fqp.Host,
 				Tok:    *p.remote.tok,
 			}
-		} else {
+		default:
 			if tok == nil {
 				return core.PermissionError("need VO bearer token to load local user")
 			}
 			arg.TeamVOBearerToken = tok
 		}
+
+		// If we only need this member's username (LoadMemberNames without
+		// LoadMembersFull), go through the UsernameLoader: a cache hit skips
+		// the user-chain load, concurrent loads of the same user are
+		// single-flighted, and if this call did perform the load we keep the
+		// wrapper anyway.
+		if !l.Arg.LoadMembersFull && !p.isRemote {
+			fqu := proto.FQUser{Uid: *uid, HostID: p.fqp.Host}
+			nm, uw, err := m.G().UsernameLoader().Load(m, fqu, arg)
+			if err != nil {
+				return err
+			}
+			if uw != nil {
+				p.uw = uw
+			} else {
+				p.cachedName = nm
+			}
+			return nil
+		}
+
 		uw, err := LoadUser(m, arg)
 		if err != nil {
 			return err
 		}
 		p.uw = uw
+
+		// Memoize the loaded username so later explores can skip this load
+		// (see LoadMemberNames) and RT sender-name resolution can avoid its
+		// own user-chain load. Cache-write failure is not a load failure.
+		err = m.G().UsernameLoader().Set(m,
+			proto.FQUser{Uid: *uid, HostID: p.fqp.Host}, uw.Name())
+		if err != nil {
+			m.Warnw("rosterPackage.load", "stage", "usernameCacheSet", "err", err)
+		}
 	case tid != nil:
 		larg := LoadTeamArg{
 			Team: proto.FQTeam{Host: p.fqp.Host, Team: *tid},
@@ -1399,7 +1564,7 @@ func (l *TeamLoader) destRoleForLoader(m MetaContext) (*core.RoleKey, error) {
 func (l *TeamLoader) loadTokensAndMembers(
 	m MetaContext,
 ) error {
-	if !l.Arg.LoadMembers {
+	if !l.Arg.LoadMembersFull && !l.Arg.LoadMemberNames {
 		return nil
 	}
 	if l.Arg.Keys == nil {
@@ -1668,6 +1833,9 @@ func (l *TeamLoader) VerifyRemoval(
 	if err != nil {
 		return err
 	}
+	if l.Arg.Team.Team.IsAdHocTeam() {
+		return core.TeamAdhocInvalidTeamChangeError{Which: "attempted member removal (of us)"}
+	}
 	err = l.connectHost(m)
 	if err != nil {
 		return err
@@ -1701,9 +1869,15 @@ func (l *TeamLoader) saveState(m MetaContext) error {
 		return core.InternalError("no links in team sigchain")
 	}
 
-	unb, err := core.NewNameBundle(l.raw.TeamnameUtf8)
-	if err != nil {
-		return err
+	// Ad-hoc teams are nameless; the server sends a "-" placeholder that isn't a
+	// normalizable name, so use an empty bundle rather than trying to normalize.
+	var unb proto.NameBundle
+	var err error
+	if !l.TeamID().Type().IsAdHocTeam() {
+		unb, err = core.NewNameBundle(l.raw.TeamnameUtf8)
+		if err != nil {
+			return err
+		}
 	}
 
 	if n == 0 && len(l.raw.RemoteViewTokens) == 0 {
@@ -1760,7 +1934,7 @@ func (l *TeamLoader) saveState(m MetaContext) error {
 	res.Sctlsc = *l.sctlsc
 
 	switch {
-	case l.Arg.LoadMembers:
+	case l.Arg.LoadMembersFull || l.Arg.LoadMemberNames:
 		lst := make([]proto.TeamRemoteMemberViewTokenInner, 0, len(l.rosterDetails))
 		for _, v := range l.rosterDetails {
 			// Just save the first remote view token for all srcRoles.
@@ -1856,6 +2030,12 @@ func (l *TeamLoader) unboxRemovalKey(m MetaContext) error {
 	if l.Arg.Keys == nil {
 		return nil
 	}
+	// Ad-hoc teams have fixed membership and therefore no removal keys, so
+	// there's nothing to unbox (mirrors TeamCreator.makeRemovalKey skipping
+	// them on creation).
+	if l.TeamID().Type().IsAdHocTeam() {
+		return nil
+	}
 	rkb := l.RemovalKeyBox()
 	if rkb == nil {
 		return core.ChainLoaderError{
@@ -1902,6 +2082,12 @@ func (l *TeamLoader) runUnbox(m MetaContext) error {
 }
 
 func (l *TeamLoader) checkTeamname(m MetaContext) error {
+	// Ad-hoc teams have no real teamname -- the eldest link carries no teamname
+	// commitment, and the server's "-" placeholder is host-wide bookkeeping, not
+	// a per-team merkle leaf. So there's nothing to verify here.
+	if l.TeamID().Type().IsAdHocTeam() {
+		return nil
+	}
 	var existingName *proto.NameAndSeqnoBundle
 	if l.existing != nil {
 		existingName = &l.existing.Name
@@ -1952,16 +2138,26 @@ func (l *TeamLoader) Existing() *lcl.TeamChainState {
 }
 
 type LoadTeamArg struct {
-	Team               proto.FQTeam
-	Name               proto.NameUtf8 // Either this is nonzero, or Team.Team
+
+	// Must specity exactly one of Name, Team, or AdHocMashedName:
+	Team            proto.FQTeam
+	Name            proto.NameUtf8
+	AdHocMashedName proto.AdHocTeamMashedID
+
 	As                 proto.FQParty
 	SrcRole            proto.Role
 	Keys               SharedKeySequence
 	Tok                *proto.PermissionToken
 	LocalParentTeamTok *rem.TeamVOBearerToken
-	LoadMembers        bool
-	TestSkipArgCheck   bool
-	TestTokenVariant   *rem.TokenVariant
+	LoadMembersFull    bool
+	// LoadMemberNames loads the members' usernames (e.g., to name an ad-hoc
+	// team by its participant list) without requiring full member loads: a
+	// member whose name is already in the global UsernameLoader cache is skipped;
+	// misses are loaded (and cached). LoadMembers subsumes this -- it always
+	// loads every member, which yields the names too.
+	LoadMemberNames  bool
+	TestSkipArgCheck bool
+	TestTokenVariant *rem.TokenVariant
 
 	// If true, the keys are stale and need to be refreshed.
 	// Also, we can auto-try a key refresh on a permissions error.
@@ -1969,9 +2165,22 @@ type LoadTeamArg struct {
 	KeyRefresher func(MetaContext) (SharedKeySequence, error)
 }
 
+func (i LoadTeamArg) LoadEntityID() proto.EntityID {
+	if !i.AdHocMashedName.IsZero() {
+		return i.AdHocMashedName.EntityID()
+	}
+	if !i.Team.Team.IsZero() {
+		return i.Team.Team.EntityID()
+	}
+	return nil
+}
+
 func (l LoadTeamArg) Check() error {
+
 	n := !l.Name.IsZero()
 	i := !l.Team.Team.IsZero()
+	m := !l.AdHocMashedName.IsZero()
+
 	k := l.Keys != nil
 	t := l.Tok != nil
 	ptt := l.LocalParentTeamTok != nil
@@ -1981,11 +2190,22 @@ func (l LoadTeamArg) Check() error {
 		return nil
 	}
 
-	if !n && !i {
-		return core.InternalError("must specify either name or team")
+	var nLoadArgs int
+	if n {
+		nLoadArgs++
 	}
-	if n && i {
-		return core.InternalError("must specify either name or team, not both")
+	if i {
+		nLoadArgs++
+	}
+	if m {
+		nLoadArgs++
+	}
+
+	if nLoadArgs == 0 {
+		return core.InternalError("must specify either name or team or ad-hoc mashed name")
+	}
+	if nLoadArgs != 1 {
+		return core.InternalError("must specify either name or team or ad-hoc mashed name, not more than one")
 	}
 	if ptt && t {
 		return core.InternalError("must specify either local parent team token or permission token, not both")
