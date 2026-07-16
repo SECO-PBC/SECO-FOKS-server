@@ -181,8 +181,18 @@ CREATE TABLE user_channels (
     PRIMARY KEY(short_host_id, channel_id, uid),
     FOREIGN KEY(short_host_id, channel_id) REFERENCES channels(short_host_id, channel_id)
 );
-/* hot index: drives the get_changed_threads inbox sync */
-CREATE INDEX user_channels_inbox_idx ON user_channels(short_host_id, uid, app_id, inbox_version);
+/*
+ * Hot index: drives the get_changed_threads inbox sync. UNIQUE enforces the
+ * invariant that no two of a user's channel rows share an inbox version:
+ * every version number is allocated by a serialized +1 bump of the user's
+ * user_inbox row, and each allocation stamps exactly one user_channels row.
+ * get_changed_threads' cursor pagination (since = highest version received,
+ * LIMIT n) depends on this -- if a version could span rows, a page boundary
+ * could split the group and the client would skip the remainder forever. Any
+ * future batch writer (e.g., late-join backfill, issue #301) must allocate
+ * one version per stamped row, and this index makes violations fail loudly.
+ */
+CREATE UNIQUE INDEX user_channels_inbox_idx ON user_channels(short_host_id, uid, app_id, inbox_version);
 
 /*
  * user_inbox: per (user, app) global inbox version. Bumped on every
@@ -193,6 +203,25 @@ CREATE TABLE user_inbox (
     uid BYTEA NOT NULL,
     app_id app_id NOT NULL,
     inbox_version BIGINT NOT NULL,
+    mtime TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY(short_host_id, uid, app_id)
+);
+
+/*
+ * fanin_cursors: the persistent tier of the late-join fan-in's
+ * reconciled-through cursor (issue #301). vers is the user_membership_vers
+ * value (users DB) that the fan-in has successfully reconciled this (user,
+ * app) through; it is written in the same transaction as the backfill it
+ * describes. An in-memory tier (RTInboxHub) fronts it; this row is read only
+ * when the memory tier misses (process restart, or an actual membership
+ * change), and re-warms it. Soft state: deleting rows is always safe -- the
+ * fan-in just re-reconciles from ground truth.
+ */
+CREATE TABLE fanin_cursors (
+    short_host_id SMALLINT NOT NULL,
+    uid BYTEA NOT NULL,
+    app_id app_id NOT NULL,
+    vers BIGINT NOT NULL,
     mtime TIMESTAMPTZ NOT NULL,
     PRIMARY KEY(short_host_id, uid, app_id)
 );
@@ -239,3 +268,6 @@ CREATE TABLE schema_patches (
     ctime TIMESTAMPTZ NOT NULL
 );
 INSERT INTO schema_patches (id, ctime) VALUES (1, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (2, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (3, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (4, NOW());
