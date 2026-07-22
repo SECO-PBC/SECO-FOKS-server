@@ -84,9 +84,11 @@ cd /opt/foks/workdir && docker compose up -d
 
 ## DB migrations
 
-`foks-tool patch-db --yes --db <name>` runs once per database on every deploy. It is idempotent (already-applied patches are skipped via the `schema_patches` table). The deploy script iterates over: `server-config users beacon merkle-tree merkle-raft merkle-raft-archive queue-service`.
+`foks-tool patch-db --yes --db <name>` runs once per database on every deploy. It is idempotent (already-applied patches are skipped via the `schema_patches` table). The deploy script iterates over: `server-config users beacon merkle-tree merkle-raft merkle-raft-archive queue-service realtime`.
 
 KV-store shards are not migrated automatically — if you ever add a kv-store patch, run it manually with `--shard <id>`.
+
+`patch-db` only patches databases that already exist — it cannot create one. A brand-new database (as `realtime` was for v0.1.7-seco.3) needs a one-off `foks-tool init-db --db <name>` first; the deploy script logs it as "not present on this server, skipping" until then. The base `.sql` schemas self-stamp their `schema_patches` rows, so a freshly init'd DB is already at the current patch level and the next `patch-db` reports "up to date".
 
 ## What lives where
 
