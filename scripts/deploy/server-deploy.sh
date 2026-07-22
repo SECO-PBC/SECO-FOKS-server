@@ -26,7 +26,7 @@ HEALTH_PORT="${HEALTH_PORT:-4430}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-90}"
 
 # All FOKS databases known to foks-tool patch-db (excl. kv-store, which uses shards).
-DBS=(server-config users beacon merkle-tree merkle-raft merkle-raft-archive queue-service)
+DBS=(server-config users beacon merkle-tree merkle-raft merkle-raft-archive queue-service realtime)
 
 log()  { printf '[deploy %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 fail() { printf '[deploy] FATAL: %s\n' "$*" >&2; exit 1; }
