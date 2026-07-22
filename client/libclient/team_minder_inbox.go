@@ -1318,7 +1318,7 @@ func (t *TeamMinder) TeamCancelRequest(m MetaContext, inviteCode string) error {
 // halves: the leaver posts this link AND signals the owner (e.g. via a
 // system message) so the owner's client can run EditTeam.
 func (t *TeamMinder) TeamLeaveSelf(m MetaContext, fqtp proto.FQTeamParsed) error {
-	fqt, err := t.ResolveAndReindex(m, fqtp, nil)
+	fqt, err := t.ResolveAndReindex(m, team.WrapNamed(fqtp), nil)
 	if err != nil {
 		return err
 	}
@@ -1350,7 +1350,7 @@ func (t *TeamMinder) TeamLeaveSelf(m MetaContext, fqtp proto.FQTeamParsed) error
 // fqtp is the parsed team name (from core.ParseFQTeam); tok is the
 // proto.TeamRSVP returned from the inbox row.
 func (t *TeamMinder) TeamReject(m MetaContext, fqtp proto.FQTeamParsed, tok proto.TeamRSVP) error {
-	fqt, err := t.ResolveAndReindex(m, fqtp, nil)
+	fqt, err := t.ResolveAndReindex(m, team.WrapNamed(fqtp), nil)
 	if err != nil {
 		return err
 	}
