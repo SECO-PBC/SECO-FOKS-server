@@ -799,9 +799,14 @@ func (d *Minder) sealMessage(
 	case proto.RTMsgType_Basic:
 		msgbody = proto.NewRTMsgBodyWithBasic(proto.RTMsgPlaintextBasic(body))
 	case proto.RTMsgType_Reply, proto.RTMsgType_Reactji, proto.RTMsgType_Edit:
-		pegged := proto.RTMsgPlaintextPegged{Basic: proto.RTMsgPlaintextBasic(body)}
-		if replyTo != nil {
-			pegged.ReplyTo = *replyTo
+		// A pegged type without a target would seal a zero msg id, which
+		// no fold can resolve — fail the send instead of sending garbage.
+		if replyTo == nil {
+			return nil, core.BadArgsError("pegged message type requires a replyTo target")
+		}
+		pegged := proto.RTMsgPlaintextPegged{
+			Basic:   proto.RTMsgPlaintextBasic(body),
+			ReplyTo: *replyTo,
 		}
 		switch typ {
 		case proto.RTMsgType_Reply:
@@ -1188,6 +1193,14 @@ func (d *Minder) openMessage(
 	pt, err := body.GetT()
 	if err != nil {
 		return nil, nil, err
+	}
+	// The server stores md.Typ as unvalidated plaintext, and consumers
+	// (folds) branch on it — a sender could claim one type while sealing
+	// another arm, desyncing Typ from Body for every reader. Reject the
+	// mismatch here, where the decrypted truth is first known.
+	if pt != md.Typ {
+		return nil, nil, core.ValidationError(
+			fmt.Sprintf("message type mismatch: metadata says %d, body is %d", md.Typ, pt))
 	}
 	cm := proto.RTMsgCached{
 		Md:  noncer,
@@ -2223,9 +2236,12 @@ func extractAllSeqIDPairsFromRTThreadPage(p *rem.RTThreadPage) []seqIDPair {
 // is the opt-out (the push relay only targets enabled tokens). The device
 // verify-key id namespaces this user's rows across their devices.
 func (d *Minder) SetPushToken(m MetaContext, platform string, token []byte, enabled bool) error {
-	dk := d.au.PrivKeys.GetDevkey()
-	if dk == nil {
-		return core.KeyNotFoundError{Which: "device key"}
+	// UserContext.Devkey lazy-loads (passphrase-backed users may not have
+	// the key materialized yet) — the raw PrivKeys getter would return a
+	// spurious KeyNotFoundError in that state.
+	dk, err := d.au.Devkey(m.Ctx())
+	if err != nil {
+		return err
 	}
 	eid, err := dk.RollingEntityID()
 	if err != nil {

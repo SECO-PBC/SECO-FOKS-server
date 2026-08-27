@@ -68,6 +68,20 @@ func TestRTSecoTypedMessages(t *testing.T) {
 		[]byte(`{"emoji":"👍"}`), proto.RTMsgType_Reactji, &target)
 	require.NoError(t, err, "server must accept a Reactji-typed pegged send")
 
+	// ── Unread probe: did coco's Reactji bump bluey's inbox? Read
+	// IMMEDIATELY, before bluey's own sends below — a member's own send
+	// bumps their own inbox version ("sending implies reading",
+	// rt_test.go), which would confound the probe. ───────────────────
+	verAfter, err := minderBluey.GetInboxVersion(mb, proto.RTAppID_Chat)
+	require.NoError(t, err)
+	if verAfter > verBefore {
+		t.Logf("FINDING CONFIRMED: Reactji bumped recipient inbox version %d -> %d "+
+			"(reactions ring the new-message bell — Max question #4)", verBefore, verAfter)
+	} else {
+		t.Logf("Reactji did NOT bump inbox version (%d -> %d) — update findings",
+			verBefore, verAfter)
+	}
+
 	// ── 2. Edit from the owner ───────────────────────────────────────
 	_, err = minderBluey.SendTyped(mb, team.WrapNamedPtr(fqt), proto.RTAppID_Chat, ch,
 		[]byte("root message (edited)"), proto.RTMsgType_Edit, &target)
@@ -93,15 +107,4 @@ func TestRTSecoTypedMessages(t *testing.T) {
 	require.Equal(t, `{"emoji":"👍"}`, string(msgs[2].Body))
 	require.Equal(t, proto.RTMsgType_Basic, msgs[3].Typ)
 	require.Equal(t, "root message", string(msgs[3].Body))
-
-	// ── 4. Unread probe: did coco's Reactji bump bluey's inbox? ──────
-	verAfter, err := minderBluey.GetInboxVersion(mb, proto.RTAppID_Chat)
-	require.NoError(t, err)
-	if verAfter > verBefore {
-		t.Logf("FINDING CONFIRMED: Reactji bumped recipient inbox version %d -> %d "+
-			"(reactions ring the new-message bell — Max question #4)", verBefore, verAfter)
-	} else {
-		t.Logf("Reactji did NOT bump inbox version (%d -> %d) — update findings",
-			verBefore, verAfter)
-	}
 }

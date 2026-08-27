@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	maxPushTokenLen  = 256 // APNs tokens are 32 bytes; FCM ~140 chars
-	maxDeviceKeyLen  = 64
+	maxPushTokenLen = 256 // APNs tokens are 32 bytes; FCM ~140 chars
+	maxDeviceKeyLen = 64
 )
 
 // SetPushToken upserts the caller's push token. The row is keyed by the
