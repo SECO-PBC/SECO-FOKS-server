@@ -801,7 +801,8 @@ func (d *Minder) sealMessage(
 	case proto.RTMsgType_Reply, proto.RTMsgType_Reactji, proto.RTMsgType_Edit:
 		// A pegged type without a target would seal a zero msg id, which
 		// no fold can resolve — fail the send instead of sending garbage.
-		if replyTo == nil {
+		// A non-nil zero id is the same garbage in a different wrapper.
+		if replyTo == nil || replyTo.IsZero() {
 			return nil, core.BadArgsError("pegged message type requires a replyTo target")
 		}
 		pegged := proto.RTMsgPlaintextPegged{
