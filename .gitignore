@@ -6,3 +6,13 @@ tmp
 ci.err
 ci.out
 .DS_Store
+
+# SECO local-dev stack artifacts: the app repo provisions its dev server
+# INSIDE this clone (see SECO-FOKS seco-server/scripts) — none of these
+# may ever be committed (keys/ and tls/ hold PRIVATE key material).
+/conf/foks.jsonnet
+/conf/local.*.libsonnet
+/keys/
+/tls/
+/seco/
+/.env
