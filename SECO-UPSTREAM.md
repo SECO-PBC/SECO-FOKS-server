@@ -48,7 +48,7 @@ user hits; keep it local if it encodes how SECO deploys or what SECO builds.**
 | `--vhost` strict lookup | [#327](https://github.com/foks-proj/go-foks/pull/327) | Typo'd `--vhost` rewrote the **primary** host's public zone. Found by cubic on our merge PR #21. |
 | `patch-db --yes` | [#328](https://github.com/foks-proj/go-foks/pull/328) | Unattended deploys can't answer a prompt. |
 | `Config.RPCLogOptions` via env/config | [#329](https://github.com/foks-proj/go-foks/pull/329) | Flag-only, so the mobile agent could never enable RPC tracing. |
-| `TeamCancelRequest` + `TeamReject` | [#330](https://github.com/foks-proj/go-foks/pull/330) | Deliberately excludes `TeamLeaveSelf` — see Declined, and issue [#331](https://github.com/foks-proj/go-foks/issues/331). |
+| `TeamCancelRequest` + `TeamReject` | [#330](https://github.com/foks-proj/go-foks/pull/330) | Deliberately excludes `TeamLeaveSelf` — see Declined, and issue [#331](https://github.com/foks-proj/go-foks/issues/331). Now carries 5 integration tests plus two bug fixes they surfaced: reject not evicting the inbox cache (ours), and a pre-existing `getOrLoadInboxRow` self-deadlock on a cache miss (upstream's). Maxtaco offered the option of splitting the deadlock fix out. |
 
 ## Queued — decided yes, not yet opened
 
