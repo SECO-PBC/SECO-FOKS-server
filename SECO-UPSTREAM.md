@@ -10,6 +10,7 @@ or AI — has to re-derive a decision we already made, re-propose something
 already proposed, or wonder why half a change went out and half did not.
 
 Last synced against upstream: **v0.1.9** (`cb2d8ac`), 2026-08-25.
+Upstream PRs last reconciled: **2026-08-27** (`2d3f9b0`).
 
 ## How to use it
 
@@ -43,22 +44,16 @@ user hits; keep it local if it encodes how SECO deploys or what SECO builds.**
 |---|---|---|
 | merkle loop DB resilience | [#323](https://github.com/foks-proj/go-foks/pull/323) | Transient DB error permanently killed the merkle pipeline. |
 | libkv stale VO bearer token re-mint | [#324](https://github.com/foks-proj/go-foks/pull/324) | Freshly-admitted member's first KV write failed for minutes. |
-| explore double-load | [#325](https://github.com/foks-proj/go-foks/pull/325) | 60→36 round trips. Shipped **without** its budget test — see RpcStats below. |
-| roster by member names | [#326](https://github.com/foks-proj/go-foks/pull/326) | Uses upstream's own username cache (#298) on a path that missed it. |
-| `--vhost` strict lookup | [#327](https://github.com/foks-proj/go-foks/pull/327) | Typo'd `--vhost` rewrote the **primary** host's public zone. Found by cubic on our merge PR #21. |
-| `patch-db --yes` | [#328](https://github.com/foks-proj/go-foks/pull/328) | Unattended deploys can't answer a prompt. |
-| `Config.RPCLogOptions` via env/config | [#329](https://github.com/foks-proj/go-foks/pull/329) | Flag-only, so the mobile agent could never enable RPC tracing. |
 | `TeamCancelRequest` + `TeamReject` | [#330](https://github.com/foks-proj/go-foks/pull/330) | Deliberately excludes `TeamLeaveSelf` — see Declined, and issue [#331](https://github.com/foks-proj/go-foks/issues/331). Now carries 5 integration tests plus two bug fixes they surfaced: reject not evicting the inbox cache (ours), and a pre-existing `getOrLoadInboxRow` self-deadlock on a cache miss (upstream's). Maxtaco offered the option of splitting the deadlock fix out. |
 
 ## Queued — decided yes, not yet opened
 
 | Change | Waiting on | Notes |
 |---|---|---|
-| parallel explore waves | **#325 landing** | 4533→1367ms. Builds on #325; racing it would conflict. |
+| parallel explore waves | **nothing — blocker cleared, open it** | 4533→1367ms. Built on #325, which merged 2026-08-27. |
 
-
-Only one item is queued, and it names a real blocker. Anything else that belongs
-here should be opened instead of parked.
+Anything that belongs here should be opened rather than parked, and a cleared
+blocker means "open it now", not "leave it queued".
 
 ## Declined — considered, rejected, stays rejected
 
@@ -124,3 +119,8 @@ subsystem unrelated to anything we are proposing. Not worth the review cost.
 | iOS `sharedHome` nil guard | [#289](https://github.com/foks-proj/go-foks/pull/289) |
 | libclient public Config setters | [#290](https://github.com/foks-proj/go-foks/pull/290) |
 | rejoin partial unique index | [#316](https://github.com/foks-proj/go-foks/pull/316) — our #288 was closed as superseded; upstream took our text verbatim as `p7.sql` |
+| explore double-load | [#325](https://github.com/foks-proj/go-foks/pull/325) — merged 2026-08-27, without the round-trip budget test (needs the RpcStats hook) |
+| roster by member names | [#332](https://github.com/foks-proj/go-foks/pull/332) — maxtaco reimplemented it himself and closed our #326, same as #288 → #316 |
+| `--vhost` strict lookup | [#327](https://github.com/foks-proj/go-foks/pull/327) — merged 2026-08-27 |
+| `patch-db --yes` | [#328](https://github.com/foks-proj/go-foks/pull/328) — merged 2026-08-27 |
+| `Config.RPCLogOptions` via env/config | [#329](https://github.com/foks-proj/go-foks/pull/329) — merged 2026-08-27 |
