@@ -2217,3 +2217,28 @@ func extractAllSeqIDPairsFromRTThreadPage(p *rem.RTThreadPage) []seqIDPair {
 	ret = append(ret, tmp...)
 	return ret
 }
+
+// SetPushToken (SECO Stage-2a groundwork) registers or refreshes this
+// device's push token with the user's home realtime server; enabled=false
+// is the opt-out (the push relay only targets enabled tokens). The device
+// verify-key id namespaces this user's rows across their devices.
+func (d *Minder) SetPushToken(m MetaContext, platform string, token []byte, enabled bool) error {
+	dk := d.au.PrivKeys.GetDevkey()
+	if dk == nil {
+		return core.KeyNotFoundError{Which: "device key"}
+	}
+	eid, err := dk.RollingEntityID()
+	if err != nil {
+		return err
+	}
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return err
+	}
+	return cli.RtSetPushToken(m.Ctx(), rem.RtSetPushTokenArg{
+		Platform:  platform,
+		Token:     token,
+		DeviceKey: eid,
+		Enabled:   enabled,
+	})
+}
