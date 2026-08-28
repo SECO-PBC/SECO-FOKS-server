@@ -45,6 +45,7 @@ user hits; keep it local if it encodes how SECO deploys or what SECO builds.**
 | merkle loop DB resilience | [#323](https://github.com/foks-proj/go-foks/pull/323) | Transient DB error permanently killed the merkle pipeline. |
 | libkv stale VO bearer token re-mint | [#324](https://github.com/foks-proj/go-foks/pull/324) | Freshly-admitted member's first KV write failed for minutes. |
 | `TeamCancelRequest` + `TeamReject` | [#330](https://github.com/foks-proj/go-foks/pull/330) | Deliberately excludes `TeamLeaveSelf` — see Declined, and issue [#331](https://github.com/foks-proj/go-foks/issues/331). Now carries 5 integration tests plus two bug fixes they surfaced: reject not evicting the inbox cache (ours), and a pre-existing `getOrLoadInboxRow` self-deadlock on a cache miss (upstream's). Maxtaco offered the option of splitting the deadlock fix out. |
+| social signup spec | [#339](https://github.com/foks-proj/go-foks/pull/339) | Docs only, no code — a buildable spec on top of Max's own `social_signup.md` brainstorm (his commit `4d00b19`, never implemented). Adds one derivation (`wk`, gating the reply slot) plus schema, RPCs, state machine, closed-host and required-invite-code behaviour. **Opened to get the shape blessed before building**; if he takes it a different way we build his way. Would replace our out-of-band invite transport, so hold that work until this lands or is declined. |
 
 ## Queued — decided yes, not yet opened
 
