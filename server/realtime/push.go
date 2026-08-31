@@ -1,8 +1,7 @@
 package realtime
 
-// SECO Stage-2a groundwork (rt-chat-transport task 1.3): store/refresh a
-// device push token for the authenticated user. Replaceable by upstream's
-// own design when it lands — the client reaches this through a seam.
+// Device push-token registration: store or refresh a token for the
+// authenticated user, so a push server can find the devices to wake.
 
 import (
 	"github.com/foks-proj/go-foks/lib/core"

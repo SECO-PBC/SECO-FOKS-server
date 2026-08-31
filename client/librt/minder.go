@@ -790,7 +790,7 @@ func (d *Minder) sealMessage(
 	if err != nil {
 		return nil, err
 	}
-	// SECO (rt-spike): build the body arm for the requested type. Reply /
+	// Build the body arm for the requested type. Reply /
 	// Reactji / Edit ride the pegged arm the wire format already declares;
 	// Delete has no arm yet and is expressed at the app layer as Edit with
 	// an empty body until upstream adds one.
@@ -979,7 +979,7 @@ func (d *Minder) SendWithTestHooks(
 	return d.sendTyped(m, team, appID, channel, body, proto.RTMsgType_Basic, nil, test)
 }
 
-// SendTyped (SECO rt-spike) sends a non-Basic message type: Reply / Reactji /
+// SendTyped sends a non-Basic message type: Reply / Reactji /
 // Edit ride the pegged wire arm, with replyTo pointing at the target message.
 func (d *Minder) SendTyped(
 	m MetaContext,
@@ -1208,7 +1208,7 @@ func (d *Minder) openMessage(
 		Mw:  mw,
 		Sit: serverInsertTime,
 	}
-	// SECO (rt-spike): accept the pegged arm (Reply/Reactji/Edit) alongside
+	// Accept the pegged arm (Reply/Reactji/Edit) alongside
 	// Basic. The pegged replyTo is not yet surfaced through ThreadMessage —
 	// the app carries the target in its body envelope for now.
 	switch pt {
@@ -2232,10 +2232,14 @@ func extractAllSeqIDPairsFromRTThreadPage(p *rem.RTThreadPage) []seqIDPair {
 	return ret
 }
 
-// SetPushToken (SECO Stage-2a groundwork) registers or refreshes this
-// device's push token with the user's home realtime server; enabled=false
-// is the opt-out (the push relay only targets enabled tokens). The device
-// verify-key id namespaces this user's rows across their devices.
+// SetPushToken registers or refreshes this device's push token with the
+// user's home realtime server, so a push server can wake this device for
+// new messages. enabled=false is the opt-out; the row is kept so the
+// server can distinguish "opted out" from "never registered".
+//
+// The device verify-key id namespaces this user's rows across their
+// devices. It is a hint only — the row is always scoped to the
+// authenticated uid, never to a caller-supplied identity.
 func (d *Minder) SetPushToken(m MetaContext, platform string, token []byte, enabled bool) error {
 	// UserContext.Devkey lazy-loads (passphrase-backed users may not have
 	// the key materialized yet) — the raw PrivKeys getter would return a

@@ -1,12 +1,13 @@
-// SECO rt-spike: typed message probe (tasks 3.1–3.4). Spike branch only —
-// never merges. Validates, against the in-process test env:
+// Typed (pegged) message round-trip: the Reply / Reactji / Edit arm of
+// RTMsgBody. Validates, against the in-process test env:
 //
 //  1. Reactji / Edit / Reply send via the pegged wire arm (SendTyped) is
 //     ACCEPTED by the server and stored with its typ
-//  2. Cross-member decode of pegged messages works (fork decode change)
+//  2. Cross-member decode of pegged messages works
 //  3. "Delete" expressed as Edit-with-empty-body round-trips
-//  4. A Reactji send BUMPS the recipient's inbox version — the unread
-//     semantics gap to raise with Max (reactions ring the new-message bell)
+//  4. Whether a Reactji BUMPS the recipient's inbox version — i.e. whether
+//     reactions ring the new-message bell (logged, not asserted: the
+//     unread semantics are a product decision, not a wire guarantee)
 package lib
 
 import (
@@ -18,7 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRTSecoTypedMessages(t *testing.T) {
+func TestRTTypedMessages(t *testing.T) {
 	tew := testEnvBeta(t)
 	bluey := tew.NewTestUser(t) // owner
 	coco := tew.NewTestUser(t)  // ordinary member
@@ -75,10 +76,10 @@ func TestRTSecoTypedMessages(t *testing.T) {
 	verAfter, err := minderBluey.GetInboxVersion(mb, proto.RTAppID_Chat)
 	require.NoError(t, err)
 	if verAfter > verBefore {
-		t.Logf("FINDING CONFIRMED: Reactji bumped recipient inbox version %d -> %d "+
-			"(reactions ring the new-message bell — Max question #4)", verBefore, verAfter)
+		t.Logf("Reactji bumped recipient inbox version %d -> %d "+
+			"(reactions ring the new-message bell)", verBefore, verAfter)
 	} else {
-		t.Logf("Reactji did NOT bump inbox version (%d -> %d) — update findings",
+		t.Logf("Reactji did NOT bump inbox version (%d -> %d) ",
 			verBefore, verAfter)
 	}
 

@@ -1,5 +1,5 @@
-// SECO Stage-2a groundwork (rt-chat-transport task 1.3): rtSetPushToken
-// registers/refreshes the authenticated user's device push token, and
+// rtSetPushToken registers/refreshes the authenticated user's device
+// push token, and
 // enabled=false is the opt-out. Rows are scoped to the authenticated uid
 // regardless of the caller-supplied device-key namespacing hint.
 package lib
@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRTSecoSetPushToken(t *testing.T) {
+func TestRTSetPushToken(t *testing.T) {
 	tew := testEnvBeta(t)
 	bluey := tew.NewTestUser(t)
 	tew.DirectDoubleMerklePokeInTest(t)
