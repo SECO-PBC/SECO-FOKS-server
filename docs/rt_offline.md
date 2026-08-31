@@ -11,6 +11,15 @@ up after a period of being offline"), and much of it is built. This document
 specifies the remaining read-side behavior and the entire write side, which is
 currently a stub.
 
+**Scope: RT only.** This plan covers the realtime chat subsystem — thread
+reads, inbox sync, message sends, and read-marks. The team and KV subsystems
+are explicitly out of scope: sigchain and KV reads already benefit from the
+agent's local caching but have no defined staleness contract, and offline
+*writes* there (team creation, membership changes, KV puts) are a
+fundamentally different problem — sigchain links commit to current server
+state and cannot be sealed ahead of time and drained later. Nothing in this
+document changes the online-first behavior of those subsystems.
+
 ## Goals
 
 - **Offline reads**: a client with no connectivity renders its inbox and any
@@ -60,7 +69,15 @@ What exists today, verified against the code:
   or deletes that row. There is no drain loop, no retry, and successful sends
   leave the row behind as an orphan. If `RtSend` fails, the error propagates
   to the caller and the queued row is dead weight.
-- `ReadThrough` is a bare RPC with no local persistence.
+- The outbox row is mis-keyed: `Key` is the channel ID with the send time
+  (millisecond resolution) as the index, and the local DB upserts on
+  `(scope, type, key, idx)`. Two sends into one channel in the same
+  millisecond silently overwrite each other, and rows are not addressable
+  individually for deletion. Any real outbox must key rows by `msgID`.
+- `ReadThrough` is a bare RPC with no local persistence. Worse, the
+  read-mark advance that `GetThreadView` issues after rendering a page is
+  best-effort — on failure it logs a warning and drops the mark, so offline
+  reading currently loses read state entirely.
 
 **Server side — idempotency is half-built.**
 
@@ -107,6 +124,27 @@ it. True idempotency — same call, same result — is the simpler contract.
 Adding a trailing field to `RTSendRes` is wire-compatible for snowpack
 struct decoding; old clients ignore it.
 
+Implementation notes:
+
+- A unique violation **aborts the enclosing Postgres transaction**, and
+  `RetryTx2` correctly won't retry it (`pgconn.SafeToRetry` is false for
+  constraint violations). The replay lookup therefore runs *after* the failed
+  transaction rolls back, as a fresh read — it cannot be handled inline in
+  `insertMessage`'s transaction. The lookup-then-return is safe without a
+  lock: `messages_enc` rows are immutable once committed.
+- The match check compares **host, channel, and sender** against the existing
+  row. `UNIQUE(msg_id)` is global — it spans channels and virtual hosts — so
+  without the host/channel comparison, a replay ack could be minted against a
+  row the caller has no relationship to, and without the sender comparison, a
+  channel member could "successfully replay" another member's message ID and
+  treat the forged ack as their own delivery.
+- Because the constraint is global, a mismatch necessarily reveals that the
+  16-byte ID exists *somewhere*. That existence oracle is unavoidable given
+  the schema, and unexploitable in practice (IDs are random in a 2^128
+  space; an attacker can only learn IDs from channels they can already
+  read). The mismatch error must still be a bare status — no channel, host,
+  or sender detail from the existing row leaks in the response.
+
 ### D2 — Outbox lifecycle: queue → drain → ack → delete
 
 The existing `dbPutMsgToOutbox` write becomes the head of a real pipeline:
@@ -136,10 +174,12 @@ concurrently. A *failed* row is the exception: it steps aside so the rest of
 the channel isn't held hostage by one rejected message.
 
 **Restart recovery.** On start, every outbox row is either queued (drain will
-retry; replay protection makes this safe regardless of whether the original
-attempt landed) or failed (left for the user). The orphan rows today's code
-leaves behind are cleaned by the same sweep: any row whose `msgID` already
-appears in the thread cache is a completed send — delete it.
+retry) or failed (left for the user). No reconciliation against the thread
+cache is needed — or practical, since the cache is keyed by seq, not `msgID`:
+D1's replay protection means blindly re-draining a row whose original attempt
+actually landed converges to the same seq with `replay=true`, at the cost of
+one RPC. Rows written by pre-drain versions of the client (today's orphans)
+are re-sent the same way and resolve as replays.
 
 **`Send` return semantics.** Today `Send` is synchronous: RPC result or
 error. It stays synchronous when connectivity is up. When the RPC fails with
@@ -183,6 +223,11 @@ thread render must never masquerade as truth. Pending outbox messages for the
 channel are appended to thread reads (flagged as unacked) so the sender sees
 their own queued messages.
 
+The current signatures can't express this — `GetThreadBookended`'s boolean
+already means "final in the paging direction" — so the thread-read family
+moves to a small result struct (messages, final, stale, transport error)
+rather than growing more positional returns.
+
 The inbox path needs no protocol work — a failed `RtGetChangedThreads` leaves
 the persisted snapshot in place; the change is to return that snapshot with
 `stale=true` rather than propagating the error.
@@ -198,6 +243,13 @@ never an error):
 - On transport failure the mark is queued; the drain replays only the
   highest pending seq per channel (intermediate marks are subsumed).
 - On ack the pending row is deleted.
+
+The natural insertion point already exists: `GetThreadView` advances the
+read pointer after rendering a page and today drops the mark with a warning
+on failure — that fallback becomes "persist as pending" instead of a log
+line. Local unread computation must consult pending marks too, so a channel
+read offline doesn't keep showing as unread on the same device until the
+drain runs.
 
 No ordering interaction with the message outbox; the two queues are
 independent.
@@ -242,6 +294,15 @@ that classification plus the drain triggers in D2. If the platform later
 grows a real connectivity signal, it becomes one more drain trigger — nothing
 else changes.
 
+This classifier is the main feasibility risk in the plan: the RPC stack
+surfaces failures as a mix of net-level errors, TLS errors, and RPC-layer
+timeouts, and misclassifying a semantic error as transport means a poison
+message retried forever (bounded by the attempt cap), while the reverse
+means a deliverable message marked failed. The classifier must default to
+**semantic** (fail fast, surface to the user) for anything unrecognized, and
+its table should be built by enumerating the error paths in the client
+transport code rather than by pattern-matching strings.
+
 ### Retention guard (forward-compatibility note)
 
 The offline read design assumes inbox cursors never go stale, which holds
@@ -250,6 +311,37 @@ the server must also add a "cursor too old" signal on
 `RtGetChangedThreads` (e.g. a minimum-supported inbox version in the
 response) so clients fall back to a full resync instead of silently missing
 deletions. Recording the requirement here so retention work inherits it.
+
+## Security Considerations
+
+Collected here in addition to the inline notes:
+
+- **Replay ack authenticity.** The replay path is the one place the server
+  vouches "already delivered" without inserting anything; the host + channel
+  + sender comparison in D1 is what keeps that vouch scoped to the caller's
+  own message. A server that lies about a replay (wrong seq, or acking a
+  message it never stored) can lose a message — but that is exactly the trust
+  already extended to a normal `RtSendRes`, so offline mode adds no new
+  server capability.
+- **No plaintext at rest.** Outbox rows store the sealed wrapper, pending
+  read-marks store a seq — the existing rule that message plaintext never
+  hits the local DB is preserved. The failure envelope stores server error
+  strings; server-controlled text lands in the local soft DB either way via
+  cached metadata, so this adds no new class of stored content.
+- **Removed-member window.** A message sealed before a removal and drained
+  after it is readable by the removed member (regular teams, D6). This
+  matches the meaning of "sent before the removal" and is documented rather
+  than fought; ad-hoc teams, whose contract is stricter, get the re-seal.
+- **Resource bounds.** The outbox is attacker-free but not failure-free: a
+  client wedged offline must not grow state unboundedly, hence the
+  per-channel cap. Reconnect drains use per-channel serialization plus
+  jittered backoff, so a fleet reconnecting after a server outage doesn't
+  synchronize its retries into a thundering herd.
+- **Multi-device scope.** The outbox and pending read-marks are per-device
+  soft state. Another device of the same user cannot see or drain them; a
+  message queued on a lost device is lost with it. This is stated behavior,
+  not a bug — cross-device outbox sync would require server-visible pending
+  state, which is a privacy regression.
 
 ## Implementation Plan
 
@@ -274,17 +366,31 @@ eventually hook in).
 
 ### Phase 2 — Client: outbox drain (the core)
 
-1. Outbox row gains a small state envelope (queued/failed + attempt count +
-   last error) — new `lcl` struct wrapping today's `RTMsgCached`.
-2. Drain loop in `Minder`: per-channel FIFO, transport/semantic
-   classification, backoff, triggers per D2.
-3. `Send`: on transport error, leave the row queued and return
+1. New outbox row format under a **new `DataType`**: a state envelope
+   (queued/failed + attempt count + last error) wrapping today's
+   `RTMsgCached`, keyed by `msgID` with `(channel, queue time)` recoverable
+   for FIFO ordering. This fixes the same-millisecond overwrite and makes
+   rows individually deletable. Legacy `RTOutboxMsg` rows are dropped, not
+   migrated: nothing ever drained them, so each is either the orphan of an
+   acked send or a failure the caller already observed.
+2. Refactor `SendWithTestHooks` (~140 lines, monolithic) into
+   seal → queue → attempt → finalize stages, so the drain loop reuses
+   attempt/finalize instead of duplicating the RPC, cache-put, and
+   order-check logic. This is where the D3 order-check exemption lands
+   naturally: the drain path calls finalize with replay tolerance.
+3. Drain loop in `Minder`: per-channel FIFO, transport/semantic
+   classification (shared helper, see D7), backoff with jitter, triggers per
+   D2.
+4. `Send`: on transport error, leave the row queued and return
    `RTMsgQueuedError{msgID}`; on ack (fresh or replay), thread-cache put then
    outbox delete — fixing the orphan-row leak as a side effect.
-4. Startup sweep: reconcile outbox against thread cache, resume queued rows.
-5. Tests (`minder_test.go` + test hooks): kill the transport mid-send and
-   verify replay convergence; crash between ack and delete; ordering under a
-   flaky link; failed row doesn't block its channel.
+5. Startup: resume queued rows (blind re-drain; D1 makes it safe).
+6. Tests (`minder_test.go` + test hooks): kill the transport mid-send and
+   verify replay convergence; crash between ack and delete (row survives,
+   re-drain converges, exactly one cache entry); two queued sends in the same
+   millisecond both survive and both deliver; ordering under a flaky link;
+   failed row doesn't block its channel; drain never sends while a prior
+   same-channel row is in-flight.
 
 ### Phase 3 — Client: read-side degradation + read-marks
 
@@ -292,7 +398,9 @@ eventually hook in).
    pending-outbox overlay on thread views.
 2. Pending read-through persistence and replay (D5).
 3. `rt` CLI: surface staleness and queued counts (e.g. `rt inbox` marks
-   stale, `rt outbox ls` lists queued/failed).
+   stale, `rt outbox ls` lists queued/failed, `rt outbox retry`/`discard`
+   for failed rows — the manual escape hatch the default-semantic error
+   classification requires).
 
 ### Phase 4 — Ad-hoc drain path (when ad-hoc channels exist end-to-end)
 
