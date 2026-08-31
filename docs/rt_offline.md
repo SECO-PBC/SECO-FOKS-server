@@ -98,19 +98,22 @@ What exists today, verified against the code:
 
 `RtSend` becomes idempotent on `msgID`. When the insert hits the
 `UNIQUE(msg_id)` constraint, the server loads the existing row and — after
-verifying it matches the caller (same channel, same sender) — returns a
-normal `RTSendRes` carrying the original seq and insert time, plus a `replay`
-flag so clients and metrics can tell.
+verifying it matches the caller (same host, channel, and sender) — returns a
+normal `RTSendRes` carrying the original seq and insert time, **unchanged in
+shape**. No new response field: the caller that needs to know "was this a
+replay?" is the drain loop, and it already knows it is retrying; nothing else
+needs the distinction on the wire.
 
-```
-struct RTSendRes {
-    seq @0 : lib.RTMsgSeq;
-    insertTime @1 : lib.Time;
-    replay @2 : Bool;   // true if this msgID was already delivered
-}
-```
+Avoiding the wire change is deliberate. Snowpack structs encode as
+positional msgpack arrays (`codec:",toarray"` with per-field pointers), which
+makes decoding a *shorter* old array safe (missing fields import as zero) but
+leaves an *old* client decoding a server's *grown* array unproven. `RtSend`
+responses flow server→client, the risky direction, and a chat server should
+not require flag-day client upgrades. If a replay indicator ever becomes
+worth having (metrics, CLI), it ships as an `rtSendV2` method rather than a
+mutation of this response.
 
-If the existing row does *not* match the caller (different channel or
+If the existing row does *not* match the caller (different host, channel, or
 sender — either a client bug or a stray collision in a 16-byte random space),
 the server returns a new status code `RT_MSG_REPLAY_MISMATCH` rather than
 silently acking, wired through `status.snowp` and `lib/core/errors.go` in the
@@ -120,9 +123,6 @@ Rationale for returning success rather than an error on a clean replay: the
 client's question during a drain is "did my earlier attempt land?"; making the
 common answer an error forces every drain implementation to catch and rewrite
 it. True idempotency — same call, same result — is the simpler contract.
-
-Adding a trailing field to `RTSendRes` is wire-compatible for snowpack
-struct decoding; old clients ignore it.
 
 Implementation notes:
 
@@ -153,7 +153,7 @@ The existing `dbPutMsgToOutbox` write becomes the head of a real pipeline:
    outbox row (as today), keyed by channel with the send time as index.
    State advances to *queued*.
 2. **Attempt.** The drain loop issues `RtSend`. Three outcomes:
-   - **Ack** (including `replay=true`): write the message into the thread
+   - **Ack** (fresh or replayed): write the message into the thread
      cache (as `Send` does today), then delete the outbox row. Delete strictly
      after the thread-cache put, so a crash between the two re-sends and hits
      the replay path — at-least-once attempts, exactly-once delivery.
@@ -165,19 +165,33 @@ The existing `dbPutMsgToOutbox` write becomes the head of a real pipeline:
      below) but are retained for the user to inspect/discard.
 3. **Drain triggers.** On client start, on any successful RT RPC (proof of
    connectivity), on a send into any channel, and on a periodic timer with
-   exponential backoff while rows are queued.
+   exponential backoff while rows are queued. There is no standing inbox
+   poll loop today (`PollInbox` is a single long-poll call); when one lands,
+   it must back off through its own transport failures, and its first
+   success after a gap is another drain trigger.
 
 **Ordering.** Per-channel FIFO by queue time. The drain sends one message per
 channel at a time and does not advance past a row still in *queued* state —
 otherwise a flaky link reorders a conversation. Distinct channels drain
 concurrently. A *failed* row is the exception: it steps aside so the rest of
-the channel isn't held hostage by one rejected message.
+the channel isn't held hostage by one rejected message (a manual retry of a
+failed row after later messages have delivered is knowingly out of order).
+
+**No queue-jumping.** The same rule binds the synchronous path: when a
+channel has queued rows, a fresh `Send` into it must not race past them to
+the server. It enqueues behind them, returns `RTMsgQueuedError`, and kicks
+the drain — which, with connectivity restored, typically flushes the whole
+channel including the new message within the same trigger.
+
+**Caps.** When a channel's outbox is at capacity, `Send` fails fast with a
+distinct error rather than dropping the oldest or newest row silently; the
+caller decides what to shed.
 
 **Restart recovery.** On start, every outbox row is either queued (drain will
 retry) or failed (left for the user). No reconciliation against the thread
 cache is needed — or practical, since the cache is keyed by seq, not `msgID`:
 D1's replay protection means blindly re-draining a row whose original attempt
-actually landed converges to the same seq with `replay=true`, at the cost of
+actually landed converges to the same seq via the replay path, at the cost of
 one RPC. Rows written by pre-drain versions of the client (today's orphans)
 are re-sent the same way and resolve as replays.
 
@@ -221,7 +235,8 @@ Concretely, thread reads return a result carrying:
 An empty cache plus an unreachable server still returns the error — an empty
 thread render must never masquerade as truth. Pending outbox messages for the
 channel are appended to thread reads (flagged as unacked) so the sender sees
-their own queued messages.
+their own queued messages, and inbox rows for channels with queued or failed
+messages carry a pending count so list views can badge them.
 
 The current signatures can't express this — `GetThreadBookended`'s boolean
 already means "final in the paging direction" — so the thread-read family
@@ -278,6 +293,12 @@ sending: unbox with the stored gen (the sender holds it), re-box with the
 current gen, regenerate the box under the same `msgID` and metadata. `msgID`
 is assigned at queue time and never changes across re-seals, so replay
 protection is unaffected.
+
+The crypto mechanics check out for this: the message key is derived
+per-(PTK seed, app, key-type) via `KeyMgr`, so a member re-derives any
+generation they hold, and the secretbox nonce is domain-separated from the
+noncer payload — re-boxing the same metadata under the new generation's key
+reuses the nonce only across *different* keys, which is sound.
 
 Re-sealing is the only part of this design that touches message crypto, and
 it is confined to the ad-hoc drain path. Stage 1 servers don't serve ad-hoc
@@ -355,12 +376,12 @@ eventually hook in).
 1. Name the unique constraint (`messages_enc_msg_id_key`) explicitly in a
    schema patch so the error check isn't tied to an auto-generated name.
 2. In `insertMessage`, catch the `msg_id` duplicate, load the existing row,
-   verify channel + sender, return `RTSendRes{.., replay=true}` or
-   `RT_MSG_REPLAY_MISMATCH`.
+   verify host + channel + sender, and return the original seq/insert time in
+   an unchanged `RTSendRes` — or `RT_MSG_REPLAY_MISMATCH` on a failed match.
 3. New status codes `RT_MSG_REPLAY_MISMATCH` and `RT_MSG_QUEUED` (the latter
    is client-generated but lives in the shared status space) via
    `status.snowp` + `lib/core/errors.go`; regenerate proto.
-4. Tests: same `msgID` twice → same seq, `replay=true`, no second row; same
+4. Tests: same `msgID` twice → same seq and insert time, no second row; same
    `msgID` on a different channel → mismatch error; concurrent duplicate
    sends → one row, both callers get the same seq.
 
@@ -418,5 +439,5 @@ eventually hook in).
   age before a queued row is declared failed) — proposed defaults: cap 256
   rows/channel, no age limit, backoff 1s→2m with jitter. Worth maintainer
   input before hard-coding.
-- Whether `RTSendRes.replay` should also be surfaced in `rt send` CLI output
-  or kept internal.
+- Whether a replay indicator is ever worth surfacing to clients (as an
+  `rtSendV2`, per D1) or stays a server-side metric.
