@@ -1,7 +1,9 @@
 package lib
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"testing"
 	"time"
@@ -1636,4 +1638,242 @@ func TestRTSendIdempotentReplay(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 	require.Equal(t, "original", string(msgs[0].Body))
+}
+
+// rtOutboxTestRig is the shared setup for outbox tests: one user, one team,
+// one member-writable channel, plus a Minder wired for hook installation.
+type rtOutboxTestRig struct {
+	tew    *TestEnvWrapper
+	mb     librt.MetaContext
+	minder *librt.Minder
+	fqt    *proto.FQTeamParsed
+}
+
+func makeRTOutboxTestRig(t *testing.T) *rtOutboxTestRig {
+	tew := testEnvBeta(t)
+	bluey := tew.NewTestUser(t)
+	tew.DirectDoubleMerklePokeInTest(t)
+	tm := tew.makeTeamForOwner(t, bluey)
+	mb := librt.NewMetaContext(tew.NewClientMetaContextWithEracer(t, bluey))
+	minder := librt.NewMinder(mb.G().ActiveUser())
+	fqt := tm.ToFQTeamParsed(t)
+	_, err := minder.MakeChannel(mb, team.WrapNamedPtr(fqt),
+		proto.RTAppID_Chat, "foo", "the foo channel", proto.RolePairOpt{})
+	require.NoError(t, err)
+	return &rtOutboxTestRig{tew: tew, mb: mb, minder: minder, fqt: fqt}
+}
+
+func (r *rtOutboxTestRig) send(t *testing.T, body string) (*rem.RTSendRes, error) {
+	return r.minder.Send(r.mb, team.WrapNamedPtr(r.fqt), proto.RTAppID_Chat,
+		makeChannelSpecifierWithString("foo"), []byte(body))
+}
+
+// sendExpectQueued sends while the transport is (simulated) down and returns
+// the queued message's ID.
+func (r *rtOutboxTestRig) sendExpectQueued(t *testing.T, body string) proto.RTMsgID {
+	_, err := r.send(t, body)
+	var qerr core.RTMsgQueuedError
+	require.True(t, errors.As(err, &qerr), "expected RTMsgQueuedError, got %v", err)
+	return qerr.MsgID
+}
+
+func (r *rtOutboxTestRig) thread(t *testing.T, start, end int) []librt.ThreadMessage {
+	msgs, _, err := r.minder.GetThreadBookended(r.mb, team.WrapNamedPtr(r.fqt),
+		proto.RTAppID_Chat, makeChannelSpecifierWithString("foo"),
+		proto.RTMsgSeq(start), proto.RTMsgSeq(end))
+	require.NoError(t, err)
+	return msgs
+}
+
+func simTransportErr() error {
+	return core.NewConnectError("simulated outage", io.EOF)
+}
+
+// TestRTOutboxQueueAndDrain: sends attempted while the transport is down are
+// queued durably (in FIFO order, msgID-keyed so rapid sends never collide)
+// and a later drain delivers all of them in order. docs/rt_offline.md, D2.
+func TestRTOutboxQueueAndDrain(t *testing.T) {
+	r := makeRTOutboxTestRig(t)
+
+	r.minder.SetTestHooks(&librt.MinderTestHooks{
+		SendRPC: func(librt.MetaContext, rem.RTSendArg) (*rem.RTSendRes, error) {
+			return nil, simTransportErr()
+		},
+	})
+	id1 := r.sendExpectQueued(t, "first while offline")
+	id2 := r.sendExpectQueued(t, "second while offline")
+	require.NotEqual(t, id1, id2)
+
+	rows, err := r.minder.ListOutbox(r.mb)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	require.Equal(t, id1, rows[0].MsgID)
+	require.Equal(t, id2, rows[1].MsgID)
+	require.Equal(t, lcl.RTOutboxState_Queued, rows[0].State)
+	require.Equal(t, lcl.RTOutboxState_Queued, rows[1].State)
+
+	// Reconnect and drain: both deliver, in queue order.
+	r.minder.SetTestHooks(nil)
+	dres, err := r.minder.Drain(r.mb)
+	require.NoError(t, err)
+	require.NoError(t, dres.TransportErr)
+	require.Len(t, dres.Acked, 2)
+	require.Equal(t, proto.RTMsgSeq(1), dres.Acked[id1].Seq)
+	require.Equal(t, proto.RTMsgSeq(2), dres.Acked[id2].Seq)
+
+	rows, err = r.minder.ListOutbox(r.mb)
+	require.NoError(t, err)
+	require.Len(t, rows, 0)
+
+	msgs := r.thread(t, 1, 2)
+	require.Len(t, msgs, 2)
+	require.Equal(t, "first while offline", string(msgs[0].Body))
+	require.Equal(t, "second while offline", string(msgs[1].Body))
+}
+
+// TestRTOutboxLostAck: the send reaches the server but the ack is lost. The
+// row stays queued; the drain's retry resolves as an idempotent replay (D1):
+// same seq, exactly one copy in the thread, outbox emptied.
+func TestRTOutboxLostAck(t *testing.T) {
+	r := makeRTOutboxTestRig(t)
+
+	r.minder.SetTestHooks(&librt.MinderTestHooks{
+		MutateSendOutcome: func(res *rem.RTSendRes, err error) (*rem.RTSendRes, error) {
+			if err != nil {
+				return nil, err
+			}
+			return nil, simTransportErr() // the ack vanishes on the wire
+		},
+	})
+	id := r.sendExpectQueued(t, "landed but unacked")
+
+	r.minder.SetTestHooks(nil)
+	dres, err := r.minder.Drain(r.mb)
+	require.NoError(t, err)
+	require.NoError(t, dres.TransportErr)
+	require.Len(t, dres.Acked, 1)
+	require.Equal(t, proto.RTMsgSeq(1), dres.Acked[id].Seq)
+
+	rows, err := r.minder.ListOutbox(r.mb)
+	require.NoError(t, err)
+	require.Len(t, rows, 0)
+
+	msgs := r.thread(t, 1, 1)
+	require.Len(t, msgs, 1)
+	require.Equal(t, "landed but unacked", string(msgs[0].Body))
+}
+
+// TestRTOutboxNoQueueJumping: a fresh Send into a channel with queued rows
+// must not race past them (D2). With connectivity restored, the synchronous
+// send flushes the whole channel in order and returns its own ack.
+func TestRTOutboxNoQueueJumping(t *testing.T) {
+	r := makeRTOutboxTestRig(t)
+
+	r.minder.SetTestHooks(&librt.MinderTestHooks{
+		SendRPC: func(librt.MetaContext, rem.RTSendArg) (*rem.RTSendRes, error) {
+			return nil, simTransportErr()
+		},
+	})
+	r.sendExpectQueued(t, "one")
+	r.sendExpectQueued(t, "two")
+
+	r.minder.SetTestHooks(nil)
+	res, err := r.send(t, "three")
+	require.NoError(t, err)
+	require.Equal(t, proto.RTMsgSeq(3), res.Seq)
+
+	rows, err := r.minder.ListOutbox(r.mb)
+	require.NoError(t, err)
+	require.Len(t, rows, 0)
+
+	msgs := r.thread(t, 1, 3)
+	require.Len(t, msgs, 3)
+	require.Equal(t, "one", string(msgs[0].Body))
+	require.Equal(t, "two", string(msgs[1].Body))
+	require.Equal(t, "three", string(msgs[2].Body))
+}
+
+// TestRTOutboxFailedRowStepsAside: a semantically-rejected row is marked
+// Failed and doesn't hold its channel hostage; an explicit retry (the manual
+// escape hatch) delivers it later, knowingly out of order.
+func TestRTOutboxFailedRowStepsAside(t *testing.T) {
+	r := makeRTOutboxTestRig(t)
+
+	r.minder.SetTestHooks(&librt.MinderTestHooks{
+		SendRPC: func(librt.MetaContext, rem.RTSendArg) (*rem.RTSendRes, error) {
+			return nil, simTransportErr()
+		},
+	})
+	id1 := r.sendExpectQueued(t, "will be rejected")
+	id2 := r.sendExpectQueued(t, "will deliver")
+
+	// Reject only the first row semantically; the transport stays down for
+	// everything else, so the second row survives this drain queued.
+	r.minder.SetTestHooks(&librt.MinderTestHooks{
+		SendRPC: func(_ librt.MetaContext, arg rem.RTSendArg) (*rem.RTSendRes, error) {
+			if arg.Md.MsgID == id1 {
+				return nil, core.BadArgsError("simulated semantic rejection")
+			}
+			return nil, simTransportErr()
+		},
+	})
+	dres, err := r.minder.Drain(r.mb)
+	require.NoError(t, err)
+	require.Len(t, dres.Failed, 1)
+	require.Equal(t, id1, dres.Failed[0])
+
+	rows, err := r.minder.ListOutbox(r.mb)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	require.Equal(t, lcl.RTOutboxState_Failed, rows[0].State)
+	require.Equal(t, "bad arguments: simulated semantic rejection", rows[0].LastError)
+	require.Equal(t, lcl.RTOutboxState_Queued, rows[1].State)
+
+	// Reconnect: the drain delivers the queued row and skips the failed one.
+	r.minder.SetTestHooks(nil)
+	dres, err = r.minder.Drain(r.mb)
+	require.NoError(t, err)
+	require.Len(t, dres.Acked, 1)
+	require.Equal(t, proto.RTMsgSeq(1), dres.Acked[id2].Seq)
+
+	rows, err = r.minder.ListOutbox(r.mb)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, id1, rows[0].MsgID)
+
+	// Manual retry of the failed row delivers it after the younger message.
+	dres, err = r.minder.RetryOutbox(r.mb, id1)
+	require.NoError(t, err)
+	require.Equal(t, proto.RTMsgSeq(2), dres.Acked[id1].Seq)
+
+	msgs := r.thread(t, 1, 2)
+	require.Len(t, msgs, 2)
+	require.Equal(t, "will deliver", string(msgs[0].Body))
+	require.Equal(t, "will be rejected", string(msgs[1].Body))
+}
+
+// TestRTOutboxDiscard: a queued row can be dropped without sending.
+func TestRTOutboxDiscard(t *testing.T) {
+	r := makeRTOutboxTestRig(t)
+
+	r.minder.SetTestHooks(&librt.MinderTestHooks{
+		SendRPC: func(librt.MetaContext, rem.RTSendArg) (*rem.RTSendRes, error) {
+			return nil, simTransportErr()
+		},
+	})
+	id := r.sendExpectQueued(t, "never mind")
+
+	r.minder.SetTestHooks(nil)
+	err := r.minder.DiscardOutbox(r.mb, id)
+	require.NoError(t, err)
+
+	rows, err := r.minder.ListOutbox(r.mb)
+	require.NoError(t, err)
+	require.Len(t, rows, 0)
+
+	dres, err := r.minder.Drain(r.mb)
+	require.NoError(t, err)
+	require.Len(t, dres.Acked, 0)
+	msgs := r.thread(t, 1, 1)
+	require.Len(t, msgs, 0)
 }

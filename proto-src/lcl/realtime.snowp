@@ -153,6 +153,40 @@ protocol RealTime
 
 }
 
+enum RTOutboxState {
+    Queued @0;
+    Failed @1;
+}
+
+// One queued (or failed) outgoing message, stored in the local soft DB keyed
+// by its msgID. The message is stored sealed, exactly as it will be sent --
+// plaintext never hits the local DB. ord is the per-device FIFO position,
+// allocated by RTOutboxIndex.nextOrd.
+struct RTOutboxEntry {
+    msg @0 : lib.RTMsgCached;
+    state @1 : RTOutboxState;
+    attempts @2 : Uint;
+    lastError @3 : Text;      // last attempt's error; empty until one fails
+    ord @4 : Uint;
+}
+
+struct RTOutboxIndexEntry {
+    msgID @0 : lib.RTMsgID;
+    chid @1 : lib.RTChannelID;
+    ord @2 : Uint;
+    state @3 : RTOutboxState; // mirrors the entry row, for cheap per-channel counts
+}
+
+// Singleton row (per party scope) indexing the outbox entries, since the KV
+// layer can't enumerate keys within a scope (the RTInboxSyncState pattern).
+// Updated atomically with entry-row puts; an index entry whose row is missing
+// (a crash between an ack's row delete and this index update) is dropped on
+// the next drain.
+struct RTOutboxIndex {
+    entries @0 : List(RTOutboxIndexEntry);
+    nextOrd @1 : Uint;
+}
+
 struct RTChannelSetHashInput @0xc6985a2917572061 {
     fqp @0 : lib.FQParty;
     appID @1 : lib.RTAppID;

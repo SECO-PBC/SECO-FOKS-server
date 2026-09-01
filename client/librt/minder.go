@@ -63,6 +63,10 @@ type Minder struct {
 
 	msgIDCache *LRU[proto.RTMsgID, proto.RTMsgSeq]
 
+	// outboxMu serializes all mutations of the durable outbox (the entry rows
+	// and their index singleton); see outbox.go.
+	outboxMu sync.Mutex
+
 	// UID -> display-name resolutions are memoized in the GlobalContext-level
 	// libclient.UsernameLoader (shared with, e.g., ad-hoc team explore/reindex,
 	// which pre-warms it); see resolveSenderName.
@@ -79,6 +83,14 @@ type MinderTestHooks struct {
 	MutateReadRes func(*rem.RTThreadPage)
 	// MutateRecentsRes, if set, rewrites each RtGetThreadRecents response.
 	MutateRecentsRes func(*rem.RTMsgList)
+	// SendRPC, if set, replaces the rtSend RPC for both the synchronous send
+	// path and the outbox drain -- the hook point for simulating transport
+	// failures, lost acks, and replays.
+	SendRPC func(MetaContext, rem.RTSendArg) (*rem.RTSendRes, error)
+	// MutateSendOutcome, if set, rewrites the outcome of each real rtSend RPC
+	// after it completes -- e.g. discarding a genuine ack to simulate a lost
+	// reply. Ignored when SendRPC replaces the RPC entirely.
+	MutateSendOutcome func(*rem.RTSendRes, error) (*rem.RTSendRes, error)
 }
 
 // SetTestHooks installs (or, with nil, clears) test hooks on the Minder.
@@ -1066,10 +1078,6 @@ func (d *Minder) sendTyped(
 	if err != nil {
 		return nil, err
 	}
-	_, cli, err := d.clientLocal(m.Base(), d.au)
-	if err != nil {
-		return nil, err
-	}
 	mw := proto.NewRTMsgWrapperWithEncrypted(*box)
 
 	msgCached := proto.RTMsgCached{
@@ -1077,30 +1085,40 @@ func (d *Minder) sendTyped(
 		Mw: mw,
 	}
 
-	err = dbPutMsgToOutbox(
-		m,
-		d.au,
-		msgCached,
-	)
+	// Queue durably before the first network attempt: from here the message
+	// survives transport failures and crashes, and re-attempting is safe
+	// because rtSend is idempotent on msgID (docs/rt_offline.md, D1/D2).
+	hasEarlier, err := d.enqueueOutbox(m, msgCached)
 	if err != nil {
 		return nil, err
 	}
 
-	res, err := cli.RtSend(m.Ctx(), rem.RTSendArg{
-		Md:   md,
-		Mw:   mw,
-		Chid: ch.Id.Short(),
-	})
-	if err != nil {
-		return nil, err
+	if hasEarlier {
+		// No queue-jumping: earlier rows for this channel must reach the
+		// server first, so flush the channel in FIFO order -- ours is last.
+		// With connectivity up this typically delivers the whole channel,
+		// including this message, within the same call.
+		dres, derr := d.DrainChannel(m, ch.Id)
+		if derr != nil {
+			return nil, derr
+		}
+		if ack, ok := dres.Acked[md.MsgID]; ok {
+			return ack, nil
+		}
+		return nil, core.RTMsgQueuedError{MsgID: md.MsgID}
 	}
 
-	// The server assigns the insert time; record it so the cached copy matches
-	// what a server-fetched read would carry.
-	msgCached.Sit = res.InsertTime
-	msgCachedSeq := proto.RTMsgCachedWithSeq{
-		Cm:  msgCached,
-		Seq: res.Seq,
+	res, err := d.attemptSend(m, &msgCached)
+	if err != nil {
+		if core.IsTransportError(err) {
+			// The message sits durably in the outbox, to drain on reconnect.
+			_ = d.setOutboxState(m, md.MsgID, lcl.RTOutboxState_Queued, err)
+			return nil, core.RTMsgQueuedError{MsgID: md.MsgID}
+		}
+		// Semantic refusal on the synchronous path: the caller sees the error
+		// directly, so keeping a failed row would just duplicate it.
+		_ = d.removeOutbox(m, md.MsgID)
+		return nil, err
 	}
 
 	if prevSeq.IsValid() && res.Seq <= prevSeq {
@@ -1120,18 +1138,16 @@ func (d *Minder) sendTyped(
 				),
 			)
 		}
-		// The cached copy at that seq is the delivered original, already
-		// validated on ingest; keep it rather than overwriting with this
-		// attempt's re-seal.
-		return &res, nil
 	}
 
-	err = d.dbPutMsgs(m, []proto.RTMsgCachedWithSeq{msgCachedSeq})
+	// Thread-cache put, then outbox delete, strictly in that order: a crash
+	// in between re-sends and converges via the replay path.
+	err = d.finalizeAck(m, msgCached, res)
 	if err != nil {
 		return nil, err
 	}
 
-	return &res, nil
+	return res, nil
 }
 
 func fillFQParty(hostId lib.HostID, p *proto.PartyID) *proto.FQParty {

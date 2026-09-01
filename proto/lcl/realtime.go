@@ -1793,6 +1793,241 @@ func RealTimeProtocol(i RealTimeInterface) rpc.ProtocolV2 {
 	}
 }
 
+type RTOutboxState int
+
+const (
+	RTOutboxState_Queued RTOutboxState = 0
+	RTOutboxState_Failed RTOutboxState = 1
+)
+
+var RTOutboxStateMap = map[string]RTOutboxState{
+	"Queued": 0,
+	"Failed": 1,
+}
+var RTOutboxStateRevMap = map[RTOutboxState]string{
+	0: "Queued",
+	1: "Failed",
+}
+
+type RTOutboxStateInternal__ RTOutboxState
+
+func (r RTOutboxStateInternal__) Import() RTOutboxState {
+	return RTOutboxState(r)
+}
+func (r RTOutboxState) Export() *RTOutboxStateInternal__ {
+	return ((*RTOutboxStateInternal__)(&r))
+}
+
+type RTOutboxEntry struct {
+	Msg       lib.RTMsgCached
+	State     RTOutboxState
+	Attempts  uint64
+	LastError string
+	Ord       uint64
+}
+type RTOutboxEntryInternal__ struct {
+	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Msg       *lib.RTMsgCachedInternal__
+	State     *RTOutboxStateInternal__
+	Attempts  *uint64
+	LastError *string
+	Ord       *uint64
+}
+
+func (r RTOutboxEntryInternal__) Import() RTOutboxEntry {
+	return RTOutboxEntry{
+		Msg: (func(x *lib.RTMsgCachedInternal__) (ret lib.RTMsgCached) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Msg),
+		State: (func(x *RTOutboxStateInternal__) (ret RTOutboxState) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.State),
+		Attempts: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Attempts),
+		LastError: (func(x *string) (ret string) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.LastError),
+		Ord: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Ord),
+	}
+}
+func (r RTOutboxEntry) Export() *RTOutboxEntryInternal__ {
+	return &RTOutboxEntryInternal__{
+		Msg:       r.Msg.Export(),
+		State:     r.State.Export(),
+		Attempts:  &r.Attempts,
+		LastError: &r.LastError,
+		Ord:       &r.Ord,
+	}
+}
+func (r *RTOutboxEntry) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RTOutboxEntry) Decode(dec rpc.Decoder) error {
+	var tmp RTOutboxEntryInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RTOutboxEntry) Bytes() []byte { return nil }
+
+type RTOutboxIndexEntry struct {
+	MsgID lib.RTMsgID
+	Chid  lib.RTChannelID
+	Ord   uint64
+	State RTOutboxState
+}
+type RTOutboxIndexEntryInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	MsgID   *lib.RTMsgIDInternal__
+	Chid    *lib.RTChannelIDInternal__
+	Ord     *uint64
+	State   *RTOutboxStateInternal__
+}
+
+func (r RTOutboxIndexEntryInternal__) Import() RTOutboxIndexEntry {
+	return RTOutboxIndexEntry{
+		MsgID: (func(x *lib.RTMsgIDInternal__) (ret lib.RTMsgID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.MsgID),
+		Chid: (func(x *lib.RTChannelIDInternal__) (ret lib.RTChannelID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Chid),
+		Ord: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Ord),
+		State: (func(x *RTOutboxStateInternal__) (ret RTOutboxState) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.State),
+	}
+}
+func (r RTOutboxIndexEntry) Export() *RTOutboxIndexEntryInternal__ {
+	return &RTOutboxIndexEntryInternal__{
+		MsgID: r.MsgID.Export(),
+		Chid:  r.Chid.Export(),
+		Ord:   &r.Ord,
+		State: r.State.Export(),
+	}
+}
+func (r *RTOutboxIndexEntry) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RTOutboxIndexEntry) Decode(dec rpc.Decoder) error {
+	var tmp RTOutboxIndexEntryInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RTOutboxIndexEntry) Bytes() []byte { return nil }
+
+type RTOutboxIndex struct {
+	Entries []RTOutboxIndexEntry
+	NextOrd uint64
+}
+type RTOutboxIndexInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Entries *[](*RTOutboxIndexEntryInternal__)
+	NextOrd *uint64
+}
+
+func (r RTOutboxIndexInternal__) Import() RTOutboxIndex {
+	return RTOutboxIndex{
+		Entries: (func(x *[](*RTOutboxIndexEntryInternal__)) (ret []RTOutboxIndexEntry) {
+			if x == nil || len(*x) == 0 {
+				return nil
+			}
+			ret = make([]RTOutboxIndexEntry, len(*x))
+			for k, v := range *x {
+				if v == nil {
+					continue
+				}
+				ret[k] = (func(x *RTOutboxIndexEntryInternal__) (ret RTOutboxIndexEntry) {
+					if x == nil {
+						return ret
+					}
+					return x.Import()
+				})(v)
+			}
+			return ret
+		})(r.Entries),
+		NextOrd: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.NextOrd),
+	}
+}
+func (r RTOutboxIndex) Export() *RTOutboxIndexInternal__ {
+	return &RTOutboxIndexInternal__{
+		Entries: (func(x []RTOutboxIndexEntry) *[](*RTOutboxIndexEntryInternal__) {
+			if len(x) == 0 {
+				return nil
+			}
+			ret := make([](*RTOutboxIndexEntryInternal__), len(x))
+			for k, v := range x {
+				ret[k] = v.Export()
+			}
+			return &ret
+		})(r.Entries),
+		NextOrd: &r.NextOrd,
+	}
+}
+func (r *RTOutboxIndex) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RTOutboxIndex) Decode(dec rpc.Decoder) error {
+	var tmp RTOutboxIndexInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RTOutboxIndex) Bytes() []byte { return nil }
+
 type RTChannelSetHashInput struct {
 	Fqp   lib.FQParty
 	AppID lib.RTAppID
