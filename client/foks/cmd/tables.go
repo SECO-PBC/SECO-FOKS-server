@@ -750,19 +750,24 @@ func (r rtChannelRow) lessThan(other tableRow) bool {
 var _ tableRow = rtChannelRow{}
 
 type rtInboxRow struct {
-	name   string
-	tier   proto.RTChannelTier
-	team   string
-	unread uint64
-	msg    string
-	last   string
-	vers   proto.RTInboxVersion
+	name    string
+	tier    proto.RTChannelTier
+	team    string
+	unread  uint64
+	pending uint64
+	msg     string
+	last    string
+	vers    proto.RTInboxVersion
 }
 
 func (r rtInboxRow) toTableRow() table.Row {
 	unread := ""
 	if r.unread > 0 {
 		unread = fmt.Sprintf("%d", r.unread)
+	}
+	if r.pending > 0 {
+		// The viewer's own queued/failed outbox messages, awaiting delivery.
+		unread += fmt.Sprintf(" +%dq", r.pending)
 	}
 	return table.Row{
 		r.name,
@@ -809,6 +814,9 @@ func outputRTInboxTable(
 	opts outputTableOpts,
 	view lcl.RTInboxView,
 ) error {
+	if view.Stale {
+		m.G().UIs().Terminal.Printf("(offline: showing the last synced state)\n")
+	}
 	rows := make([]rtInboxRow, 0, len(view.Rows))
 	fixed := 0
 	for _, r := range view.Rows {
@@ -835,13 +843,14 @@ func outputRTInboxTable(
 			}
 		}
 		row := rtInboxRow{
-			name:   displayRTChannelName(r.Ch.Name),
-			tier:   r.Ch.Tier,
-			team:   team,
-			unread: r.NumUnread,
-			msg:    msg,
-			last:   last,
-			vers:   r.InboxVersion,
+			name:    displayRTChannelName(r.Ch.Name),
+			tier:    r.Ch.Tier,
+			team:    team,
+			unread:  r.NumUnread,
+			pending: r.NumPending,
+			msg:     msg,
+			last:    last,
+			vers:    r.InboxVersion,
 		}
 		rows = append(rows, row)
 		width := utf8.RuneCountInString(row.name) +

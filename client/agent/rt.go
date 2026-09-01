@@ -129,17 +129,119 @@ func (c *AgentConn) ClientRTInboxView(
 	if err != nil {
 		return zed, err
 	}
+	var stale bool
 	if !arg.LocalOnly {
 		_, err = minder.SyncInbox(m, arg.AppID)
 		if err != nil {
-			return zed, err
+			// Degraded inbox (docs/rt_offline.md, D4): the sync failed on
+			// transport, so render the last locally-applied snapshot, flagged
+			// stale. Anything else is a real error.
+			if !core.IsTransportError(err) {
+				return zed, err
+			}
+			stale = true
 		}
 	}
 	view, err := minder.LocalInbox(m, arg.AppID)
 	if err != nil {
 		return zed, err
 	}
+	view.Stale = stale
 	return *view, nil
+}
+
+func (c *AgentConn) outboxInit(ctx context.Context) (librt.MetaContext, *librt.Minder, error) {
+	m := librt.NewMetaContext(c.MetaContext(ctx))
+	minder, err := librt.InitUserReq(m)
+	if err != nil {
+		return m, nil, err
+	}
+	return m, minder, nil
+}
+
+func (c *AgentConn) ClientRTOutboxList(
+	ctx context.Context,
+) (
+	lcl.RTOutboxView,
+	error,
+) {
+	var zed lcl.RTOutboxView
+	m, minder, err := c.outboxInit(ctx)
+	if err != nil {
+		return zed, err
+	}
+	rows, err := minder.ListOutbox(m)
+	if err != nil {
+		return zed, err
+	}
+	for _, r := range rows {
+		zed.Rows = append(zed.Rows, lcl.RTOutboxRowView{
+			MsgID:     r.MsgID,
+			Chid:      r.Chid,
+			Ord:       r.Ord,
+			State:     r.State,
+			Attempts:  r.Attempts,
+			LastError: r.LastError,
+			SendTime:  r.SendTime,
+		})
+	}
+	return zed, nil
+}
+
+func drainResToView(res *librt.DrainResult) lcl.RTOutboxDrainRes {
+	return lcl.RTOutboxDrainRes{
+		NumAcked:  uint64(len(res.Acked)),
+		NumFailed: uint64(len(res.Failed)),
+		Offline:   res.TransportErr != nil,
+	}
+}
+
+func (c *AgentConn) ClientRTOutboxDrain(
+	ctx context.Context,
+) (
+	lcl.RTOutboxDrainRes,
+	error,
+) {
+	var zed lcl.RTOutboxDrainRes
+	m, minder, err := c.outboxInit(ctx)
+	if err != nil {
+		return zed, err
+	}
+	res, err := minder.Drain(m)
+	if err != nil {
+		return zed, err
+	}
+	return drainResToView(res), nil
+}
+
+func (c *AgentConn) ClientRTOutboxRetry(
+	ctx context.Context,
+	msgID proto.RTMsgID,
+) (
+	lcl.RTOutboxDrainRes,
+	error,
+) {
+	var zed lcl.RTOutboxDrainRes
+	m, minder, err := c.outboxInit(ctx)
+	if err != nil {
+		return zed, err
+	}
+	res, err := minder.RetryOutbox(m, msgID)
+	if err != nil {
+		return zed, err
+	}
+	return drainResToView(res), nil
+}
+
+func (c *AgentConn) ClientRTOutboxDiscard(
+	ctx context.Context,
+	msgID proto.RTMsgID,
+) error {
+	m, minder, err := c.outboxInit(ctx)
+	if err != nil {
+		return err
+	}
+	return minder.DiscardOutbox(m, msgID)
 }
 
 var _ lcl.RealTimeInterface = (*AgentConn)(nil)

@@ -43,6 +43,7 @@ enum DataType {
     RTInboxChannel @101;   // one rem.RTInboxChannel row per channel
     RTOutboxEntry @102;    // one queued/failed outgoing message, keyed by msgID
     RTOutboxIndex @103;    // singleton index of outbox entries; see librt outbox
+    RTReadThroughPending @104; // singleton set of read-marks queued while offline
 }
 
 typedef ScopeLabel = Blob;

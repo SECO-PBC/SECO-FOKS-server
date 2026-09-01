@@ -486,6 +486,12 @@ func (d *Minder) drain(
 		}(rows)
 	}
 	wg.Wait()
+
+	// Read-marks queued while offline replay on the same triggers (D5).
+	err = d.drainPendingMarks(m, only)
+	if err != nil && res.TransportErr == nil {
+		res.TransportErr = err
+	}
 	return res, nil
 }
 
@@ -562,4 +568,72 @@ func (d *Minder) RetryOutbox(
 // DiscardOutbox drops an entry without sending it.
 func (d *Minder) DiscardOutbox(m MetaContext, msgID proto.RTMsgID) error {
 	return d.removeOutbox(m, msgID)
+}
+
+// pendingMsgViews decrypts the viewer's own queued/failed outbox messages for
+// one channel into app-layer views, in queue order, with seq 0 (unassigned).
+// The sender's own name is attached directly; no team-mediated resolution is
+// needed for one's own messages.
+func (d *Minder) pendingMsgViews(
+	m MetaContext,
+	rtp *RTParty,
+	appID proto.RTAppID,
+	chid proto.RTChannelID,
+) (
+	[]lcl.RTMsgView,
+	error,
+) {
+	d.outboxMu.Lock()
+	idx, err := d.dbGetOutboxIndex(m)
+	if err != nil {
+		d.outboxMu.Unlock()
+		return nil, err
+	}
+	var entries []lcl.RTOutboxEntry
+	for _, e := range idx.Entries {
+		if e.Chid != chid {
+			continue
+		}
+		entry, err := d.dbGetOutboxEntry(m, e.MsgID)
+		if err != nil {
+			d.outboxMu.Unlock()
+			return nil, err
+		}
+		if entry == nil {
+			continue
+		}
+		entries = append(entries, *entry)
+	}
+	d.outboxMu.Unlock()
+
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0 && entries[j].Ord < entries[j-1].Ord; j-- {
+			entries[j], entries[j-1] = entries[j-1], entries[j]
+		}
+	}
+
+	selfName := d.au.Info.Username.NameUtf8
+	var ret []lcl.RTMsgView
+	for _, e := range entries {
+		body, _, err := d.openMessage(m, rtp, appID,
+			e.Msg.Md.Md, e.Msg.Mw, e.Msg.Md.Sender, e.Msg.Sit, chid)
+		if err != nil {
+			m.Warnw("pendingMsgViews", "stage", "open", "err", err)
+			continue
+		}
+		mv := lcl.RTMsgView{
+			MsgID:      e.Msg.Md.Md.MsgID,
+			PrevID:     e.Msg.Md.Md.PrevID,
+			PrevSeq:    e.Msg.Md.Md.PrevSeq,
+			Typ:        e.Msg.Md.Md.Typ,
+			SentAtTime: e.Msg.Md.Md.SendTime,
+			Body:       body,
+			SenderName: &selfName,
+		}
+		if e.Msg.Md.Sender != nil {
+			mv.Sender = &e.Msg.Md.Sender.Party
+		}
+		ret = append(ret, mv)
+	}
+	return ret, nil
 }

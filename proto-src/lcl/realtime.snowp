@@ -88,12 +88,15 @@ struct RTInboxRowView {
     snippet @9 : Option(Text);            // first line of the last message, decrypted at render;
                                           // nil if the message isn't in the local cache
     lastSender @10 : lib.NameUtf8;        // last message's sender; empty if unresolved
+    numPending @11 : Uint;                // viewer's own queued/failed outbox messages here
 }
 
 // The viewer's inbox, rendered entirely from local storage.
 struct RTInboxView {
     rows @0 : List(RTInboxRowView);       // newest bump first
     vers @1 : lib.RTInboxVersion;         // local sync cursor
+    stale @2 : Bool;                      // the pre-render sync failed on transport;
+                                          // this is the last locally-applied snapshot
 }
 
 // What a SyncInbox pass did.
@@ -119,6 +122,8 @@ struct RTMsgView {
 struct RTThreadView {
     msgs @0 : List(RTMsgView);
     atBeginning @1 : Bool; // page reached the start of the thread; no older messages
+    stale @2 : Bool;       // served (partly) from local cache; the server was unreachable
+    pending @3 : List(RTMsgView); // the viewer's own queued/failed outbox messages (seq 0)
 }
 
 protocol RealTime
@@ -151,6 +156,53 @@ protocol RealTime
         localOnly @1 : Bool     /* skip the network sync; render from disk only */
     ) -> RTInboxView;
 
+    clientRTOutboxList @5 () -> RTOutboxView;
+
+    clientRTOutboxDrain @6 () -> RTOutboxDrainRes;
+
+    clientRTOutboxRetry @7 (
+        msgID @0 : lib.RTMsgID
+    ) -> RTOutboxDrainRes;
+
+    clientRTOutboxDiscard @8 (
+        msgID @0 : lib.RTMsgID
+    );
+
+}
+
+// One outbox entry as presented to the CLI / app layer.
+struct RTOutboxRowView {
+    msgID @0 : lib.RTMsgID;
+    chid @1 : lib.RTChannelID;
+    ord @2 : Uint;
+    state @3 : RTOutboxState;
+    attempts @4 : Uint;
+    lastError @5 : Text;
+    sendTime @6 : lib.Time;
+}
+
+struct RTOutboxView {
+    rows @0 : List(RTOutboxRowView); // queue order
+}
+
+// What a drain pass did.
+struct RTOutboxDrainRes {
+    numAcked @0 : Uint;
+    numFailed @1 : Uint;   // rows marked Failed by a semantic rejection this pass
+    offline @2 : Bool;     // a transport error ended the pass; the rest stays queued
+}
+
+// Singleton row (per RTInboxScope-like party scope): read-marks that couldn't
+// reach the server, one entry per channel holding the highest locally-read
+// seq (intermediate marks are subsumed; the server pointer is monotonic and
+// ignores stale marks). Replayed by the outbox drain.
+struct RTReadThroughPendingEntry {
+    chid @0 : lib.RTChannelID;
+    seq @1 : lib.RTMsgSeq;
+}
+
+struct RTReadThroughPendingSet {
+    entries @0 : List(RTReadThroughPendingEntry);
 }
 
 enum RTOutboxState {

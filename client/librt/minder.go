@@ -91,6 +91,13 @@ type MinderTestHooks struct {
 	// after it completes -- e.g. discarding a genuine ack to simulate a lost
 	// reply. Ignored when SendRPC replaces the RPC entirely.
 	MutateSendOutcome func(*rem.RTSendRes, error) (*rem.RTSendRes, error)
+	// ReadThroughRPC, if set, replaces the rtReadThrough RPC, for simulating
+	// transport failures on the read-mark path.
+	ReadThroughRPC func(MetaContext, rem.RTReadThroughArg) error
+	// ReadsFail, if set, makes every thread-read RPC (rtGetThread,
+	// rtGetThreadRecents) fail with this error without reaching the server,
+	// for exercising the degraded (stale) read paths.
+	ReadsFail error
 }
 
 // SetTestHooks installs (or, with nil, clears) test hooks on the Minder.
@@ -835,6 +842,19 @@ func (d *Minder) sealMessage(
 	return keyMgr.SealMsgWithNonce(&msgbody, nn)
 }
 
+// ThreadReadResult is the outcome of a thread read. Stale means the server
+// was needed and unreachable, so Msgs is the locally-cached subset (holes and
+// truncated edges included) rather than fresh truth; TransportErr then holds
+// the underlying failure so callers can distinguish offline from healthy but
+// empty. An empty cache plus an unreachable server is still an error -- an
+// empty render must never masquerade as truth (docs/rt_offline.md, D4).
+type ThreadReadResult struct {
+	Msgs         []ThreadMessage
+	Final        bool // bookended: nothing more in the paging direction; paged: at thread start
+	Stale        bool
+	TransportErr error
+}
+
 // SendTestHooks lets tests perturb a send to exercise server-side validation.
 type SendTestHooks struct {
 	// EncryptRoleOverride encrypts the body at this role instead of the
@@ -864,7 +884,9 @@ func (d *Minder) Send(
 // ReadThrough advances the caller's read pointer in a channel to seq, so
 // their other devices learn the read state via the resulting inbox-version
 // bump. The pointer is monotonic server-side: a stale or repeated mark is a
-// silent no-op (and bumps nothing).
+// silent no-op (and bumps nothing). If the server is unreachable the mark is
+// persisted locally and replayed by the outbox drain (docs/rt_offline.md,
+// D5); that path returns nil, since read-marks are fire-and-forget.
 func (d *Minder) ReadThrough(
 	m MetaContext,
 	team lcl.ConfigTeam,
@@ -884,14 +906,14 @@ func (d *Minder) ReadThrough(
 	if err != nil {
 		return err
 	}
-	_, cli, err := d.clientLocal(m.Base(), d.au)
+	err = d.attemptReadThrough(m, ch.Id, seq)
 	if err != nil {
+		if core.IsTransportError(err) {
+			return d.queuePendingMark(m, ch.Id, seq)
+		}
 		return err
 	}
-	return cli.RtReadThrough(m.Ctx(), rem.RTReadThroughArg{
-		ChannelID: ch.Id,
-		Seq:       seq,
-	})
+	return d.clearPendingMark(m, ch.Id, seq)
 }
 
 // GetInboxVersion returns the caller's current global inbox version for the
@@ -1579,13 +1601,12 @@ func (d *Minder) GetThreadBookended(
 	start proto.RTMsgSeq,
 	end proto.RTMsgSeq,
 ) (
-	[]ThreadMessage,
-	bool,
+	*ThreadReadResult,
 	error,
 ) {
 	err := assertTeam(team)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	sess := newMsgSession()
@@ -1602,7 +1623,7 @@ func (d *Minder) GetThreadBookended(
 
 	irr, err := d.initReq(m, team, appID, channel)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	cachedMsgsEnc, err := dbGetMsgs(
@@ -1612,7 +1633,7 @@ func (d *Minder) GetThreadBookended(
 		end,
 	)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	cached, err := d.decodeMsgs(
@@ -1623,11 +1644,11 @@ func (d *Minder) GetThreadBookended(
 		cachedMsgsEnc,
 	)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	holes, err := findHoles(cached)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	var bookends []rem.RTThreadRangeBookends
@@ -1639,7 +1660,7 @@ func (d *Minder) GetThreadBookended(
 		// We had everything in cache! Cached messages were validated when they
 		// were first ingested, so by the trust model we don't re-verify here.
 		if len(holes) == 0 && start == cachedStart && end == cachedEnd {
-			return cached, false, nil
+			return &ThreadReadResult{Msgs: cached}, nil
 		}
 
 		if start != cachedStart {
@@ -1664,40 +1685,55 @@ func (d *Minder) GetThreadBookended(
 	}
 
 	d.serverThreadReads.Add(1)
-	page, err := irr.cli.RtGetThread(m.Ctx(), rem.RTThreadQuery{
-		ChannelID: irr.ch.Id,
-		Bookends:  bookends,
-		Seqs:      holes,
-	})
+	var page rem.RTThreadPage
+	if d.testHooks != nil && d.testHooks.ReadsFail != nil {
+		err = d.testHooks.ReadsFail
+	} else {
+		page, err = irr.cli.RtGetThread(m.Ctx(), rem.RTThreadQuery{
+			ChannelID: irr.ch.Id,
+			Bookends:  bookends,
+			Seqs:      holes,
+		})
+	}
 	if err != nil {
-		return nil, false, err
+		// Degraded read (docs/rt_offline.md, D4): the server is unreachable
+		// but the cache has part of the range -- serve it, flagged stale,
+		// holes and truncated edges included. An empty cache still errors.
+		if core.IsTransportError(err) && len(cached) > 0 {
+			return &ThreadReadResult{
+				Msgs:         cached,
+				Stale:        true,
+				TransportErr: err,
+			}, nil
+		}
+		return nil, err
 	}
 	d.hookReadRes(&page)
 
 	err = sess.loadFromServer(extractAllSeqIDPairsFromRTThreadPage(&page))
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	ret := cached
 	for _, r := range page.RangeMsgs {
 		tmp, err := d.decodeAndCacheServerMsgs(m, sess, irr, r.Lst)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		ret = merge(ret, tmp, inc)
 	}
 
 	tmp, err := d.decodeAndCacheServerMsgs(m, sess, irr, page.SeqMsgs)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	// we have to sort these messages as they come back randomly from the server.
 	// since we are going to merge them just below
 	err = sortMsgs(tmp, inc)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	ret = merge(ret, tmp, inc)
@@ -1712,7 +1748,7 @@ func (d *Minder) GetThreadBookended(
 		(inc > 0 && core.Last(ret).Seq < end) ||
 		(inc < 0 && core.Last(ret).Seq > end)
 
-	return ret, isFinal, nil
+	return &ThreadReadResult{Msgs: ret, Final: isFinal}, nil
 }
 
 // GetThreadPage fetches up to num messages, newest-first, ending just before the
@@ -1728,13 +1764,12 @@ func (d *Minder) GetThreadPage(
 	before proto.RTMsgSeq,
 	num uint,
 ) (
-	[]ThreadMessage,
-	bool,
+	*ThreadReadResult,
 	error,
 ) {
 	err := assertTeam(team)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if num == 0 {
 		num = 128
@@ -1742,12 +1777,12 @@ func (d *Minder) GetThreadPage(
 
 	// before==0: start from the live head.
 	if before == 0 {
-		msgs, err := d.GetThreadRecentMsgs(m, team, appID, channel, num)
+		res, err := d.GetThreadRecentMsgs(m, team, appID, channel, num)
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
-		atBeginning := len(msgs) == 0 || core.Last(msgs).Seq <= 1
-		return msgs, atBeginning, nil
+		res.Final = len(res.Msgs) == 0 || core.Last(res.Msgs).Seq <= 1
+		return res, nil
 	}
 
 	// Page backwards, newest-first, over the inclusive seq window [lo, hi].
@@ -1757,7 +1792,7 @@ func (d *Minder) GetThreadPage(
 	// the beginning once the window reaches seq 1.
 	hi := int(before) - 1
 	if hi < 1 {
-		return nil, true, nil
+		return &ThreadReadResult{Final: true}, nil
 	}
 	lo := hi - int(num) + 1
 	if lo < 1 {
@@ -1767,12 +1802,13 @@ func (d *Minder) GetThreadPage(
 
 	// Inclusive bookends: start=hi (newest), end=lo (oldest) ⇒ descending page.
 	// hi==lo (a single trailing message) is fine -- bookends are inclusive.
-	msgs, _, err := d.GetThreadBookended(m, team, appID, channel,
+	res, err := d.GetThreadBookended(m, team, appID, channel,
 		proto.RTMsgSeq(hi), proto.RTMsgSeq(lo))
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return msgs, atBeginning, nil
+	res.Final = atBeginning
+	return res, nil
 }
 
 // GetThreadView fetches a page (see GetThreadPage) and returns it as a decrypted,
@@ -1795,10 +1831,11 @@ func (d *Minder) GetThreadView(
 	if err != nil {
 		return nil, err
 	}
-	msgs, atBeginning, err := d.GetThreadPage(m, team, appID, channel, before, num)
+	page, err := d.GetThreadPage(m, team, appID, channel, before, num)
 	if err != nil {
 		return nil, err
 	}
+	msgs := page.Msgs
 	rtp, err := d.base.GetParty(m.Base(), team)
 	if err != nil {
 		return nil, err
@@ -1808,9 +1845,21 @@ func (d *Minder) GetThreadView(
 		return nil, err
 	}
 
-	ret := lcl.RTThreadView{AtBeginning: atBeginning}
+	ret := lcl.RTThreadView{AtBeginning: page.Final, Stale: page.Stale}
 	for i := range msgs {
 		ret.Msgs = append(ret.Msgs, threadMessageToView(&msgs[i], names))
+	}
+
+	// Overlay the viewer's own queued/failed outbox messages for this channel
+	// (seq 0, unacked), so a sender sees their pending messages in the thread
+	// (docs/rt_offline.md, D4). Best-effort, like name resolution.
+	if ch, cherr := d.resolveChannel(m, rtp, appID, channel); cherr == nil {
+		pend, perr := d.pendingMsgViews(m, rtp, appID, ch.Id)
+		if perr != nil {
+			m.Warnw("GetThreadView", "stage", "pending", "err", perr)
+		} else {
+			ret.Pending = pend
+		}
 	}
 
 	// Viewing a page implies reading it: advance the read pointer to the
@@ -1866,7 +1915,7 @@ func (d *Minder) GetThreadRecentMsgs(
 	channel lcl.RTChannelSpecifier,
 	num uint,
 ) (
-	[]ThreadMessage,
+	*ThreadReadResult,
 	error,
 ) {
 	err := assertTeam(team)
@@ -1908,15 +1957,30 @@ func (d *Minder) GetThreadRecentMsgs(
 		stopAt = cached[0].Seq
 	}
 	d.serverRecentReads.Add(1)
-	fresh, err := irr.cli.RtGetThreadRecents(
-		m.Ctx(),
-		rem.RtGetThreadRecentsArg{
-			Ch:     irr.ch.Id,
-			StopAt: stopAt,
-			Lim:    uint64(num),
-		},
-	)
+	var fresh rem.RTMsgList
+	if d.testHooks != nil && d.testHooks.ReadsFail != nil {
+		err = d.testHooks.ReadsFail
+	} else {
+		fresh, err = irr.cli.RtGetThreadRecents(
+			m.Ctx(),
+			rem.RtGetThreadRecentsArg{
+				Ch:     irr.ch.Id,
+				StopAt: stopAt,
+				Lim:    uint64(num),
+			},
+		)
+	}
 	if err != nil {
+		// Degraded read (docs/rt_offline.md, D4): serve the cached tail,
+		// flagged stale. An empty cache still errors.
+		if core.IsTransportError(err) && len(cached) > 0 {
+			end := min(int(num), len(cached))
+			return &ThreadReadResult{
+				Msgs:         cached[0:end],
+				Stale:        true,
+				TransportErr: err,
+			}, nil
+		}
 		return nil, err
 	}
 	d.hookRecentsRes(&fresh)
@@ -1935,7 +1999,7 @@ func (d *Minder) GetThreadRecentMsgs(
 
 	// All of the fresh messages fill up the window, so can just return here.
 	if len(freshPlain) >= int(num) {
-		return freshPlain, nil
+		return &ThreadReadResult{Msgs: freshPlain}, nil
 	}
 
 	// in order, but with holes
@@ -1946,18 +2010,32 @@ func (d *Minder) GetThreadRecentMsgs(
 	}
 	if len(holes) == 0 {
 		end := min(int(num), len(combined))
-		return combined[0:end], nil
+		return &ThreadReadResult{Msgs: combined[0:end]}, nil
 	}
 
 	d.serverThreadReads.Add(1)
-	fillers, err := irr.cli.RtGetThread(
-		m.Ctx(),
-		rem.RTThreadQuery{
-			ChannelID: irr.ch.Id,
-			Seqs:      holes,
-		},
-	)
+	var fillers rem.RTThreadPage
+	if d.testHooks != nil && d.testHooks.ReadsFail != nil {
+		err = d.testHooks.ReadsFail
+	} else {
+		fillers, err = irr.cli.RtGetThread(
+			m.Ctx(),
+			rem.RTThreadQuery{
+				ChannelID: irr.ch.Id,
+				Seqs:      holes,
+			},
+		)
+	}
 	if err != nil {
+		// Degraded fill: what we have, ordered but holey, flagged stale.
+		if core.IsTransportError(err) {
+			end := min(int(num), len(combined))
+			return &ThreadReadResult{
+				Msgs:         combined[0:end],
+				Stale:        true,
+				TransportErr: err,
+			}, nil
+		}
 		return nil, err
 	}
 	d.hookReadRes(&fillers)
@@ -1983,7 +2061,7 @@ func (d *Minder) GetThreadRecentMsgs(
 	ret := merge(combined, fillerPlain, inc)
 	// Trim to the requested window, matching the no-holes path above.
 	end := min(int(num), len(ret))
-	return ret[0:end], nil
+	return &ThreadReadResult{Msgs: ret[0:end]}, nil
 }
 
 func (d *Minder) decodeMsgs(

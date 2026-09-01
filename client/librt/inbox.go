@@ -193,6 +193,29 @@ func (d *Minder) LocalInbox(
 	if err != nil {
 		return nil, err
 	}
+	// Offline decorations (docs/rt_offline.md, D4/D5): pending read-marks
+	// raise the effective read pointer (a channel read offline shouldn't keep
+	// showing unread here), and channels with queued/failed outbox messages
+	// carry a pending count for badging. Both best-effort.
+	marks, err := d.dbGetPendingMarks(m)
+	if err != nil {
+		m.Warnw("LocalInbox", "stage", "pendingMarks", "err", err)
+	}
+	pendingMark := make(map[proto.RTChannelID]proto.RTMsgSeq, len(marks.Entries))
+	for _, e := range marks.Entries {
+		pendingMark[e.Chid] = e.Seq
+	}
+	d.outboxMu.Lock()
+	obIdx, err := d.dbGetOutboxIndex(m)
+	d.outboxMu.Unlock()
+	if err != nil {
+		m.Warnw("LocalInbox", "stage", "outboxIndex", "err", err)
+	}
+	numPending := make(map[proto.RTChannelID]uint64)
+	for _, e := range obIdx.Entries {
+		numPending[e.Chid]++
+	}
+
 	ret := lcl.RTInboxView{Vers: state.Vers}
 	for _, chid := range state.Channels {
 		var row rem.RTInboxChannel
@@ -207,6 +230,14 @@ func (d *Minder) LocalInbox(
 			m.Warnw("LocalInbox", "stage", "render", "chid", chid, "err", err)
 			continue
 		}
+		if pm := pendingMark[chid]; pm > rv.ReadThrough {
+			rv.ReadThrough = pm
+			rv.NumUnread = 0
+			if rv.LastSeq > pm {
+				rv.NumUnread = uint64(rv.LastSeq - pm)
+			}
+		}
+		rv.NumPending = numPending[chid]
 		ret.Rows = append(ret.Rows, *rv)
 	}
 	slices.SortFunc(ret.Rows, func(a, b lcl.RTInboxRowView) int {
