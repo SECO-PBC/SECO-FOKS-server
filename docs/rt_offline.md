@@ -344,6 +344,33 @@ means a deliverable message marked failed. The classifier must default to
 its table should be built by enumerating the error paths in the client
 transport code rather than by pattern-matching strings.
 
+### Known gap: cold-start bootstrap
+
+Everything above assumes the client can load its active user. It cannot,
+offline, from a cold start: a freshly started agent with no network fails
+`user load-me` -- and therefore every RT command, including
+`rt inbox --local-only` -- with a raw connect error, before any code in this
+document runs. The blocker is in the agent's user bootstrap, below the RT
+subsystem and outside this plan's scope.
+
+The practical consequence depends on the embedder. A long-lived process that
+loaded its user while connected (the mobile binding, or a desktop agent that
+started online) keeps working when the network drops -- that is the case
+validated end-to-end by `TestRTOfflineNoHooks`. An app *launched* with no
+connectivity gets nothing, RT included.
+
+Closing it means letting bootstrap serve a cached active user when the
+server is unreachable, with the same discipline used here: serve what is
+locally durable, flag it, and refuse to invent state that was never synced.
+Until then the scripted CLI walkthrough
+(`TestRTOfflineCLIWalkthrough`, integration-tests/cli) stays skipped, with
+the sequence it would run left in place.
+
+A related tooling gap: there is no way to drop an agent's *established* RT
+connection, and the network conditioner only fails new ones, so a warm agent
+cannot be pushed offline mid-session from the CLI. A test command that tears
+down live server connections would make that case scriptable too.
+
 ### Retention guard (forward-compatibility note)
 
 The offline read design assumes inbox cursors never go stale, which holds
