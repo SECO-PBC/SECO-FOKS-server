@@ -344,32 +344,43 @@ means a deliverable message marked failed. The classifier must default to
 its table should be built by enumerating the error paths in the client
 transport code rather than by pattern-matching strings.
 
-### Known gap: cold-start bootstrap
+### Known gap: cold-start bootstrap (half closed)
 
-Everything above assumes the client can load its active user. It cannot,
-offline, from a cold start: a freshly started agent with no network fails
-`user load-me` -- and therefore every RT command, including
-`rt inbox --local-only` -- with a raw connect error, before any code in this
-document runs. The blocker is in the agent's user bootstrap, below the RT
-subsystem and outside this plan's scope.
+Everything above assumes the client can load its active user, which
+originally required the network even from a warm disk. The user half of that
+gap is now closed, by the same verified-on-write doctrine used everywhere
+else in this design -- nothing is served from cache that was not fully
+verified when it was written, and nothing new enters without verification:
 
-The practical consequence depends on the embedder. A long-lived process that
-loaded its user while connected (the mobile binding, or a desktop agent that
-started online) keeps working when the network drops -- that is the case
-validated end-to-end by `TestRTOfflineNoHooks`. An app *launched* with no
-connectivity gets nothing, RT included.
+- the host's public zone is cached after signature verification, and the
+  probe rehydrates chain + zone when a network probe fails on transport;
+- the reg-issued client-cert chain (public material only) is cached per key,
+  so mTLS clients construct offline -- an expired chain just fails the
+  handshake, which reads as offline;
+- `PopulateWithDevkey` falls back to the merkle-verified local sigchain
+  snapshot, and PUK parcels already decrypt from their local cache with the
+  device key;
+- the chain loader no longer retries transport failures on the merkle-race
+  backoff schedule, so offline fallbacks engage immediately;
+- a user whose device lacks these caches (never completed an online load)
+  stays loaded-but-locked with the outage reported, exactly as before; and
+  the CLI's parting nag check no longer fails an otherwise-successful
+  command when the server is unreachable.
 
-Closing it means letting bootstrap serve a cached active user when the
-server is unreachable, with the same discipline used here: serve what is
-locally durable, flag it, and refuse to invent state that was never synced.
-Until then the scripted CLI walkthrough
-(`TestRTOfflineCLIWalkthrough`, integration-tests/cli) stays skipped, with
-the sequence it would run left in place.
+With that, a cold agent starts offline, unlocks its user, and serves
+user-scoped state -- the outbox included. `TestRTOfflineCLIWalkthrough`
+(integration-tests/cli) pins it end-to-end through the real CLI and agent.
 
-A related tooling gap: there is no way to drop an agent's *established* RT
-connection, and the network conditioner only fails new ones, so a warm agent
-cannot be pushed offline mid-session from the CLI. A test command that tears
-down live server connections would make that case scriptable too.
+**What remains open: team-scoped state from a cold start.** `rt send`,
+`rt read`, and the inbox render need the team loader, which still requires
+the server. The cached `TeamChainState` carries everything structural
+(members, PTK publics, boxed PTK privates), but two pieces are genuine
+upstream design questions rather than mechanical gaps: offline PTK unboxing
+needs the historical-sender information that today is rebuilt during link
+play, and the view bearer token is server-minted with no offline story. A
+WARM process that loses connectivity -- the realistic mobile shape, where
+the app loaded its teams while connected -- has full RT offline coverage
+(`TestRTOfflineNoHooks`). Both open pieces belong in the upstream proposal.
 
 ### Retention guard (forward-compatibility note)
 

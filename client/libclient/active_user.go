@@ -123,7 +123,15 @@ func (a *ActiveUserLoader) Run(m MetaContext) error {
 	switch {
 	case err == nil:
 		err = a.uc.UnlockKeys(m, a.opts)
-		if err == nil {
+		// An unlock that failed only because the server is unreachable (and
+		// this device lacks the local caches to unlock offline) must not
+		// erase the user: keep them loaded and locked, exactly as a failed
+		// probe always has. Connectivity status still reports the outage.
+		if err != nil && core.IsTransportError(err) {
+			m.Warnw("ActiveUserLoader::Run", "stage", "unlock", "err", err,
+				"note", "server unreachable; user stays loaded but locked")
+			err = nil
+		} else if err == nil {
 			// Propagate the UserContext's lockState back to the loader so that
 			// GenerateLockError() can see the actual lock state instead of the
 			// zero value (UserLockState_Unset). Without this, any caller that
@@ -417,7 +425,16 @@ func (u *UserContext) UnlockKeys(m MetaContext, opts LoadActiveUserOpts) error {
 
 	err = u.pingForSSO(m)
 	if err != nil {
-		return err
+		// Offline tolerance: the ping exists to discover an SSO lock, which
+		// only the server can assert. With the server unreachable we proceed
+		// as not-SSO-locked; that gates nothing security-relevant locally --
+		// the device key and the cached data it decrypts are already on this
+		// machine -- and the next successful ping re-imposes the lock.
+		if !core.IsTransportError(err) {
+			return err
+		}
+		m.Warnw("UnlockKeys", "stage", "pingForSSO", "err", err,
+			"note", "server unreachable; proceeding without SSO check")
 	}
 
 	// might transition to UserLockStateSSO if our ping of the user server failed with
@@ -453,6 +470,25 @@ func (u *UserContext) Reconnect(m MetaContext) error {
 
 	err := hs.Reconnect(m)
 	if err != nil {
+		// Cold start with no network: the unlock chain no longer requires
+		// the server (keys unlock from local material, the sigchain comes
+		// from the verified local snapshot, PUK parcels from the local
+		// cache), so try it before giving up. If it succeeds the user can
+		// work offline -- cached reads, durably queued writes -- and each
+		// later RPC meets its own transport error where it can degrade
+		// deliberately. A device that never completed an online load fails
+		// the unlock and keeps the original connect error.
+		if core.IsTransportError(err) {
+			uerr := u.UnlockKeys(m, LoadActiveUserOpts{})
+			if uerr == nil && u.AssertUnlocked(m.Ctx()) == nil {
+				m.Warnw("UserContext.Reconnect", "err", err,
+					"note", "server unreachable; unlocked from local state")
+				return nil
+			}
+			if uerr != nil {
+				m.Warnw("UserContext.Reconnect", "stage", "offlineUnlock", "err", uerr)
+			}
+		}
 		return err
 	}
 
@@ -489,7 +525,22 @@ func (m MetaContext) ActiveConnectedUser(
 	}
 	err := au.Reconnect(m)
 	if err != nil {
-		return nil, err
+		// Offline tolerance: losing the server must not disable work that
+		// needs no server. A user whose keys are already unlocked in this
+		// process was verified when it connected, so it stays usable for
+		// local-only paths (cached reads, durably queued writes) while the
+		// network is gone -- each caller then meets its own transport error
+		// at its own RPC, where it can degrade or queue deliberately.
+		//
+		// This deliberately does NOT cover a cold start with no network:
+		// unlocking from scratch requires a server-verified user load, and
+		// serving one from cache instead is a trust-model decision, not a
+		// connectivity one. See docs/rt_offline.md, "Known gap".
+		if !core.IsTransportError(err) || au.AssertUnlocked(m.Ctx()) != nil {
+			return nil, err
+		}
+		m.Warnw("ActiveConnectedUser", "stage", "reconnect",
+			"err", err, "note", "proceeding offline with an unlocked user")
 	}
 	if opts == nil || (!opts.AssertUnlocked && !opts.ProbeUnlocked) {
 		return au, nil

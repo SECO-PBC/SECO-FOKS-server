@@ -313,6 +313,63 @@ func LoadUser(m MetaContext, arg LoadUserArg) (*UserWrapper, error) {
 	return loader.Run(m)
 }
 
+// LoadMeFromCache builds a UserWrapper for the active user purely from the
+// locally persisted sigchain snapshot (lcl.UserSigchainState), with no
+// network. The snapshot was merkle-verified by a full loader run before it
+// was ever written (saveState runs after checkRes/playLinks), so this is the
+// same trust posture as every other verified-on-ingest cache in the client:
+// no new links enter and nothing is re-verified, the last verified state is
+// simply rehydrated. Worst case it is stale -- missing a rotation or a
+// revocation that happened after the device went offline -- which an offline
+// device could not learn about anyway; the next online LoadMe re-verifies
+// and refreshes as usual.
+//
+// Returns RowNotFoundError when no snapshot exists (a device that never
+// completed an online load has nothing verified to serve).
+func LoadMeFromCache(m MetaContext, au *UserContext) (*UserWrapper, error) {
+	if au == nil {
+		au = m.G().ActiveUser()
+	}
+	if au == nil {
+		return nil, core.NoActiveUserError{}
+	}
+	hs := au.HomeServer()
+	if hs == nil {
+		return nil, core.HomeError("no home server probe")
+	}
+	u := NewUserLoader(LoadUserArg{
+		Uid:        au.Info.Fqu.Uid,
+		LoadMode:   LoadModeSelf,
+		ActiveUser: au,
+	})
+	u.resetState()
+	err := u.checkArgs(m)
+	if err != nil {
+		return nil, err
+	}
+	// The probe object survives a failed connection; only its chain identity
+	// is needed here, never its sockets.
+	u.probe = hs
+	err = u.loadExistingUser(m)
+	if err != nil {
+		return nil, err
+	}
+	if u.existing == nil {
+		return nil, core.RowNotFoundError{}
+	}
+	return &UserWrapper{
+		prot:      u.existing,
+		hostAddr:  au.Info.HostAddr,
+		keys:      u.keys,
+		DevInfo:   u.devInfo,
+		pukGens:   u.pukGens,
+		puks:      u.puksByRole,
+		fqu:       u.fqu(),
+		Hepks:     u.hepks,
+		stalePUKs: u.stalePUKs,
+	}, nil
+}
+
 func LoadMe(m MetaContext, au *UserContext) (*UserWrapper, error) {
 	if au == nil {
 		au = m.G().ActiveUser()
@@ -527,8 +584,14 @@ func (u *UserLoader) loadUserFromServer(m MetaContext) error {
 	}
 	res, err := u.rpcLoader.LoadUserChain(m.Ctx(), arg)
 	if err != nil {
+		// A merkle race is worth retrying with backoff; an auth refusal or
+		// an unreachable server is not -- retrying a dead network just
+		// stalls the caller (and, at agent startup, the whole unlock chain)
+		// for the full backoff schedule before the offline fallbacks can
+		// run.
 		race := true
-		if core.IsAuthError(err) || core.IsPermissionError(err) {
+		if core.IsAuthError(err) || core.IsPermissionError(err) ||
+			core.IsTransportError(err) {
 			race = false
 		}
 		return core.ChainLoaderError{

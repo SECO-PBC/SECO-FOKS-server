@@ -342,7 +342,43 @@ func (p *Probe) saveHostchain(m MetaContext) error {
 	if err != nil {
 		return err
 	}
+	// The zone was verified by checkZoneSig earlier in this run; cache it so
+	// a later cold start can hydrate offline (see hydrateFromCache).
+	err = p.di.StorePublicZoneToDB(m, p.chain.HostID(), p.pz)
+	if err != nil {
+		return err
+	}
 	return nil
+}
+
+// hydrateFromCache rebuilds the probe's identity -- hostchain and public
+// zone -- from the local DB after a network probe failed on transport. Both
+// artifacts were fully verified before they were stored, so nothing is
+// re-verified here; the last verified identity is simply rehydrated, exactly
+// like the client's other verified-on-ingest caches. Worst case it is stale
+// (a key rotation or address move the offline device cannot learn about),
+// in which case connections fail and read as offline until a real probe
+// succeeds again.
+//
+// Returns true when the probe is usable afterwards.
+func (p *Probe) hydrateFromCache(m MetaContext) bool {
+	if p.chain != nil && p.pz != nil {
+		return true
+	}
+	if p.hostID == nil {
+		return false
+	}
+	ch, err := loadPrevChain(m, p.di, *p.hostID)
+	if err != nil || ch == nil {
+		return false
+	}
+	pz, err := p.di.LoadPublicZoneFromDB(m, *p.hostID)
+	if err != nil || pz == nil {
+		return false
+	}
+	p.chain = ch
+	p.pz = pz
+	return true
 }
 
 func (p *Probe) clean() {
@@ -367,6 +403,16 @@ func (p *Probe) Run(m MetaContext) error {
 
 	if err != nil {
 		m.Errorw("probe", "err", err)
+	}
+
+	// A transport failure with a locally cached, previously verified identity
+	// is survivable: hydrate and proceed offline. The failure is remembered
+	// (lastFail), so the next refresh re-probes.
+	if err != nil && core.IsTransportError(err) && p.hydrateFromCache(m) {
+		m.Warnw("probe", "err", err,
+			"note", "network unreachable; hydrated verified identity from cache")
+		p.setLastFail(err)
+		return nil
 	}
 
 	return err
