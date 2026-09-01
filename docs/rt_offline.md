@@ -92,6 +92,24 @@ What exists today, verified against the code:
   typing two messages rapidly"), which is exactly the queued-send situation.
   The only optimistic check is the client-opt-in `expectedPrevSeq`.
 
+## Relation to the original design
+
+This plan is a continuation of `chat-server-design.md`, not a fork of it: the
+offline-read behavior implements that document's stated use case for inbox
+versioning, client retries are anticipated there (`insertTime` "might be
+later than sentAtTime if retries were needed"), D3 leans on its own
+prev-pointer comment, and D6 executes its ad-hoc presend rule at drain time.
+Two things here are genuinely new rather than derived:
+
+1. **A client-side durable outbox.** The only outbox in the original design
+   is the server's `push_outbox` for notifications; a persistent client-side
+   send queue appears nowhere in it. Nothing there argues against one — it is
+   this document's addition.
+2. **Defined duplicate-send semantics.** `UNIQUE(msg_id)` exists in the
+   schema, but the behavior on conflict is unspecified (today: a raw
+   database error). D1 defines it as idempotent replay — filling a hole in
+   the original design rather than overriding a choice it made.
+
 ## Design
 
 ### D1 — Idempotent replay on the server: duplicate `msg_id` returns the original result
