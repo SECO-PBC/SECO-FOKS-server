@@ -2194,3 +2194,115 @@ func TestRTOutboxDiscardUnknownID(t *testing.T) {
 	err = r.minder.DiscardOutbox(r.mb, bogus)
 	require.Equal(t, core.RowNotFoundError{}, err)
 }
+
+// TestRTOfflineNoHooks is the end-to-end offline validation with NO test
+// hooks anywhere: the client's real network layer is put into catastrophic
+// conditions, so every connection attempt fails the way it does in airplane
+// mode -- at connect, upstream of every RPC. That is the layer the
+// hook-based tests cannot reach (they inject failures downstream of channel
+// resolution, which is why a resolution that hard-failed offline went
+// unnoticed). A fresh Minder is used for the offline leg so the connection is
+// genuinely re-established rather than reusing a warm socket, modelling an
+// app that restarts or reconnects while offline.
+func TestRTOfflineNoHooks(t *testing.T) {
+	tew := testEnvBeta(t)
+	bluey := tew.NewTestUser(t)
+	tew.DirectDoubleMerklePokeInTest(t)
+	tm := tew.makeTeamForOwner(t, bluey)
+
+	mb := librt.NewMetaContext(tew.NewClientMetaContextWithEracer(t, bluey))
+	online := librt.NewMinder(mb.G().ActiveUser())
+	fqt := tm.ToFQTeamParsed(t)
+	memberRW := proto.RolePairOpt{Read: &proto.DefaultRole, Write: &proto.DefaultRole}
+	_, err := online.MakeChannel(mb, team.WrapNamedPtr(fqt),
+		proto.RTAppID_Chat, "foo", "the foo channel", memberRW)
+	require.NoError(t, err)
+
+	spec := makeChannelSpecifierWithString("foo")
+	send := func(d *librt.Minder, body string) (*rem.RTSendRes, error) {
+		return d.Send(mb, team.WrapNamedPtr(fqt), proto.RTAppID_Chat, spec, []byte(body))
+	}
+
+	// --- online: warm the caches the offline leg must rely on ---
+	_, err = send(online, "delivered while online")
+	require.NoError(t, err)
+	res, err := online.GetThreadRecentMsgs(mb, team.WrapNamedPtr(fqt),
+		proto.RTAppID_Chat, spec, 0)
+	require.NoError(t, err)
+	require.Len(t, res.Msgs, 1)
+	require.False(t, res.Stale)
+	_, err = online.SyncInbox(mb, proto.RTAppID_Chat)
+	require.NoError(t, err)
+
+	// --- airplane mode: real connect failures, zero hooks ---
+	mb.G().SetNetworkConditioner(core.CatastrophicNetworkConditions{On: true})
+	offline := librt.NewMinder(mb.G().ActiveUser())
+
+	// A send resolves the channel from cache, seals, and queues durably.
+	_, err = send(offline, "written in airplane mode")
+	var qerr core.RTMsgQueuedError
+	require.True(t, errors.As(err, &qerr), "expected queued, got %v", err)
+
+	rows, err := offline.ListOutbox(mb)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, lcl.RTOutboxState_Queued, rows[0].State)
+
+	// A thread read serves the cache, flagged stale, and overlays the queued
+	// message so the sender still sees what they wrote.
+	view, err := offline.GetThreadView(mb, team.WrapNamedPtr(fqt),
+		proto.RTAppID_Chat, spec, 0, 0)
+	require.NoError(t, err)
+	require.True(t, view.Stale)
+	require.Len(t, view.Msgs, 1)
+	require.Equal(t, "delivered while online", string(view.Msgs[0].Body))
+	require.Len(t, view.Pending, 1)
+	require.Equal(t, "written in airplane mode", string(view.Pending[0].Msg.Body))
+	require.Equal(t, lcl.RTOutboxState_Queued, view.Pending[0].State)
+
+	// A read-mark advances locally and queues for replay.
+	err = offline.ReadThrough(mb, team.WrapNamedPtr(fqt), proto.RTAppID_Chat, spec, 1)
+	require.NoError(t, err)
+
+	// The inbox renders the last synced snapshot, flagged stale, badging the
+	// queued message.
+	inbox, err := offline.InboxView(mb, proto.RTAppID_Chat, false)
+	require.NoError(t, err)
+	require.True(t, inbox.Stale)
+	require.Len(t, inbox.Rows, 1)
+	require.Equal(t, uint64(1), inbox.Rows[0].NumPending)
+
+	// --- reconnect: a successful inbox sync is itself a drain trigger ---
+	mb.G().SetNetworkConditioner(nil)
+	reconnected := librt.NewMinder(mb.G().ActiveUser())
+	inbox, err = reconnected.InboxView(mb, proto.RTAppID_Chat, false)
+	require.NoError(t, err)
+	require.False(t, inbox.Stale)
+	require.Equal(t, uint64(0), inbox.Rows[0].NumPending)
+
+	rows, err = reconnected.ListOutbox(mb)
+	require.NoError(t, err)
+	require.Len(t, rows, 0)
+
+	// The message really landed on the server: read it back fresh, and
+	// confirm the replayed read-mark reached the server's own row.
+	fresh := librt.NewMinder(mb.G().ActiveUser())
+	res, err = fresh.GetThreadRecentMsgs(mb, team.WrapNamedPtr(fqt),
+		proto.RTAppID_Chat, spec, 0)
+	require.NoError(t, err)
+	require.False(t, res.Stale)
+	require.Len(t, res.Msgs, 2)
+	require.Equal(t, "written in airplane mode", string(res.Msgs[0].Body))
+
+	m := tew.MetaContext()
+	rtdb, err := m.Db(shared.DbTypeRealTime)
+	require.NoError(t, err)
+	defer rtdb.Release()
+	var srvReadThrough int64
+	err = rtdb.QueryRow(m.Ctx(),
+		`SELECT read_through FROM user_channels
+		 WHERE short_host_id=$1 AND uid=$2 AND app_id='chat'`,
+		m.ShortHostID(), bluey.uid.ExportToDB()).Scan(&srvReadThrough)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, srvReadThrough, int64(1))
+}
