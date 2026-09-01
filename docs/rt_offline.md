@@ -384,6 +384,13 @@ Collected here in addition to the inline notes:
 
 ## Implementation Plan
 
+Status: Phases 1-3 are built and covered by integration tests
+(`TestRTSendIdempotentReplay`, `TestRTOutbox*`, `TestRTDegradedReads`,
+`TestRTReadMarksOfflineQueueAndReplay`, `TestRTInboxPendingCount`). Phase 4
+waits on ad-hoc channels existing end-to-end; the outbox row already stores
+the sealed generation (inside the boxed wrapper), so no migration will be
+needed.
+
 Phased so each lands independently, in the staged-build spirit of
 `chat-server-design.md` (this is effectively Stage 1f, before push work in
 Stage 2a — the drain triggers are also where background-push wakeups will
