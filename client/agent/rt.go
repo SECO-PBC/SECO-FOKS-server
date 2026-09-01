@@ -124,29 +124,14 @@ func (c *AgentConn) ClientRTInboxView(
 	error,
 ) {
 	var zed lcl.RTInboxView
-	m := librt.NewMetaContext(c.MetaContext(ctx))
-	minder, err := librt.InitUserReq(m)
+	m, minder, err := c.outboxInit(ctx)
 	if err != nil {
 		return zed, err
 	}
-	var stale bool
-	if !arg.LocalOnly {
-		_, err = minder.SyncInbox(m, arg.AppID)
-		if err != nil {
-			// Degraded inbox (docs/rt_offline.md, D4): the sync failed on
-			// transport, so render the last locally-applied snapshot, flagged
-			// stale. Anything else is a real error.
-			if !core.IsTransportError(err) {
-				return zed, err
-			}
-			stale = true
-		}
-	}
-	view, err := minder.LocalInbox(m, arg.AppID)
+	view, err := minder.InboxView(m, arg.AppID, arg.LocalOnly)
 	if err != nil {
 		return zed, err
 	}
-	view.Stale = stale
 	return *view, nil
 }
 
@@ -174,17 +159,7 @@ func (c *AgentConn) ClientRTOutboxList(
 	if err != nil {
 		return zed, err
 	}
-	for _, r := range rows {
-		zed.Rows = append(zed.Rows, lcl.RTOutboxRowView{
-			MsgID:     r.MsgID,
-			Chid:      r.Chid,
-			Ord:       r.Ord,
-			State:     r.State,
-			Attempts:  r.Attempts,
-			LastError: r.LastError,
-			SendTime:  r.SendTime,
-		})
-	}
+	zed.Rows = rows
 	return zed, nil
 }
 

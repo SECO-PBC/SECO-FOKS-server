@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"encoding/hex"
 	"errors"
+	"fmt"
 
 	"github.com/foks-proj/go-foks/client/libclient"
 	"github.com/foks-proj/go-foks/lib/core"
@@ -316,9 +316,7 @@ func rtSend(m libclient.MetaContext, top *cobra.Command) {
 				if m.G().Cfg().JSONOutput() {
 					return JSONOutput(m, qerr)
 				}
-				m.G().UIs().Terminal.Printf(
-					"offline: message queued for delivery (id %x)\n",
-					qerr.MsgID[:])
+				printOfflineNotice(m, "message queued for delivery, id "+rtMsgIDString(qerr.MsgID))
 				return nil
 			}
 			if err != nil {
@@ -375,7 +373,7 @@ func rtRead(m libclient.MetaContext, top *cobra.Command) {
 func outputRTThread(m libclient.MetaContext, thread lcl.RTThreadView) error {
 	t := m.G().UIs().Terminal
 	if thread.Stale {
-		t.Printf("(offline: showing locally cached messages; may be incomplete)\n")
+		printOfflineNotice(m, "showing locally cached messages; may be incomplete")
 	}
 	for i := len(thread.Msgs) - 1; i >= 0; i-- {
 		msg := thread.Msgs[i]
@@ -391,17 +389,23 @@ func outputRTThread(m libclient.MetaContext, thread lcl.RTThreadView) error {
 		when := msg.SentAtTime.Import().Local().Format("2006-01-02 15:04:05")
 		t.Printf("#%d  %s  %s\n      %s\n", msg.Seq, when, sender, string(msg.Body))
 	}
-	// The viewer's own queued/failed messages, not yet delivered (seq
-	// unassigned); they print after the thread, where they will eventually
-	// land.
-	for _, msg := range thread.Pending {
+	// The viewer's own undelivered messages (seq unassigned); they print
+	// after the thread, where they will eventually land. A Failed message
+	// was rejected and will NOT deliver without an explicit retry -- say so
+	// rather than letting it masquerade as queued.
+	for _, pv := range thread.Pending {
+		msg := pv.Msg
 		sender := "<me>"
 		if msg.SenderName != nil {
 			sender = string(*msg.SenderName)
 		}
 		when := msg.SentAtTime.Import().Local().Format("2006-01-02 15:04:05")
-		t.Printf("#?  %s  %s  (queued, id %x)\n      %s\n",
-			when, sender, msg.MsgID[:], string(msg.Body))
+		status := "queued"
+		if pv.State == lcl.RTOutboxState_Failed {
+			status = "FAILED; run `foks rt outbox retry` or `discard`"
+		}
+		t.Printf("#?  %s  %s  (%s, id %s)\n      %s\n",
+			when, sender, status, rtMsgIDString(msg.MsgID), string(msg.Body))
 	}
 	switch {
 	case thread.AtBeginning:
@@ -449,14 +453,33 @@ func rtInbox(m libclient.MetaContext, top *cobra.Command) {
 	)
 }
 
+// printOfflineNotice is the one shared voice for offline/degraded output, so
+// wording and any future routing (stderr, --quiet) live in one place.
+func printOfflineNotice(m libclient.MetaContext, detail string) {
+	m.G().UIs().Terminal.Printf("(offline: %s)\n", detail)
+}
+
+// parseRTMsgID accepts a message id in the canonical RTID form -- the same
+// base62 codec every other RT id on this CLI uses.
 func parseRTMsgID(s string) (proto.RTMsgID, error) {
-	var ret proto.RTMsgID
-	raw, err := hex.DecodeString(s)
-	if err != nil || len(raw) != len(ret) {
-		return ret, core.BadArgsError("message id must be 32 hex characters")
+	var rtid proto.RTID
+	err := rtid.ImportFromString(s)
+	if err != nil {
+		return proto.RTMsgID{}, core.BadArgsError("bad message id")
 	}
-	copy(ret[:], raw)
-	return ret, nil
+	msgID := rtid.RTMsgID()
+	if msgID == nil {
+		return proto.RTMsgID{}, core.BadArgsError("id is not a message id")
+	}
+	return *msgID, nil
+}
+
+func rtMsgIDString(id proto.RTMsgID) string {
+	s, err := id.StringErr()
+	if err != nil {
+		return "<bad-id>"
+	}
+	return s
 }
 
 func outputRTOutboxDrainRes(m libclient.MetaContext, res lcl.RTOutboxDrainRes) error {
@@ -466,7 +489,7 @@ func outputRTOutboxDrainRes(m libclient.MetaContext, res lcl.RTOutboxDrainRes) e
 	t := m.G().UIs().Terminal
 	t.Printf("delivered %d; failed %d\n", res.NumAcked, res.NumFailed)
 	if res.Offline {
-		t.Printf("(offline: the rest stays queued and drains on reconnect)\n")
+		printOfflineNotice(m, "the rest stays queued and drains on the next trigger")
 	}
 	return nil
 }
@@ -509,12 +532,19 @@ func rtOutbox(m libclient.MetaContext, top *cobra.Command) {
 				if err != nil {
 					return err
 				}
-				state := "queued"
-				if r.State == lcl.RTOutboxState_Failed {
+				var state string
+				switch r.State {
+				case lcl.RTOutboxState_Queued:
+					state = "queued"
+				case lcl.RTOutboxState_Failed:
 					state = "FAILED"
+				default:
+					// Never mislabel an unknown state as queued.
+					state = fmt.Sprintf("state=%d", r.State)
 				}
 				when := r.SendTime.Import().Local().Format("2006-01-02 15:04:05")
-				t.Printf("%x  %s  %s  ch=%s  attempts=%d\n", r.MsgID[:], state, when, chid, r.Attempts)
+				t.Printf("%s  %s  %s  ch=%s  attempts=%d\n",
+					rtMsgIDString(r.MsgID), state, when, chid, r.Attempts)
 				if r.LastError != "" {
 					t.Printf("      last error: %s\n", r.LastError)
 				}

@@ -1,6 +1,7 @@
 package lib
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -2024,12 +2025,25 @@ func TestRTReadMarksOfflineQueueAndReplay(t *testing.T) {
 	require.Equal(t, proto.RTMsgSeq(2), row.ReadThrough)
 	require.Equal(t, uint64(1), row.NumUnread)
 
-	// Reconnect and drain: the mark replays, the server now agrees, and a
-	// fresh sync shows the same state with no pending overlay left.
+	// Reconnect and drain: the mark replays, and the SERVER's read pointer --
+	// checked directly in its database, so the local pending-mark overlay
+	// can't fake the pass -- now agrees.
 	minderBluey.SetTestHooks(nil)
 	dres, err := minderBluey.Drain(mb)
 	require.NoError(t, err)
 	require.NoError(t, dres.TransportErr)
+
+	rtdb, err := m.Db(shared.DbTypeRealTime)
+	require.NoError(t, err)
+	defer rtdb.Release()
+	var srvReadThrough int64
+	err = rtdb.QueryRow(m.Ctx(),
+		`SELECT read_through FROM user_channels
+		 WHERE short_host_id=$1 AND uid=$2 AND app_id='chat'`,
+		m.ShortHostID(), bluey.uid.ExportToDB()).Scan(&srvReadThrough)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), srvReadThrough)
+
 	_, err = minderBluey.SyncInbox(mb, proto.RTAppID_Chat)
 	require.NoError(t, err)
 	row = rowFor()
@@ -2065,9 +2079,10 @@ func TestRTInboxPendingCount(t *testing.T) {
 		proto.RTAppID_Chat, makeChannelSpecifierWithString("foo"), 0, 0)
 	require.NoError(t, err)
 	require.Len(t, tv.Pending, 2)
-	require.Equal(t, "stuck one", string(tv.Pending[0].Body))
-	require.Equal(t, "stuck two", string(tv.Pending[1].Body))
-	require.Equal(t, proto.RTMsgSeq(0), tv.Pending[0].Seq)
+	require.Equal(t, "stuck one", string(tv.Pending[0].Msg.Body))
+	require.Equal(t, "stuck two", string(tv.Pending[1].Msg.Body))
+	require.Equal(t, proto.RTMsgSeq(0), tv.Pending[0].Msg.Seq)
+	require.Equal(t, lcl.RTOutboxState_Queued, tv.Pending[0].State)
 
 	r.minder.SetTestHooks(nil)
 	dres, err := r.minder.Drain(r.mb)
@@ -2076,4 +2091,106 @@ func TestRTInboxPendingCount(t *testing.T) {
 	view, err = r.minder.LocalInbox(r.mb, proto.RTAppID_Chat)
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), view.Rows[0].NumPending)
+}
+
+// TestRTOfflineChannelResolution: with the channel-list RPC unreachable,
+// resolution falls back to the cached channel set, so the offline write path
+// actually engages in real disconnected use -- the failure mode where every
+// offline feature died at resolution, before its degraded branch could run.
+func TestRTOfflineChannelResolution(t *testing.T) {
+	r := makeRTOutboxTestRig(t)
+
+	// Warm the channel-set cache with one online send.
+	_, err := r.send(t, "warmup")
+	require.NoError(t, err)
+
+	// Fully offline: list RPC and send RPC both fail on transport. The send
+	// must still resolve the channel (from cache), seal, and queue.
+	r.minder.SetTestHooks(&librt.MinderTestHooks{
+		ListFail: simTransportErr(),
+		SendRPC: func(librt.MetaContext, rem.RTSendArg) (*rem.RTSendRes, error) {
+			return nil, simTransportErr()
+		},
+	})
+	id := r.sendExpectQueued(t, "sent from airplane mode")
+
+	// Half-restored: the list RPC still fails, but sends go through; the
+	// cached resolution plus the drain deliver the queued message.
+	r.minder.SetTestHooks(&librt.MinderTestHooks{ListFail: simTransportErr()})
+	dres, err := r.minder.Drain(r.mb)
+	require.NoError(t, err)
+	require.NoError(t, dres.TransportErr)
+	require.Equal(t, proto.RTMsgSeq(2), dres.Acked[id].Seq)
+
+	r.minder.SetTestHooks(nil)
+	msgs := r.thread(t, 1, 2)
+	require.Len(t, msgs, 2)
+	require.Equal(t, "sent from airplane mode", string(msgs[1].Body))
+}
+
+// TestRTSendCanceledStaysQueued: a canceled context mid-send is an
+// ambiguous-delivery event, not a refusal -- the row must stay queued (and
+// deliverable), never be deleted or marked Failed.
+func TestRTSendCanceledStaysQueued(t *testing.T) {
+	r := makeRTOutboxTestRig(t)
+
+	r.minder.SetTestHooks(&librt.MinderTestHooks{
+		SendRPC: func(librt.MetaContext, rem.RTSendArg) (*rem.RTSendRes, error) {
+			return nil, context.Canceled
+		},
+	})
+	id := r.sendExpectQueued(t, "interrupted")
+
+	rows, err := r.minder.ListOutbox(r.mb)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, lcl.RTOutboxState_Queued, rows[0].State)
+
+	r.minder.SetTestHooks(nil)
+	dres, err := r.minder.Drain(r.mb)
+	require.NoError(t, err)
+	require.Equal(t, proto.RTMsgSeq(1), dres.Acked[id].Seq)
+}
+
+// TestRTSemanticRejectionSurfacedBehindQueue: when a fresh Send flushes a
+// channel with queued rows and the server rejects the fresh message itself,
+// the caller gets the real error -- not a "queued for delivery" promise for a
+// message that will never auto-deliver.
+func TestRTSemanticRejectionSurfacedBehindQueue(t *testing.T) {
+	r := makeRTOutboxTestRig(t)
+
+	r.minder.SetTestHooks(&librt.MinderTestHooks{
+		SendRPC: func(librt.MetaContext, rem.RTSendArg) (*rem.RTSendRes, error) {
+			return nil, simTransportErr()
+		},
+	})
+	id1 := r.sendExpectQueued(t, "first, queued offline")
+
+	// Server now reachable but rejecting everything semantically.
+	r.minder.SetTestHooks(&librt.MinderTestHooks{
+		SendRPC: func(librt.MetaContext, rem.RTSendArg) (*rem.RTSendRes, error) {
+			return nil, core.BadArgsError("rejected")
+		},
+	})
+	_, err := r.send(t, "second, rejected live")
+	require.Equal(t, core.BadArgsError("rejected"), err)
+
+	// The rejected fresh message is gone (surfaced, like the direct path);
+	// the earlier row was marked Failed by the same flush and steps aside.
+	rows, err := r.minder.ListOutbox(r.mb)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, id1, rows[0].MsgID)
+	require.Equal(t, lcl.RTOutboxState_Failed, rows[0].State)
+}
+
+// TestRTOutboxDiscardUnknownID: discarding a msgID that names no entry is an
+// error, so a typo never reports success.
+func TestRTOutboxDiscardUnknownID(t *testing.T) {
+	r := makeRTOutboxTestRig(t)
+	var bogus proto.RTMsgID
+	err := core.RandomFill(bogus[:])
+	require.NoError(t, err)
+	err = r.minder.DiscardOutbox(r.mb, bogus)
+	require.Equal(t, core.RowNotFoundError{}, err)
 }

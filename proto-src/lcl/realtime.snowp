@@ -88,7 +88,8 @@ struct RTInboxRowView {
     snippet @9 : Option(Text);            // first line of the last message, decrypted at render;
                                           // nil if the message isn't in the local cache
     lastSender @10 : lib.NameUtf8;        // last message's sender; empty if unresolved
-    numPending @11 : Uint;                // viewer's own queued/failed outbox messages here
+    numPending @11 : Uint;                // viewer's own outbox messages queued here
+    numFailed @12 : Uint;                 // viewer's own rejected (Failed) outbox messages here
 }
 
 // The viewer's inbox, rendered entirely from local storage.
@@ -119,11 +120,20 @@ struct RTMsgView {
     senderName @9 : Option(lib.NameUtf8); // resolved by agent via user load; nil if unresolvable
 }
 
+// One of the viewer's own undelivered outbox messages, overlaid on the head
+// page of a thread view (seq 0 = unassigned). state distinguishes a message
+// awaiting delivery from one the server rejected (Failed), which will not be
+// retried without an explicit outbox retry.
+struct RTPendingMsgView {
+    msg @0 : RTMsgView;
+    state @1 : RTOutboxState;
+}
+
 struct RTThreadView {
     msgs @0 : List(RTMsgView);
     atBeginning @1 : Bool; // page reached the start of the thread; no older messages
     stale @2 : Bool;       // served (partly) from local cache; the server was unreachable
-    pending @3 : List(RTMsgView); // the viewer's own queued/failed outbox messages (seq 0)
+    pending @3 : List(RTPendingMsgView); // viewer's own undelivered messages; head page only
 }
 
 protocol RealTime

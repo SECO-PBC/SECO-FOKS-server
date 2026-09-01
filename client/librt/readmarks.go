@@ -4,9 +4,6 @@
 package librt
 
 import (
-	"errors"
-
-	"github.com/foks-proj/go-foks/client/libclient"
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
@@ -22,30 +19,35 @@ import (
 //
 // All entries live in one singleton soft-DB row under the party scope --
 // marks are one (chid, seq) pair per channel, so a single row keeps updates
-// atomic without an index.
+// atomic without an index. Mutations run under the per-user outbox lock (see
+// outbox.go), and every write compacts the set to one entry per channel, so a
+// duplicate can never survive to make clear/render semantics diverge.
 
 func (d *Minder) dbGetPendingMarks(m MetaContext) (lcl.RTReadThroughPendingSet, error) {
-	var ret lcl.RTReadThroughPendingSet
-	scope := d.outboxScope()
-	_, err := m.DbGet(&ret, libclient.DbTypeSoft, &scope,
-		lcl.DataType_RTReadThroughPending, core.EmptyKey{})
-	if errors.Is(err, core.RowNotFoundError{}) {
-		return lcl.RTReadThroughPendingSet{}, nil
-	}
-	if err != nil {
-		return ret, err
-	}
-	return ret, nil
+	return dbGetSingleton[lcl.RTReadThroughPendingSet](d, m, lcl.DataType_RTReadThroughPending)
 }
 
 func (d *Minder) dbPutPendingMarks(m MetaContext, set *lcl.RTReadThroughPendingSet) error {
-	scope := d.outboxScope()
-	return m.DbPut(libclient.DbTypeSoft, libclient.PutArg{
-		Scope: &scope,
-		Typ:   lcl.DataType_RTReadThroughPending,
-		Key:   core.EmptyKey{},
-		Val:   set,
-	})
+	return d.dbPutSingleton(m, lcl.DataType_RTReadThroughPending, set)
+}
+
+// compactMarks collapses the set to at most one entry per channel, keeping
+// the highest seq. Defense against any historical duplicate: rendering takes
+// the max and clearing acts on the canonical entry either way.
+func compactMarks(set *lcl.RTReadThroughPendingSet) {
+	seen := make(map[proto.RTChannelID]int, len(set.Entries))
+	kept := set.Entries[:0]
+	for _, e := range set.Entries {
+		if i, ok := seen[e.Chid]; ok {
+			if e.Seq > kept[i].Seq {
+				kept[i].Seq = e.Seq
+			}
+			continue
+		}
+		seen[e.Chid] = len(kept)
+		kept = append(kept, e)
+	}
+	set.Entries = kept
 }
 
 // queuePendingMark records that the viewer has read through seq in chid but
@@ -55,13 +57,15 @@ func (d *Minder) queuePendingMark(
 	chid proto.RTChannelID,
 	seq proto.RTMsgSeq,
 ) error {
-	d.outboxMu.Lock()
-	defer d.outboxMu.Unlock()
+	lk := d.outboxLock()
+	lk.Lock()
+	defer lk.Unlock()
 
 	set, err := d.dbGetPendingMarks(m)
 	if err != nil {
 		return err
 	}
+	compactMarks(&set)
 	for i := range set.Entries {
 		if set.Entries[i].Chid == chid {
 			if set.Entries[i].Seq >= seq {
@@ -78,47 +82,40 @@ func (d *Minder) queuePendingMark(
 	return d.dbPutPendingMarks(m, &set)
 }
 
-// clearPendingMark drops a channel's pending mark once the server has been
-// told about a read-through at or past it.
-func (d *Minder) clearPendingMark(
+// clearPendingMarks drops the given channels' pending marks, each up to the
+// seq the server has been told about; a mark raised concurrently past its
+// acked seq survives for the next replay. One locked read-modify-write for
+// the whole batch.
+func (d *Minder) clearPendingMarks(
 	m MetaContext,
-	chid proto.RTChannelID,
-	seq proto.RTMsgSeq,
+	acked map[proto.RTChannelID]proto.RTMsgSeq,
 ) error {
-	d.outboxMu.Lock()
-	defer d.outboxMu.Unlock()
+	if len(acked) == 0 {
+		return nil
+	}
+	lk := d.outboxLock()
+	lk.Lock()
+	defer lk.Unlock()
 
 	set, err := d.dbGetPendingMarks(m)
 	if err != nil {
 		return err
 	}
-	for i := range set.Entries {
-		if set.Entries[i].Chid == chid && set.Entries[i].Seq <= seq {
-			set.Entries = append(set.Entries[:i], set.Entries[i+1:]...)
-			return d.dbPutPendingMarks(m, &set)
-		}
-	}
-	return nil
-}
-
-// pendingMarkFor returns the pending read-mark for a channel, or 0.
-func (d *Minder) pendingMarkFor(
-	m MetaContext,
-	chid proto.RTChannelID,
-) (
-	proto.RTMsgSeq,
-	error,
-) {
-	set, err := d.dbGetPendingMarks(m)
-	if err != nil {
-		return 0, err
-	}
+	compactMarks(&set)
+	kept := set.Entries[:0]
+	changed := false
 	for _, e := range set.Entries {
-		if e.Chid == chid {
-			return e.Seq, nil
+		if seq, ok := acked[e.Chid]; ok && e.Seq <= seq {
+			changed = true
+			continue
 		}
+		kept = append(kept, e)
 	}
-	return 0, nil
+	if !changed {
+		return nil
+	}
+	set.Entries = kept
+	return d.dbPutPendingMarks(m, &set)
 }
 
 // attemptReadThrough issues the rtReadThrough RPC (or the test hook).
@@ -141,8 +138,9 @@ func (d *Minder) attemptReadThrough(
 	return cli.RtReadThrough(m.Ctx(), arg)
 }
 
-// drainPendingMarks replays queued read-marks, highest-per-channel, deleting
-// each on ack. A transport error leaves the rest for the next trigger.
+// drainPendingMarks replays queued read-marks, highest-per-channel, clearing
+// the acked ones in one batched write. A transport error leaves the rest for
+// the next trigger.
 func (d *Minder) drainPendingMarks(
 	m MetaContext,
 	only *proto.RTChannelID,
@@ -151,6 +149,9 @@ func (d *Minder) drainPendingMarks(
 	if err != nil {
 		return err
 	}
+	compactMarks(&set)
+	acked := make(map[proto.RTChannelID]proto.RTMsgSeq)
+	var replayErr error
 	for _, e := range set.Entries {
 		if only != nil && e.Chid != *only {
 			continue
@@ -158,16 +159,18 @@ func (d *Minder) drainPendingMarks(
 		err := d.attemptReadThrough(m, e.Chid, e.Seq)
 		if err != nil {
 			if core.IsTransportError(err) {
-				return err
+				replayErr = err
+				break
 			}
 			// A semantic refusal of a read-mark has nothing to retry; drop it
 			// rather than wedging the queue.
 			m.Warnw("drainPendingMarks", "chid", e.Chid, "err", err)
 		}
-		err = d.clearPendingMark(m, e.Chid, e.Seq)
-		if err != nil {
-			return err
-		}
+		acked[e.Chid] = e.Seq
 	}
-	return nil
+	err = d.clearPendingMarks(m, acked)
+	if err != nil {
+		return err
+	}
+	return replayErr
 }

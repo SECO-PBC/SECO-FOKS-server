@@ -787,6 +787,7 @@ type RTInboxRowView struct {
 	Snippet      *string
 	LastSender   lib.NameUtf8
 	NumPending   uint64
+	NumFailed    uint64
 }
 type RTInboxRowViewInternal__ struct {
 	_struct      struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -802,6 +803,7 @@ type RTInboxRowViewInternal__ struct {
 	Snippet      *string
 	LastSender   *lib.NameUtf8Internal__
 	NumPending   *uint64
+	NumFailed    *uint64
 }
 
 func (r RTInboxRowViewInternal__) Import() RTInboxRowView {
@@ -884,6 +886,12 @@ func (r RTInboxRowViewInternal__) Import() RTInboxRowView {
 			}
 			return *x
 		})(r.NumPending),
+		NumFailed: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.NumFailed),
 	}
 }
 func (r RTInboxRowView) Export() *RTInboxRowViewInternal__ {
@@ -900,6 +908,7 @@ func (r RTInboxRowView) Export() *RTInboxRowViewInternal__ {
 		Snippet:      r.Snippet,
 		LastSender:   r.LastSender.Export(),
 		NumPending:   &r.NumPending,
+		NumFailed:    &r.NumFailed,
 	}
 }
 func (r *RTInboxRowView) Encode(enc rpc.Encoder) error {
@@ -1186,18 +1195,66 @@ func (r *RTMsgView) Decode(dec rpc.Decoder) error {
 
 func (r *RTMsgView) Bytes() []byte { return nil }
 
+type RTPendingMsgView struct {
+	Msg   RTMsgView
+	State RTOutboxState
+}
+type RTPendingMsgViewInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Msg     *RTMsgViewInternal__
+	State   *RTOutboxStateInternal__
+}
+
+func (r RTPendingMsgViewInternal__) Import() RTPendingMsgView {
+	return RTPendingMsgView{
+		Msg: (func(x *RTMsgViewInternal__) (ret RTMsgView) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Msg),
+		State: (func(x *RTOutboxStateInternal__) (ret RTOutboxState) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.State),
+	}
+}
+func (r RTPendingMsgView) Export() *RTPendingMsgViewInternal__ {
+	return &RTPendingMsgViewInternal__{
+		Msg:   r.Msg.Export(),
+		State: r.State.Export(),
+	}
+}
+func (r *RTPendingMsgView) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RTPendingMsgView) Decode(dec rpc.Decoder) error {
+	var tmp RTPendingMsgViewInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RTPendingMsgView) Bytes() []byte { return nil }
+
 type RTThreadView struct {
 	Msgs        []RTMsgView
 	AtBeginning bool
 	Stale       bool
-	Pending     []RTMsgView
+	Pending     []RTPendingMsgView
 }
 type RTThreadViewInternal__ struct {
 	_struct     struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
 	Msgs        *[](*RTMsgViewInternal__)
 	AtBeginning *bool
 	Stale       *bool
-	Pending     *[](*RTMsgViewInternal__)
+	Pending     *[](*RTPendingMsgViewInternal__)
 }
 
 func (r RTThreadViewInternal__) Import() RTThreadView {
@@ -1232,16 +1289,16 @@ func (r RTThreadViewInternal__) Import() RTThreadView {
 			}
 			return *x
 		})(r.Stale),
-		Pending: (func(x *[](*RTMsgViewInternal__)) (ret []RTMsgView) {
+		Pending: (func(x *[](*RTPendingMsgViewInternal__)) (ret []RTPendingMsgView) {
 			if x == nil || len(*x) == 0 {
 				return nil
 			}
-			ret = make([]RTMsgView, len(*x))
+			ret = make([]RTPendingMsgView, len(*x))
 			for k, v := range *x {
 				if v == nil {
 					continue
 				}
-				ret[k] = (func(x *RTMsgViewInternal__) (ret RTMsgView) {
+				ret[k] = (func(x *RTPendingMsgViewInternal__) (ret RTPendingMsgView) {
 					if x == nil {
 						return ret
 					}
@@ -1266,11 +1323,11 @@ func (r RTThreadView) Export() *RTThreadViewInternal__ {
 		})(r.Msgs),
 		AtBeginning: &r.AtBeginning,
 		Stale:       &r.Stale,
-		Pending: (func(x []RTMsgView) *[](*RTMsgViewInternal__) {
+		Pending: (func(x []RTPendingMsgView) *[](*RTPendingMsgViewInternal__) {
 			if len(x) == 0 {
 				return nil
 			}
-			ret := make([](*RTMsgViewInternal__), len(x))
+			ret := make([](*RTPendingMsgViewInternal__), len(x))
 			for k, v := range x {
 				ret[k] = v.Export()
 			}

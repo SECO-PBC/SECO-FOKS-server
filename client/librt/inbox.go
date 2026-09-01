@@ -62,6 +62,49 @@ func (d *Minder) dbGetInboxSyncState(
 	return ret, nil
 }
 
+// InboxView is the one-stop inbox read: unless localOnly, it syncs from the
+// server first, degrading to the locally-persisted snapshot (flagged stale)
+// when the sync fails on transport -- with the D4 guard that a device that
+// has never synced still errors, so an empty render can't masquerade as a
+// cached truth. A successful sync is also a drain trigger (D2): it proves
+// connectivity, so any queued outbox rows and pending read-marks are flushed
+// before rendering, best-effort.
+func (d *Minder) InboxView(
+	m MetaContext,
+	appID proto.RTAppID,
+	localOnly bool,
+) (
+	*lcl.RTInboxView,
+	error,
+) {
+	var stale bool
+	var syncErr error
+	if !localOnly {
+		_, syncErr = d.SyncInbox(m, appID)
+		if syncErr != nil {
+			if !core.IsTransportError(syncErr) {
+				return nil, syncErr
+			}
+			stale = true
+		} else if d.hasOutboxWork(m) {
+			if _, err := d.Drain(m); err != nil {
+				m.Warnw("InboxView", "stage", "drain", "err", err)
+			}
+		}
+	}
+	view, err := d.LocalInbox(m, appID)
+	if err != nil {
+		return nil, err
+	}
+	view.Stale = stale
+	if stale && view.Vers == 0 && len(view.Rows) == 0 {
+		// Nothing was ever synced: there is no snapshot to show, and an
+		// empty inbox presented as one would be a lie (D4).
+		return nil, syncErr
+	}
+	return view, nil
+}
+
 // SyncInbox pages rtGetChangedThreads from the locally-stored cursor and
 // applies each page transactionally (channel rows + advanced cursor). Syncs
 // for the same (user × app) are serialized so they can't interleave. Returns
@@ -205,15 +248,9 @@ func (d *Minder) LocalInbox(
 	for _, e := range marks.Entries {
 		pendingMark[e.Chid] = e.Seq
 	}
-	d.outboxMu.Lock()
-	obIdx, err := d.dbGetOutboxIndex(m)
-	d.outboxMu.Unlock()
+	numPending, numFailed, err := d.outboxCounts(m)
 	if err != nil {
-		m.Warnw("LocalInbox", "stage", "outboxIndex", "err", err)
-	}
-	numPending := make(map[proto.RTChannelID]uint64)
-	for _, e := range obIdx.Entries {
-		numPending[e.Chid]++
+		m.Warnw("LocalInbox", "stage", "outboxCounts", "err", err)
 	}
 
 	ret := lcl.RTInboxView{Vers: state.Vers}
@@ -238,6 +275,7 @@ func (d *Minder) LocalInbox(
 			}
 		}
 		rv.NumPending = numPending[chid]
+		rv.NumFailed = numFailed[chid]
 		ret.Rows = append(ret.Rows, *rv)
 	}
 	slices.SortFunc(ret.Rows, func(a, b lcl.RTInboxRowView) int {

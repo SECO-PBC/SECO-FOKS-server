@@ -181,12 +181,14 @@ The existing `dbPutMsgToOutbox` write becomes the head of a real pipeline:
      error): mark the row *failed* with the error, stop retrying it, surface
      to the caller/UI. Failed rows block nothing behind them (see ordering
      below) but are retained for the user to inspect/discard.
-3. **Drain triggers.** On client start, on any successful RT RPC (proof of
-   connectivity), on a send into any channel, and on a periodic timer with
-   exponential backoff while rows are queued. There is no standing inbox
-   poll loop today (`PollInbox` is a single long-poll call); when one lands,
-   it must back off through its own transport failures, and its first
-   success after a gap is another drain trigger.
+3. **Drain triggers.** Implemented: a send into a channel with queued rows
+   (the no-queue-jumping flush), a successful inbox sync (proof of
+   connectivity — this covers app-start and foreground cadence, since apps
+   sync on both), and the explicit CLI drain/retry. Still future, at the app
+   layer: a periodic backoff timer and a real connectivity signal. There is
+   no standing inbox poll loop today (`PollInbox` is a single long-poll
+   call); when one lands, its first success after a gap is another drain
+   trigger.
 
 **Ordering.** Per-channel FIFO by queue time. The drain sends one message per
 channel at a time and does not advance past a row still in *queued* state —
@@ -384,7 +386,10 @@ Collected here in addition to the inline notes:
 
 ## Implementation Plan
 
-Status: Phases 1-3 are built and covered by integration tests
+Status: Phases 1-3 are built, hardened by a max-effort review pass
+(idempotent replay extended to CAS callers; per-user outbox locking;
+offline-capable channel resolution; deterministic-failure step-aside;
+state-aware pending rendering), and covered by integration tests
 (`TestRTSendIdempotentReplay`, `TestRTOutbox*`, `TestRTDegradedReads`,
 `TestRTReadMarksOfflineQueueAndReplay`, `TestRTInboxPendingCount`). Phase 4
 waits on ad-hoc channels existing end-to-end; the outbox row already stores
@@ -416,9 +421,11 @@ eventually hook in).
    (queued/failed + attempt count + last error) wrapping today's
    `RTMsgCached`, keyed by `msgID` with `(channel, queue time)` recoverable
    for FIFO ordering. This fixes the same-millisecond overwrite and makes
-   rows individually deletable. Legacy `RTOutboxMsg` rows are dropped, not
-   migrated: nothing ever drained them, so each is either the orphan of an
-   acked send or a failure the caller already observed.
+   rows individually deletable. Legacy `RTOutboxMsg` rows are ignored, not
+   migrated: nothing ever drained them (each is either the orphan of an
+   acked send or a failure the caller already observed), and their ranged
+   keying leaves no way to delete them individually — wiping soft state
+   clears them.
 2. Refactor `SendWithTestHooks` (~140 lines, monolithic) into
    seal → queue → attempt → finalize stages, so the drain loop reuses
    attempt/finalize instead of duplicating the RPC, cache-put, and

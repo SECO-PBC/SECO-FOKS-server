@@ -365,9 +365,25 @@ func (s *messageSender) run(m shared.MetaContext) (*rem.RTSendRes, error) {
 		return nil, err
 	}
 	seq := s.prevSeq + 1
-	// Optional optimistic-concurrency check from the client.
+	// Optional optimistic-concurrency check from the client. A failed CAS
+	// must still honor the idempotent-replay contract (docs/rt_offline.md,
+	// D1): if this msg_id already landed, the caller's own committed insert
+	// is what advanced prevSeq, and every retry would otherwise loop on
+	// RTRaceError -- exactly the lost-ack ambiguity replay exists to remove.
 	if s.arg.ExpectedPrevSeq.IsValid() &&
 		s.arg.ExpectedPrevSeq != s.prevSeq {
+		var exists bool
+		err := s.tx.QueryRow(
+			m.Ctx(),
+			`SELECT EXISTS(SELECT 1 FROM messages_enc WHERE msg_id=$1)`,
+			s.arg.Md.MsgID.Bytes(),
+		).Scan(&exists)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, errMsgIDReplay
+		}
 		return nil, core.RTRaceError{Which: "messages"}
 	}
 	senderNo, err := s.internSender(m)
