@@ -55,10 +55,14 @@ user hits; keep it local if it encodes how SECO deploys or what SECO builds.**
 | Change | Waiting on | Notes |
 |---|---|---|
 | parallel explore waves | **#325 landing** | 4533→1367ms. Builds on #325; racing it would conflict. |
+| RT `rtSend` idempotent on `msg_id` | **rebase onto `upstream/main` + DCO sign-off** | Server-side. `messages_enc` already has `UNIQUE(msg_id)`; a conflict surfaced as a raw pg error no client could read. First of three — see RT offline mode below. |
+| RT offline mode (client) | **the idempotency PR landing** | Durable outbox, degraded reads, offline read-marks, `rt outbox` CLI. Its drain relies on the replay semantics the first PR defines; opening both at once would review one against unmerged behaviour. |
+| RT offline cold-start bootstrap | **the offline-mode PR landing, and maxtaco's read on the loader altitude** | Serves verified local snapshots from user/team/probe loaders. Touches shared loaders, so it follows rather than leads. Two trust-model questions already answered by maxtaco (cached PTKs offline; view token not needed offline) — recorded in `SECO-UPSTREAM-rt-offline.md`. |
 
-
-Only one item is queued, and it names a real blocker. Anything else that belongs
-here should be opened instead of parked.
+Four items are queued, and each names a real blocker. The three RT rows are one
+body of work deliberately split into a landing order; the proposal text for all
+three lives in `SECO-UPSTREAM-rt-offline.md`. Anything else that belongs here
+should be opened instead of parked.
 
 ## Declined — considered, rejected, stays rejected
 
