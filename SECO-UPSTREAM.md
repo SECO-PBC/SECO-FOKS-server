@@ -55,6 +55,7 @@ user hits; keep it local if it encodes how SECO deploys or what SECO builds.**
 | Change | PR | Notes |
 |---|---|---|
 | RT `rtSend` idempotent on `msg_id` | [#345](https://github.com/foks-proj/go-foks/pull/345) | `messages_enc` already had `UNIQUE(msg_id)`; a conflict surfaced as a raw pg error no client could read. First of the three-PR RT offline series — see Queued and `SECO-UPSTREAM-rt-offline.md`. |
+| parallel explore waves | [#346](https://github.com/foks-proj/go-foks/pull/346) | 4533→1367ms, same 36 round trips overlapping 4.4x. Follow-on to #325. Carries **only** the waves commit — the RpcStats commit that shares its local branch stays local (see Declined). |
 
 The previous eight all resolved on 2026-09-01: five merged as themselves, three
 superseded by maxtaco's own PRs carrying our commits (see Upstreamed, and the
@@ -64,15 +65,13 @@ supersede-PR note in "How to use it").
 
 | Change | Waiting on | Notes |
 |---|---|---|
-| parallel explore waves | **nothing — unblocked 2026-09-01, open it** | 4533→1367ms. Its blocker (#325) merged. Per this file's own rule it should be opened rather than parked; it is listed here only until someone cuts the branch. |
 | RT offline mode (client) | **[#345](https://github.com/foks-proj/go-foks/pull/345) landing** | Durable outbox, degraded reads, offline read-marks, `rt outbox` CLI. Its drain relies on the replay semantics the first PR defines; opening both at once would review one against unmerged behaviour. |
 | RT offline cold-start bootstrap | **the offline-mode PR landing (which waits on [#345](https://github.com/foks-proj/go-foks/pull/345)), and maxtaco's read on the loader altitude** | Serves verified local snapshots from user/team/probe loaders. Touches shared loaders, so it follows rather than leads. Two trust-model questions already answered by maxtaco (cached PTKs offline; view token not needed offline) — recorded in `SECO-UPSTREAM-rt-offline.md`. |
 
-Parallel explore waves is ready to open right now — parked only until someone
-cuts the branch. The two RT rows name real blockers: with #345 open, they are
-the second and third of one body of work deliberately split into a landing
-order, and the proposal text for all three lives in
-`SECO-UPSTREAM-rt-offline.md`.
+Both remaining rows name real blockers: with #345 open, they are the second and
+third of one body of work deliberately split into a landing order, and the
+proposal text for all three lives in `SECO-UPSTREAM-rt-offline.md`. Nothing here
+is merely parked.
 
 ## Declined — considered, rejected, stays rejected
 
