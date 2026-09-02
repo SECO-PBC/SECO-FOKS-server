@@ -52,24 +52,27 @@ user hits; keep it local if it encodes how SECO deploys or what SECO builds.**
 
 ## Proposed — open upstream
 
-**Nothing open.** All eight proposals resolved on 2026-09-01: five merged as
-themselves, three superseded by maxtaco's own PRs carrying our commits (see
-Upstreamed, and the supersede-PR note in "How to use it"). The next thing to
-open is the RT series in Queued.
+| Change | PR | Notes |
+|---|---|---|
+| RT `rtSend` idempotent on `msg_id` | [#345](https://github.com/foks-proj/go-foks/pull/345) | `messages_enc` already had `UNIQUE(msg_id)`; a conflict surfaced as a raw pg error no client could read. First of the three-PR RT offline series — see Queued and `SECO-UPSTREAM-rt-offline.md`. |
+
+The previous eight all resolved on 2026-09-01: five merged as themselves, three
+superseded by maxtaco's own PRs carrying our commits (see Upstreamed, and the
+supersede-PR note in "How to use it").
 
 ## Queued — decided yes, not yet opened
 
 | Change | Waiting on | Notes |
 |---|---|---|
 | parallel explore waves | **nothing — unblocked 2026-09-01, open it** | 4533→1367ms. Its blocker (#325) merged. Per this file's own rule it should be opened rather than parked; it is listed here only until someone cuts the branch. |
-| RT `rtSend` idempotent on `msg_id` | **push + open** | Branch `upstream-pr/rt-send-idempotency` is cut off `upstream/main` (`d39371c`), one signed-off commit, RT suite green on the upstream base. Body: PR 1 section of `SECO-UPSTREAM-rt-offline.md`. |
-| RT offline mode (client) | **the idempotency PR landing** | Durable outbox, degraded reads, offline read-marks, `rt outbox` CLI. Its drain relies on the replay semantics the first PR defines; opening both at once would review one against unmerged behaviour. |
-| RT offline cold-start bootstrap | **the offline-mode PR landing, and maxtaco's read on the loader altitude** | Serves verified local snapshots from user/team/probe loaders. Touches shared loaders, so it follows rather than leads. Two trust-model questions already answered by maxtaco (cached PTKs offline; view token not needed offline) — recorded in `SECO-UPSTREAM-rt-offline.md`. |
+| RT offline mode (client) | **[#345](https://github.com/foks-proj/go-foks/pull/345) landing** | Durable outbox, degraded reads, offline read-marks, `rt outbox` CLI. Its drain relies on the replay semantics the first PR defines; opening both at once would review one against unmerged behaviour. |
+| RT offline cold-start bootstrap | **the offline-mode PR landing (which waits on [#345](https://github.com/foks-proj/go-foks/pull/345)), and maxtaco's read on the loader altitude** | Serves verified local snapshots from user/team/probe loaders. Touches shared loaders, so it follows rather than leads. Two trust-model questions already answered by maxtaco (cached PTKs offline; view token not needed offline) — recorded in `SECO-UPSTREAM-rt-offline.md`. |
 
-Two of these are ready to open right now (parallel explore waves; RT PR 1) —
-they are parked only until someone pushes. The two RT rows below them name real
-blockers: they are one body of work deliberately split into a landing order,
-and the proposal text for all three lives in `SECO-UPSTREAM-rt-offline.md`.
+Parallel explore waves is ready to open right now — parked only until someone
+cuts the branch. The two RT rows name real blockers: with #345 open, they are
+the second and third of one body of work deliberately split into a landing
+order, and the proposal text for all three lives in
+`SECO-UPSTREAM-rt-offline.md`.
 
 ## Declined — considered, rejected, stays rejected
 
