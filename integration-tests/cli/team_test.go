@@ -174,6 +174,7 @@ func TestCreateInviteSequence(t *testing.T) {
 		proto.NewRoleWithMember(-1),
 		roster.Members[2].DstRole,
 	)
+
 }
 
 func TestCreateAdmitLoad(t *testing.T) {
@@ -240,13 +241,24 @@ func TestCreateAdmitLoad(t *testing.T) {
 	merklePoke(t)
 	hostId, err := team.Fqp.Host.StringErr()
 	require.NoError(t, err)
-	z.runCmdToJSON(t, &ros, "team", "ls", teamName+"@"+hostId)
-	require.Equal(t, 3, len(ros.Members))
 
-	require.Equal(t, xUser.Fqu.ToFQParty(), ros.Members[0].Mem.Fqp)
-	require.Equal(t, yUser.Fqu.ToFQParty(), ros.Members[1].Mem.Fqp)
-	require.Equal(t, zUser.Fqu.ToFQParty(), ros.Members[2].Mem.Fqp)
+	// Cross-host roster listing: z (vhost 1, admitted at m/0 -- at the member
+	// load floor) lists the team on vhost 0. z's own row takes the
+	// username-cache path (z is local to z's loader but on a different host
+	// than the team), which used to stamp the row with the team's hostname
+	// instead of z's. List twice so the second pass renders from a warm
+	// username cache.
+	for i := range 2 {
+		z.runCmdToJSON(t, &ros, "team", "ls", teamName+"@"+hostId)
+		require.Equal(t, 3, len(ros.Members), "iteration %d", i)
 
+		require.Equal(t, xUser.Fqu.ToFQParty(), ros.Members[0].Mem.Fqp)
+		require.Equal(t, yUser.Fqu.ToFQParty(), ros.Members[1].Mem.Fqp)
+		require.Equal(t, zUser.Fqu.ToFQParty(), ros.Members[2].Mem.Fqp)
+
+		require.Equal(t, zUser.State.Username.B.NameUtf8, ros.Members[2].Mem.Name, "iteration %d", i)
+		require.Equal(t, zUser.Hostname, ros.Members[2].Mem.Host, "iteration %d", i)
+	}
 }
 
 // We start with:
@@ -620,8 +632,24 @@ func TestTeamChangeMembershipClosedViewership(t *testing.T) {
 	ystat := y.status(t)
 	yusername := ystat.Users[0].Info.Username.NameUtf8
 
+	// y touches the team's KV store, which mints and caches a team VO bearer
+	// token pinned to y's current team_members row. Each role change below
+	// supersedes that row, killing the cached token; the ops after each
+	// change verify the client re-mints transparently (PR #324) instead of
+	// failing with "team bearer token is stale" until the cache ages out.
+	// y reads rather than writes while at m/4, which lacks KV write
+	// permission; the VO token is presented either way.
+	x.runCmd(t, nil, "kv", "put", "-p", "-t", teamName, "/stale/one", "pre-change")
+	dat := y.runCmdToBytes(t, "kv", "get", "-t", teamName, "/stale/one")
+	require.Equal(t, "pre-change", string(dat))
+
 	x.runCmd(t, nil, "team", "change-roles", teamName, yusername.String()+"->a")
 	merklePoke(t)
+
+	// Stale token #1: y's read re-mints; and as admin, y can now write too.
+	dat = y.runCmdToBytes(t, "kv", "get", "-t", teamName, "/stale/one")
+	require.Equal(t, "pre-change", string(dat))
+	y.runCmd(t, nil, "kv", "put", "-t", teamName, "/stale/two", "post-change")
 
 	yuid, err := ystat.Users[0].Info.Fqu.Uid.StringErr()
 	require.NoError(t, err)
@@ -630,6 +658,10 @@ func TestTeamChangeMembershipClosedViewership(t *testing.T) {
 	// specify the source role
 	x.runCmd(t, nil, "team", "change-roles", teamName, yuid+"/o->m/0")
 	merklePoke(t)
+
+	// Stale token #2: the second role change kills the re-minted token too.
+	dat = y.runCmdToBytes(t, "kv", "get", "-t", teamName, "/stale/two")
+	require.Equal(t, "post-change", string(dat))
 
 	// Issue #314: remove y from the team, then let y re-accept the same
 	// invite. The insert into local_joinreqs used to hit the "one join
