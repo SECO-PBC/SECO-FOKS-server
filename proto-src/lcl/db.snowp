@@ -46,6 +46,7 @@ enum DataType {
     RTReadThroughPending @104; // singleton set of read-marks queued while offline
     HostPublicZone @105;   // verified public zone cached per host, for offline starts
     UserCertChain @106;    // issued client-cert chain cached per (user, key), for offline starts
+    TeamNameLookup @107;   // FQTeamString -> FQTeam; offline name resolution (see TeamMinder)
 }
 
 // The client-cert chain the reg server issued for one of the user's keys

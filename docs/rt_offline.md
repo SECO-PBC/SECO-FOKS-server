@@ -344,7 +344,7 @@ means a deliverable message marked failed. The classifier must default to
 its table should be built by enumerating the error paths in the client
 transport code rather than by pattern-matching strings.
 
-### Known gap: cold-start bootstrap (half closed)
+### Cold-start bootstrap (closed)
 
 Everything above assumes the client can load its active user, which
 originally required the network even from a warm disk. The user half of that
@@ -371,16 +371,37 @@ With that, a cold agent starts offline, unlocks its user, and serves
 user-scoped state -- the outbox included. `TestRTOfflineCLIWalkthrough`
 (integration-tests/cli) pins it end-to-end through the real CLI and agent.
 
-**What remains open: team-scoped state from a cold start.** `rt send`,
-`rt read`, and the inbox render need the team loader, which still requires
-the server. The cached `TeamChainState` carries everything structural
-(members, PTK publics, boxed PTK privates), but two pieces are genuine
-upstream design questions rather than mechanical gaps: offline PTK unboxing
-needs the historical-sender information that today is rebuilt during link
-play, and the view bearer token is server-minted with no offline story. A
-WARM process that loses connectivity -- the realistic mobile shape, where
-the app loaded its teams while connected -- has full RT offline coverage
-(`TestRTOfflineNoHooks`). Both open pieces belong in the upstream proposal.
+**Team-scoped state from a cold start is closed too**, on two upstream
+rulings obtained before building (record them in the proposal):
+
+1. *Cached PTKs may be used offline without replaying links.* The snapshot
+   (`lcl.TeamChainState`) was fully verified before it was written -- and it
+   already persists the historical-sender records the unboxing checks need
+   -- so rehydrating keyring + roster + sender history from it carries the
+   verification forward; the next online load re-verifies as usual. Worst
+   case it is stale (a rotation or removal during the offline window), which
+   matches the semantics of a message sent just before that change.
+2. *The view bearer token is not needed offline.* It exists to gate server
+   resources; a token-less wrapper is correct for local-only work, and any
+   server operation attempted with one meets its own transport error at its
+   own RPC.
+
+Mechanically: `LoadTeamFromCache` rehydrates a wrapper from the snapshot
+(keyring, roster, historical senders; no token, no roster details), unboxing
+the cached PTK parcels with the caller's PUKs against the snapshot's
+post-roster; `TeamLoader.Run` falls back to it on transport failure, and the
+minder builds a direct team record when offline exploration is impossible.
+Name resolution survives cold starts through a persisted name -> team index
+(`TeamNameLookup`), written through on every exploration and team load. The
+PUK minder gained the same snapshot fallback as `PopulateWithDevkey`, since
+parcel decryption is what opens the team keys.
+
+With all of that, the full arc runs from a cold offline start through the
+real CLI and agent -- resolve by name, seal with cached PTKs, queue, stale
+reads with the pending overlay, stale inbox with its badge, survive another
+offline restart, reconnect, drain, server-confirmed delivery --
+pinned by `TestRTOfflineCLIWalkthrough` (integration-tests/cli); the
+warm-process case keeps its own coverage in `TestRTOfflineNoHooks`.
 
 ### Retention guard (forward-compatibility note)
 

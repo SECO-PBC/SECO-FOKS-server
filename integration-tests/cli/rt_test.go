@@ -655,28 +655,24 @@ func TestRTUnreadableChannelHiddenFromInbox(t *testing.T) {
 	require.Equal(t, core.RTChannelExistsError{}, err)
 }
 
-// TestRTOfflineCLIWalkthrough is the scripted manual CLI pass: real `foks`
-// command tree, real agent, real server, with the agent's network genuinely
-// killed (--test-kill-network) for the offline leg.
+// TestRTOfflineCLIWalkthrough is the scripted manual CLI pass: the exact
+// command sequence a person would type, through the real `foks` command tree
+// against a real agent and server, with the agent's network genuinely killed
+// (--test-kill-network) for the offline leg.
 //
-// What the offline (cold-start) leg proves after the bootstrap fixes: the
-// agent starts and binds its socket with no network; the active user unlocks
-// from local material (cached sigchain snapshot, cached PUK parcels, cached
-// client-cert chain, hydrated host identity); and user-scoped RT commands --
-// `rt outbox ls` here -- work against the durable outbox.
-//
-// What it deliberately does NOT yet cover: team-scoped commands (`rt send`,
-// `rt read`, `rt inbox`) from a COLD offline start. Those need the team
-// loader to hydrate from its cached chain state, which is an upstream design
-// question (offline PTK unboxing needs the historical-sender info that today
-// is rebuilt during link play; view bearer tokens are server-minted). See
-// docs/rt_offline.md, "Known gap". A WARM process that loses the network --
-// the realistic mobile shape -- has full RT offline coverage in
-// TestRTOfflineNoHooks (integration-tests/lib).
+// The offline leg is a COLD START with zero connectivity: the agent binds its
+// socket, the active user unlocks from local material (cached sigchain
+// snapshot, PUK parcels, client-cert chain, hydrated host identity), the team
+// resolves by name from the persisted index and comes up from its verified
+// snapshot (cached PTKs, no view token -- both per upstream's ruling that the
+// snapshot's verification carries and the token only gates server
+// resources), and the full RT offline arc runs: send queues durably, reads
+// serve the cache flagged stale with the queued message overlaid, the inbox
+// renders its last synced state with the pending badge.
 //
 // The restart legs double as persistence proof: the queued message survives
 // an agent restart and drains on the next inbox sync once connectivity is
-// back.
+// back, ending with a server-confirmed sequence number.
 func TestRTOfflineCLIWalkthrough(t *testing.T) {
 	bob := makeBobAndHisAgent(t)
 	b := bob.agent
@@ -708,28 +704,59 @@ func TestRTOfflineCLIWalkthrough(t *testing.T) {
 	b.runCmd(t, nil, "rt", "inbox")
 	require.Contains(t, out("rt", "outbox", "ls"), "outbox is empty")
 
-	// Queue a message by tearing the transport at the RT layer is not
-	// possible from the CLI (no live-connection kill command), so seed the
-	// outbox for the restart-persistence checks via a send that the server
-	// never sees: kill the network first.
-
 	// --- reopened in airplane mode (cold start, zero connectivity) ---
 	restartAgent(true)
 
-	// The agent came up (runCmdToBytes would fail otherwise) and the user
-	// unlocked offline: the outbox is readable, and still empty.
-	t.Logf("DIAG key list err: %v", b.runCmdErr(nil, "key", "ls"))
+	// User-scoped state serves: the outbox is readable, and still empty.
 	require.Contains(t, out("rt", "outbox", "ls"), "outbox is empty")
 
-	// --- back online: prove the offline restart broke nothing ---
-	restartAgent(false)
-	b.runCmd(t, nil, "rt", "send", "-t", tm, "--channel", "foo", "sent after offline restart")
+	// `rt send` resolves the team and channel from verified local state,
+	// seals with the cached PTK, and reports the message queued rather than
+	// failing (runCmdToBytes asserts a clean exit).
+	sendOut := out("rt", "send", "-t", tm, "--channel", "foo", "written offline")
+	require.Contains(t, sendOut, "offline")
+	require.Contains(t, sendOut, "queued for delivery")
 
+	lsOut := out("rt", "outbox", "ls")
+	require.Contains(t, lsOut, "queued")
+	require.NotContains(t, lsOut, "FAILED")
+	require.NotContains(t, lsOut, "outbox is empty")
+
+	// `rt read` serves the cache, flags it, and overlays the queued message.
+	readOut := out("rt", "read", "-t", tm, "--channel", "foo")
+	require.Contains(t, readOut, "offline")
+	require.Contains(t, readOut, "sent while online")
+	require.Contains(t, readOut, "written offline")
+	require.Contains(t, readOut, "queued")
+
+	// `rt inbox` renders the last synced state, flagged, with the pending
+	// badge on the channel's row.
+	inboxOut := out("rt", "inbox")
+	require.Contains(t, inboxOut, "offline")
+	require.Contains(t, inboxOut, "showing the last synced state")
+	require.Contains(t, inboxOut, "+1q")
+
+	// The queued message survives yet another offline restart.
+	restartAgent(true)
+	lsOut = out("rt", "outbox", "ls")
+	require.Contains(t, lsOut, "queued")
+
+	// --- back online ---
+	restartAgent(false)
+
+	// A plain `rt inbox` is enough: the successful sync drains the outbox.
+	inboxOut = out("rt", "inbox")
+	require.NotContains(t, inboxOut, "offline")
+	require.NotContains(t, inboxOut, "+1q")
+	require.Contains(t, out("rt", "outbox", "ls"), "outbox is empty")
+
+	// The message really delivered: it has a server-assigned sequence
+	// number, and the thread shows nothing queued.
 	var thread lcl.RTThreadView
 	b.runCmdToJSON(t, &thread, "rt", "read", "-t", tm, "--channel", "foo")
 	require.Len(t, thread.Msgs, 2)
 	require.False(t, thread.Stale)
 	require.Len(t, thread.Pending, 0)
-	require.Equal(t, "sent after offline restart", string(thread.Msgs[0].Body))
+	require.Equal(t, "written offline", string(thread.Msgs[0].Body))
 	require.Equal(t, proto.RTMsgSeq(2), thread.Msgs[0].Seq)
 }

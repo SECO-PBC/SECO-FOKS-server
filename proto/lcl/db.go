@@ -85,6 +85,7 @@ const (
 	DataType_RTReadThroughPending DataType = 104
 	DataType_HostPublicZone       DataType = 105
 	DataType_UserCertChain        DataType = 106
+	DataType_TeamNameLookup       DataType = 107
 )
 
 var DataTypeMap = map[string]DataType{
@@ -124,6 +125,7 @@ var DataTypeMap = map[string]DataType{
 	"RTReadThroughPending": 104,
 	"HostPublicZone":       105,
 	"UserCertChain":        106,
+	"TeamNameLookup":       107,
 }
 var DataTypeRevMap = map[DataType]string{
 	0:   "None",
@@ -162,6 +164,7 @@ var DataTypeRevMap = map[DataType]string{
 	104: "RTReadThroughPending",
 	105: "HostPublicZone",
 	106: "UserCertChain",
+	107: "TeamNameLookup",
 }
 
 type DataTypeInternal__ DataType

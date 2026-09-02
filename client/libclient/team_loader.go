@@ -591,10 +591,84 @@ func (l *TeamLoader) Run(m MetaContext) (*TeamWrapper, error) {
 	}
 	err = l.BaseChainLoader.runMany(m, l.runOnce, l.resetState)
 	if err != nil {
+		// Offline fallback: with the server unreachable, serve the last
+		// verified snapshot instead of nothing. Upstream-approved semantics:
+		// cached PTKs (and the historical-sender info persisted with them)
+		// are usable offline without replaying links -- the snapshot was
+		// fully verified before it was written, and the next online load
+		// re-verifies as usual; the view bearer token exists to gate server
+		// resources, so a token-less wrapper is correct for local-only work
+		// (any server operation attempted with it meets its own transport
+		// error at its own RPC). A team never loaded online has no snapshot
+		// and keeps the original connect error.
+		if core.IsTransportError(err) && l.au != nil {
+			tw, cerr := LoadTeamFromCache(m, l.au, l.Arg)
+			if cerr == nil {
+				m.Warnw("TeamLoader.Run", "err", err,
+					"note", "server unreachable; serving verified team snapshot")
+				return tw, nil
+			}
+			m.Warnw("TeamLoader.Run", "stage", "cacheFallback", "err", cerr)
+		}
 		return nil, err
 	}
 	w := l.WrappedRes()
 	return w, nil
+}
+
+// LoadTeamFromCache builds a TeamWrapper purely from the locally persisted
+// team snapshot (lcl.TeamChainState), with no network. The snapshot was
+// merkle-verified by a full loader run before it was ever written (saveState
+// runs at the end of runOnce), so this is the same trust posture as
+// LoadMeFromCache: nothing is re-verified, the last verified state -- PTK
+// keyring, roster, historical senders -- is simply rehydrated. The wrapper
+// carries no view bearer token (server-minted, and only needed for server
+// resources) and no roster details (built during link play; member lookups
+// go through the snapshot's member list instead).
+//
+// Returns RowNotFoundError when no snapshot exists.
+func LoadTeamFromCache(
+	m MetaContext,
+	au *UserContext,
+	arg LoadTeamArg,
+) (
+	*TeamWrapper,
+	error,
+) {
+	l := NewTeamLoader(au, arg)
+	defer l.finish()
+	l.resetState()
+	err := l.checkArg(m)
+	if err != nil {
+		return nil, err
+	}
+	// Only the probe's chain identity is needed (hostname for display);
+	// probes hydrate from their cached public zone when the network is
+	// gone, so this works offline for any previously-probed host.
+	err = l.connectHost(m)
+	if err != nil {
+		return nil, err
+	}
+	err = l.loadExistingTeam(m)
+	if err != nil {
+		return nil, err
+	}
+	if l.existing == nil {
+		return nil, core.RowNotFoundError{}
+	}
+	// The snapshot's member list is the last verified post-roster (saveState
+	// exports rosterPost), so it serves as the roster for unboxing: opening
+	// the cached PTK parcels with the caller's PUKs, verified against the
+	// snapshot's historical-sender records -- the upstream-approved use of
+	// the verified cache.
+	l.rosterPost = l.rosterPre
+	if l.Arg.Keys != nil && l.rosterPost != nil {
+		err = l.runUnbox(m)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return l.WrappedRes(), nil
 }
 
 func NewTeamLoader(au *UserContext, arg LoadTeamArg) *TeamLoader {

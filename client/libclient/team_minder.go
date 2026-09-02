@@ -363,7 +363,28 @@ func (t *TeamMinder) getTeamWithRefresh(
 	if tr == nil && opts != nil && opts.Refresh {
 		err := t.ExploreAndIndex(m, opts)
 		if err != nil {
-			return nil, err
+			// Offline: exploration is a server-driven BFS, but a directly
+			// addressed team can still come up from its verified local
+			// snapshot (the loader run under directLoadTeam falls back to
+			// it). A team with no snapshot keeps the original error.
+			if !core.IsTransportError(err) {
+				return nil, err
+			}
+			tr2, cerr := t.directLoadTeam(m, fqt)
+			if cerr != nil {
+				m.Warnw("getTeamWithRefresh", "stage", "offlineDirect",
+					"err", cerr)
+				return nil, err
+			}
+			m.Warnw("getTeamWithRefresh", "err", err,
+				"note", "server unreachable; team served from verified snapshot")
+			t.indexMu.Lock()
+			if t.loadedTeams == nil {
+				t.loadedTeams = make(map[proto.FQTeam]*TeamRecord)
+			}
+			t.loadedTeams[fqt] = tr2
+			t.indexMu.Unlock()
+			return tr2, nil
 		}
 		tr = get()
 	}
@@ -438,6 +459,17 @@ func (t *TeamMinder) LoadTeamWithFQTeam(
 	tr.tw = tw
 
 	_ = t.fillTeamnameCache(m, tw, fqt)
+
+	// Keep the persisted name index current for teams loaded outside a full
+	// exploration (a team just created, or one addressed directly), so their
+	// names also resolve on a cold offline start.
+	if fqt.Team.IsNamedTeam() {
+		if names, err := tw.AllFQStrings(); err == nil {
+			for _, n := range names {
+				t.persistTeamNameLookup(m, n, fqt)
+			}
+		}
+	}
 
 	return tr, nil
 }
@@ -1273,7 +1305,23 @@ func (t *TeamMinder) ExploreAndIndex(m MetaContext, opts *LoadTeamOpts) error {
 	if err != nil {
 		return err
 	}
+	t.persistTeamIndex(m)
 	return nil
+}
+
+// persistTeamIndex mirrors the freshly rebuilt in-memory name index into the
+// soft DB (best-effort), so every name it can resolve today keeps resolving
+// on a cold start with no network.
+func (t *TeamMinder) persistTeamIndex(m MetaContext) {
+	t.indexMu.RLock()
+	snap := make(map[proto.FQTeamString]proto.FQTeam, len(t.teamIndex))
+	for i, fqt := range t.teamIndex {
+		snap[i] = fqt
+	}
+	t.indexMu.RUnlock()
+	for i, fqt := range snap {
+		t.persistTeamNameLookup(m, i, fqt)
+	}
 }
 
 func (t *TeamMinder) PopulateTeamName(p *lcl.NamedFQParty) error {
@@ -1295,7 +1343,7 @@ func (t *TeamMinder) PopulateTeamName(p *lcl.NamedFQParty) error {
 	return nil
 }
 
-func (t *TeamMinder) resolveTeam(arg lcl.ConfigTeam) (*proto.FQTeam, error) {
+func (t *TeamMinder) resolveTeam(m MetaContext, arg lcl.ConfigTeam) (*proto.FQTeam, error) {
 
 	typ, err := arg.GetT()
 	if err != nil {
@@ -1305,12 +1353,53 @@ func (t *TeamMinder) resolveTeam(arg lcl.ConfigTeam) (*proto.FQTeam, error) {
 	case lcl.ConfigTeamType_None:
 		return nil, core.InternalError("no team to resolve by in TeamMinder.resolveTeam")
 	case lcl.ConfigTeamType_Named:
-		return t.resolveTeamNamed(arg.Named())
+		return t.resolveTeamNamed(m, arg.Named())
 	case lcl.ConfigTeamType_AdHoc:
-		return t.resolveTeamAdHoc(arg.Adhoc())
+		return t.resolveTeamAdHoc(m, arg.Adhoc())
 	default:
 		return nil, core.InternalError("unexpected team type in TeamMinder.resolveTeam")
 	}
+}
+
+// teamNameLookupKey is the persisted-index key for one of a team's fully
+// qualified name strings. The "n:" prefix keeps named-team keys disjoint from
+// any future ad-hoc persistence under the same DataType.
+func teamNameLookupKey(i proto.FQTeamString) string {
+	return "n:" + string(i)
+}
+
+// persistTeamNameLookup writes one name -> FQTeam row to the soft DB, so a
+// previously resolved team name keeps resolving on a cold start with no
+// network. Derived, self-healing state: every online resolution rewrites it.
+func (t *TeamMinder) persistTeamNameLookup(
+	m MetaContext,
+	i proto.FQTeamString,
+	fqt proto.FQTeam,
+) {
+	scope := t.au.FQU()
+	err := m.DbPut(DbTypeSoft, PutArg{
+		Scope: &scope,
+		Typ:   lcl.DataType_TeamNameLookup,
+		Key:   teamNameLookupKey(i),
+		Val:   &fqt,
+	})
+	if err != nil {
+		m.Warnw("persistTeamNameLookup", "err", err)
+	}
+}
+
+func (t *TeamMinder) lookupTeamNameFromDB(
+	m MetaContext,
+	i proto.FQTeamString,
+) *proto.FQTeam {
+	var ret proto.FQTeam
+	scope := t.au.FQU()
+	_, err := m.DbGet(&ret, DbTypeSoft, &scope,
+		lcl.DataType_TeamNameLookup, teamNameLookupKey(i))
+	if err != nil {
+		return nil
+	}
+	return &ret
 }
 
 func (t *TeamMinder) fromParsedHostname(
@@ -1360,7 +1449,7 @@ func (t *TeamMinder) uidsToAdhHocCanonicalString(
 	return team.UIDsToAdhHocCanonicalString(uids, t.au.Info.Fqu.Uid)
 }
 
-func (t *TeamMinder) resolveTeamAdHoc(arg proto.FQAdHocTeamParsed) (*proto.FQTeam, error) {
+func (t *TeamMinder) resolveTeamAdHoc(m MetaContext, arg proto.FQAdHocTeamParsed) (*proto.FQTeam, error) {
 	var p1 string
 	var p0 proto.AdHocTeamString
 
@@ -1381,6 +1470,7 @@ func (t *TeamMinder) resolveTeamAdHoc(arg proto.FQAdHocTeamParsed) (*proto.FQTea
 			// Handle this case as we would a named team; everything else is through
 			// different data structures
 			return t.resolveTeamNamed(
+				m,
 				proto.FQTeamParsed{
 					Team: proto.NewParsedTeamWithFalse(aht),
 					Host: arg.Host,
@@ -1443,7 +1533,7 @@ func (t *TeamMinder) resolveTeamAdHoc(arg proto.FQAdHocTeamParsed) (*proto.FQTea
 	return &fqt, nil
 }
 
-func (t *TeamMinder) resolveTeamNamed(arg proto.FQTeamParsed) (*proto.FQTeam, error) {
+func (t *TeamMinder) resolveTeamNamed(m MetaContext, arg proto.FQTeamParsed) (*proto.FQTeam, error) {
 
 	hostID, _, err := t.fromParsedHostname(arg.Host)
 	if err != nil {
@@ -1466,10 +1556,6 @@ func (t *TeamMinder) resolveTeamNamed(arg proto.FQTeamParsed) (*proto.FQTeam, er
 
 	t.indexMu.RLock()
 	defer t.indexMu.RUnlock()
-
-	if t.teamIndex == nil {
-		return nil, nil
-	}
 
 	var h string
 	switch {
@@ -1496,14 +1582,17 @@ func (t *TeamMinder) resolveTeamNamed(arg proto.FQTeamParsed) (*proto.FQTeam, er
 
 	fqt, ok := t.teamIndex[i]
 	if !ok {
-		return nil, nil
+		// The in-memory index only exists after an exploration, which needs
+		// the server; the persisted copy keeps known names resolving on a
+		// cold start with no network.
+		return t.lookupTeamNameFromDB(m, i), nil
 	}
 
 	return &fqt, nil
 }
 
 func (t *TeamMinder) Resolve(m MetaContext, arg proto.FQTeamParsed) (*proto.FQTeam, error) {
-	return t.resolveTeam(team.WrapNamed(arg))
+	return t.resolveTeam(m, team.WrapNamed(arg))
 }
 
 func (t *TeamMinder) ResolveAndReindex(
@@ -1514,7 +1603,7 @@ func (t *TeamMinder) ResolveAndReindex(
 	*proto.FQTeam,
 	error,
 ) {
-	fqt, err := t.resolveTeam(arg)
+	fqt, err := t.resolveTeam(m, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -1525,7 +1614,7 @@ func (t *TeamMinder) ResolveAndReindex(
 	if err != nil {
 		return nil, err
 	}
-	fqt, err = t.resolveTeam(arg)
+	fqt, err = t.resolveTeam(m, arg)
 	if err != nil {
 		return nil, err
 	}
