@@ -671,7 +671,7 @@ func (c *UserContext) clientCertLocked(m MetaContext) (*tls.Certificate, error) 
 			core.NoDefaultHostError{})
 	}
 
-	certChain, err := c.fetchClientCertChain(m, eid)
+	certChain, fromCache, err := c.fetchClientCertChain(m, eid)
 	if err != nil {
 		return nil, err
 	}
@@ -681,7 +681,14 @@ func (c *UserContext) clientCertLocked(m MetaContext) (*tls.Certificate, error) 
 		Certificate: certChain,
 	}
 
-	c.PrivKeys.SetCert(cert)
+	// Memoize only a freshly issued chain. A cache-served chain may have
+	// expired or rotated during the outage; pinning it in memory would keep
+	// presenting it after connectivity returns (every handshake failing,
+	// reading as "still offline") with no path to the refetch that heals it.
+	// Rebuilding from the cached row per use while offline is cheap.
+	if !fromCache {
+		c.PrivKeys.SetCert(cert)
+	}
 	return cert, nil
 }
 
@@ -694,8 +701,9 @@ func (c *UserContext) fetchClientCertChain(
 	m MetaContext,
 	eid proto.EntityID,
 ) (
-	[][]byte,
-	error,
+	chain [][]byte,
+	fromCache bool,
+	err error,
 ) {
 	// Callers hold c's lock (clientCertLocked); touch fields directly rather
 	// than via locking accessors.
@@ -728,18 +736,18 @@ func (c *UserContext) fetchClientCertChain(
 			if serr != nil {
 				m.Warnw("fetchClientCertChain", "stage", "store", "err", serr)
 			}
-			return certChain, nil
+			return certChain, false, nil
 		}
 	}
 	if !core.IsTransportError(err) {
-		return nil, err
+		return nil, false, err
 	}
 	if cached := loadCached(); cached != nil {
 		m.Warnw("fetchClientCertChain", "err", err,
 			"note", "server unreachable; using cached cert chain")
-		return cached, nil
+		return cached, true, nil
 	}
-	return nil, err
+	return nil, false, err
 }
 
 func (c *UserContext) UserGCli(m MetaContext) (*core.RpcClient, error) {

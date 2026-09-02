@@ -592,15 +592,15 @@ func (l *TeamLoader) Run(m MetaContext) (*TeamWrapper, error) {
 	err = l.BaseChainLoader.runMany(m, l.runOnce, l.resetState)
 	if err != nil {
 		// Offline fallback: with the server unreachable, serve the last
-		// verified snapshot instead of nothing. Upstream-approved semantics:
-		// cached PTKs (and the historical-sender info persisted with them)
-		// are usable offline without replaying links -- the snapshot was
-		// fully verified before it was written, and the next online load
-		// re-verifies as usual; the view bearer token exists to gate server
-		// resources, so a token-less wrapper is correct for local-only work
-		// (any server operation attempted with it meets its own transport
-		// error at its own RPC). A team never loaded online has no snapshot
-		// and keeps the original connect error.
+		// verified snapshot instead of nothing. The snapshot -- PTKs and the
+		// historical-sender records alongside them -- was fully verified
+		// before it was written, so its keys are usable offline without
+		// replaying links; the next online load re-verifies as usual. The
+		// view bearer token exists only to gate server resources, so a
+		// token-less wrapper is correct for local-only work (any server
+		// operation attempted with it meets a connect-class error at its own
+		// boundary). A team never loaded online has no snapshot and keeps
+		// the original connect error.
 		if core.IsTransportError(err) && l.au != nil {
 			tw, cerr := LoadTeamFromCache(m, l.au, l.Arg)
 			if cerr == nil {
@@ -659,11 +659,22 @@ func LoadTeamFromCache(
 	// The snapshot's member list is the last verified post-roster (saveState
 	// exports rosterPost), so it serves as the roster for unboxing: opening
 	// the cached PTK parcels with the caller's PUKs, verified against the
-	// snapshot's historical-sender records -- the upstream-approved use of
-	// the verified cache.
+	// snapshot's historical-sender records the snapshot persists alongside
+	// them.
 	l.rosterPost = l.rosterPre
 	if l.Arg.Keys != nil && l.rosterPost != nil {
 		err = l.runUnbox(m)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// Roster details normally come out of link play; the snapshot's
+	// post-roster carries the same member set, so building them here keeps
+	// member lookups, roster exports, and ad-hoc display names truthful
+	// offline instead of silently empty. (Remote members' view tokens are
+	// server-fetched and stay absent.)
+	if l.rosterPost != nil {
+		err = l.setupRosterDetails(m)
 		if err != nil {
 			return nil, err
 		}

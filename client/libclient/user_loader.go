@@ -337,6 +337,13 @@ func LoadMeFromCache(m MetaContext, au *UserContext) (*UserWrapper, error) {
 	if hs == nil {
 		return nil, core.HomeError("no home server probe")
 	}
+	// A dead probe that could not hydrate (no cached zone/chain -- e.g. a DB
+	// predating the host-identity cache) has no chain identity to scope the
+	// snapshot by; without this guard the load would nil-deref instead of
+	// reporting that nothing verified is available offline.
+	if hs.Chain() == nil {
+		return nil, core.RowNotFoundError{}
+	}
 	u := NewUserLoader(LoadUserArg{
 		Uid:        au.Info.Fqu.Uid,
 		LoadMode:   LoadModeSelf,

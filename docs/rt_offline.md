@@ -11,14 +11,14 @@ up after a period of being offline"), and much of it is built. This document
 specifies the remaining read-side behavior and the entire write side, which is
 currently a stub.
 
-**Scope: RT only.** This plan covers the realtime chat subsystem — thread
-reads, inbox sync, message sends, and read-marks. The team and KV subsystems
-are explicitly out of scope: sigchain and KV reads already benefit from the
-agent's local caching but have no defined staleness contract, and offline
-*writes* there (team creation, membership changes, KV puts) are a
-fundamentally different problem — sigchain links commit to current server
-state and cannot be sealed ahead of time and drained later. Nothing in this
-document changes the online-first behavior of those subsystems.
+**Scope.** This plan began RT-only — thread reads, inbox sync, message
+sends, and read-marks — and the design sections below keep that scope. The
+"Cold-start bootstrap" section then extends the same verified-on-write
+doctrine to the layers RT sits on (user, team, and host-identity loading),
+strictly for *reads from verified local snapshots*. Offline *writes* outside
+RT (team creation, membership changes, KV puts) remain out of scope: sigchain
+links commit to current server state and cannot be sealed ahead of time and
+drained later.
 
 ## Goals
 
@@ -37,9 +37,8 @@ document changes the online-first behavior of those subsystems.
 
 ## Non-Goals
 
-- A general connectivity framework for the whole client (KV store, sigchain
-  fetches, etc.). This is scoped to `client/librt` plus one server-side
-  change. The connectivity probe below is deliberately minimal and RT-local.
+- Offline *write* support outside RT. Reads of verified local snapshots are
+  in scope (see "Cold-start bootstrap"); queueing non-RT writes is not.
 - Conflict resolution beyond ordering. RT messages are append-only; there is
   nothing to merge.
 - Offline channel *creation*. `MakeChannel` requires the server; queueing
@@ -371,8 +370,9 @@ With that, a cold agent starts offline, unlocks its user, and serves
 user-scoped state -- the outbox included. `TestRTOfflineCLIWalkthrough`
 (integration-tests/cli) pins it end-to-end through the real CLI and agent.
 
-**Team-scoped state from a cold start is closed too**, on two upstream
-rulings obtained before building (record them in the proposal):
+**Team-scoped state from a cold start is closed too**, on two design
+decisions confirmed with upstream before building (state them explicitly in
+the proposal):
 
 1. *Cached PTKs may be used offline without replaying links.* The snapshot
    (`lcl.TeamChainState`) was fully verified before it was written -- and it
@@ -402,6 +402,15 @@ reads with the pending overlay, stale inbox with its badge, survive another
 offline restart, reconnect, drain, server-confirmed delivery --
 pinned by `TestRTOfflineCLIWalkthrough` (integration-tests/cli); the
 warm-process case keeps its own coverage in `TestRTOfflineNoHooks`.
+
+Known limits, by design: ad-hoc team names are not in the persisted name
+index, so an ad-hoc team cannot be resolved from a cold offline start (RT
+ad-hoc channels are gated on upstream Stage 1c anyway); persisted name rows
+are written through but never deleted, and are consulted only when
+exploration is impossible, so a stale row can only ever be served offline —
+the same verified-but-possibly-behind semantics as every snapshot; and team
+*mutations* (membership edits, rotations) always require a fresh online
+load, failing with connect-class errors offline.
 
 ### Retention guard (forward-compatibility note)
 

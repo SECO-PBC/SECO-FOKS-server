@@ -87,7 +87,7 @@ func (a *ActiveUserLoader) probe(m MetaContext) error {
 		to = m.G().Cfg().ProbeTimeout()
 	}
 	pr, err := m.G().Probe(m.Ctx(), a.uinfo.Fqu.HostID, to)
-	if pr != nil && (err == nil || core.IsConnectError(err)) {
+	if pr != nil && (err == nil || core.IsTransportError(err)) {
 		a.uc.SetHomeServer(pr)
 	}
 	if err != nil {
@@ -127,9 +127,16 @@ func (a *ActiveUserLoader) Run(m MetaContext) error {
 		// this device lacks the local caches to unlock offline) must not
 		// erase the user: keep them loaded and locked, exactly as a failed
 		// probe always has. Connectivity status still reports the outage.
+		// A caller that demanded an unlocked user gets the real error --
+		// swallowing it here would leave lockState Unset and turn the outage
+		// into GenerateLockError's "unset lock state" internal error.
 		if err != nil && core.IsTransportError(err) {
+			if a.opts.NeedUnlocked {
+				return err
+			}
 			m.Warnw("ActiveUserLoader::Run", "stage", "unlock", "err", err,
 				"note", "server unreachable; user stays loaded but locked")
+			a.lockState = a.uc.lockState
 			err = nil
 		} else if err == nil {
 			// Propagate the UserContext's lockState back to the loader so that
@@ -142,7 +149,7 @@ func (a *ActiveUserLoader) Run(m MetaContext) error {
 			// (initial commit of FOKS, 20ed077);
 			a.lockState = a.uc.lockState
 		}
-	case core.IsConnectError(err):
+	case core.IsTransportError(err):
 		m.Warnw("ActiveUserLoader::Run", "stage", "probe", "err", err)
 		err = nil
 	}
@@ -414,6 +421,10 @@ func (u *UserContext) UnlockKeys(m MetaContext, opts LoadActiveUserOpts) error {
 	u.unlockKeysMu.Lock()
 	defer u.unlockKeysMu.Unlock()
 
+	// The SSO lock is server-asserted; remember it across the unconditional
+	// reset in unlockDevOrYubiKey so an unreachable server cannot lift it.
+	wasSSO := u.lockState == proto.UserLockState_SSO
+
 	err := u.unlockDevOrYubiKey(m, opts)
 	if err != nil {
 		return err
@@ -426,12 +437,18 @@ func (u *UserContext) UnlockKeys(m MetaContext, opts LoadActiveUserOpts) error {
 	err = u.pingForSSO(m)
 	if err != nil {
 		// Offline tolerance: the ping exists to discover an SSO lock, which
-		// only the server can assert. With the server unreachable we proceed
-		// as not-SSO-locked; that gates nothing security-relevant locally --
-		// the device key and the cached data it decrypts are already on this
-		// machine -- and the next successful ping re-imposes the lock.
+		// only the server can assert. With the server unreachable we cannot
+		// learn a NEW lock, so we proceed on the last server-asserted state:
+		// a user the server had SSO-locked stays locked until a successful
+		// ping clears it, and everyone else proceeds unlocked.
 		if !core.IsTransportError(err) {
 			return err
+		}
+		if wasSSO {
+			u.lockState = proto.UserLockState_SSO
+			m.Warnw("UnlockKeys", "stage", "pingForSSO", "err", err,
+				"note", "server unreachable; keeping server-asserted SSO lock")
+			return nil
 		}
 		m.Warnw("UnlockKeys", "stage", "pingForSSO", "err", err,
 			"note", "server unreachable; proceeding without SSO check")
@@ -526,16 +543,13 @@ func (m MetaContext) ActiveConnectedUser(
 	err := au.Reconnect(m)
 	if err != nil {
 		// Offline tolerance: losing the server must not disable work that
-		// needs no server. A user whose keys are already unlocked in this
-		// process was verified when it connected, so it stays usable for
-		// local-only paths (cached reads, durably queued writes) while the
-		// network is gone -- each caller then meets its own transport error
-		// at its own RPC, where it can degrade or queue deliberately.
-		//
-		// This deliberately does NOT cover a cold start with no network:
-		// unlocking from scratch requires a server-verified user load, and
-		// serving one from cache instead is a trust-model decision, not a
-		// connectivity one. See docs/rt_offline.md, "Known gap".
+		// needs no server. A user whose keys are unlocked -- verified while
+		// connected, or unlocked from local verified caches by Reconnect's
+		// cold-start path -- stays usable for local-only work (cached reads,
+		// durably queued writes) while the network is gone; each caller then
+		// meets its own transport error at its own RPC, where it can degrade
+		// or queue deliberately. See docs/rt_offline.md, "Cold-start
+		// bootstrap".
 		if !core.IsTransportError(err) || au.AssertUnlocked(m.Ctx()) != nil {
 			return nil, err
 		}

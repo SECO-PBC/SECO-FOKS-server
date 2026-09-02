@@ -117,7 +117,7 @@ func (p *Probe) setLastFail(e error) {
 }
 
 func (p *Probe) handleConnectError(e error) bool {
-	if !core.IsConnectError(e) {
+	if !core.IsTransportError(e) {
 		return false
 	}
 	p.setLastFail(e)
@@ -362,9 +362,16 @@ func (p *Probe) saveHostchain(m MetaContext) error {
 //
 // Returns true when the probe is usable afterwards.
 func (p *Probe) hydrateFromCache(m MetaContext) bool {
-	if p.chain != nil && p.pz != nil {
-		return true
-	}
+	// Hydrate ONLY from rows a fully verified prior run persisted --
+	// saveHostchain writes them after every check (prior chains, signatures,
+	// merkle inclusion, hostname pin, hostname match) has passed. In-memory
+	// state from the CURRENT, failed run must never satisfy this: playChain
+	// and checkZoneSig populate p.chain/p.pz from server-supplied data before
+	// the merkle and pin checks run, so a transport failure mid-run can leave
+	// a self-consistent but never-fully-verified identity in memory -- an
+	// attacker on a taken-over hostname could serve exactly that and then
+	// drop the merkle query. The DB rows are the verified-on-write source;
+	// they also replace any partial in-memory state here.
 	if p.hostID == nil {
 		return false
 	}

@@ -664,8 +664,8 @@ func TestRTUnreadableChannelHiddenFromInbox(t *testing.T) {
 // socket, the active user unlocks from local material (cached sigchain
 // snapshot, PUK parcels, client-cert chain, hydrated host identity), the team
 // resolves by name from the persisted index and comes up from its verified
-// snapshot (cached PTKs, no view token -- both per upstream's ruling that the
-// snapshot's verification carries and the token only gates server
+// snapshot (cached PTKs, no view token: the snapshot's verification carries
+// forward, and the token only gates server
 // resources), and the full RT offline arc runs: send queues durably, reads
 // serve the cache flagged stale with the queued message overlaid, the inbox
 // renders its last synced state with the pending badge.
@@ -743,6 +743,11 @@ func TestRTOfflineCLIWalkthrough(t *testing.T) {
 
 	// --- back online ---
 	restartAgent(false)
+
+	// The persisted name index must not short-circuit online resolution: a
+	// fresh agent whose in-memory index is cold still has to explore, so
+	// non-refresh team paths (like the join-request inbox) find their record.
+	b.runCmd(t, nil, "team", "inbox", tm)
 
 	// A plain `rt inbox` is enough: the successful sync drains the outbox.
 	inboxOut = out("rt", "inbox")
