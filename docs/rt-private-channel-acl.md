@@ -192,6 +192,20 @@ list on create — rejected for v1; two RPCs beat a new arg struct, and
   name is legitimate.
 - New `Grant`, `Revoke`, `Members` wrappers.
 
+**Open, found while building (needs a product call, not a code fix).** Skipping
+collision detection cuts both ways, and only one direction was considered here.
+A member who cannot see private channel "planning" may create a *public*
+"planning" at the same tier — the server has no basis to refuse, and telling
+them why would disclose the private channel. Anyone who can then see both (a
+member of the private channel, or any team admin) has two bottom-tier channels
+with the same name, and `resolveChannel` returns `RTAmbiguousChannelError` for
+every by-name send or read. Options, none free: give private channels a
+distinguishing marker in the client's name resolution; let the server reject the
+public create with a generic "name unavailable" (discloses that *something*
+holds the name); or accept the ambiguity and have the channels UI address
+private channels by id. Deferred to the client spec with the rest of the UI
+work; the server is not the right place to decide it.
+
 ## 5. Path inventory — the actual deliverable
 
 Every server path that can return channel rows, message rows, or channel
@@ -231,6 +245,12 @@ Anything not in this table that reads `channels`, `messages_enc`,
 `messages_clear`, or `user_channels` for a caller is a bug. §8.3 makes adding a
 new RPC without classifying it a test failure.
 
+**As built:** the guard lives in `server/realtime/rt_inventory_test.go`, not in
+`integration-tests/lib/`. CI runs `./server/...` but not the integration suite
+(it needs a live postgres, which the workflow does not provision), and a guard
+CI does not run is not a guard. It needs no database — it reads
+`proto-src/rem/realtime.snowp` and the package's own `.go` files.
+
 ## 6. Lifecycle & authority
 
 ### 6.1 Who manages membership
@@ -249,6 +269,20 @@ moderate it, and a community whose admins cannot enumerate its channels cannot
 enforce its agreements. Non-admin non-members learn nothing.
 **Open decision (Q1):** hide existence from admins too, and rely on a member
 reporting a channel? Recommendation: no — see rationale.
+
+**As built, one deviation.** An admin non-member's listing row *does* carry the
+name box. Withholding it is not expressible today — `RTChannelMetadata.nameBox`
+is a required field and the client decrypts it unconditionally, so an absent
+box fails the whole list read — and it would defeat this section's own
+rationale, that an admin must be able to *find* a channel in order to moderate
+it. The name is sealed at the tier floor, so it is a name every member at that
+floor could read given the ciphertext; handing it to admins is consistent with
+Q1/Q2 making leaders transparent peers. Everything else §6.2 asks for holds:
+an admin outside the ACL gets `private = true`, `unreadable = true`, and no
+description or last-message data. Existence-without-name would need
+`Option(nameBox)` on the wire plus a client that tolerates it; raise it if the
+product wants it. (Member count is likewise not carried — the wire struct has
+no field for it; `rtChannelMembers` answers that question for members.)
 
 ### 6.3 Team leave / removal (the lifecycle problem)
 The outer gate (`AuthorizeUserForTeam`, chokepoint step 2) already denies every

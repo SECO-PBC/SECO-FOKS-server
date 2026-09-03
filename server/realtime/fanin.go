@@ -238,6 +238,11 @@ func readUserMembershipVers(
 // findMissingChannels returns the IDs of channels in the user's teams that
 // their role can read but that have no user_channels membership row, ordered
 // by channel ID for deterministic version allocation.
+//
+// Inventory row 9: private channels are excluded outright. Team role is not
+// enough to join one -- membership comes from an explicit channel_acl grant,
+// which writes the user_channels row itself -- so a self-healing backfill here
+// would silently add every team member to every private channel.
 func findMissingChannels(
 	m shared.MetaContext,
 	app proto.RTAppID,
@@ -270,6 +275,7 @@ func findMissingChannels(
 		 WHERE c.short_host_id=$1
 		 AND c.app_id=$2
 		 AND c.parent_team_id = ANY($3)
+		 AND NOT c.private
 		 AND NOT EXISTS (
 		    SELECT 1 FROM user_channels uc
 		    WHERE uc.short_host_id = c.short_host_id
