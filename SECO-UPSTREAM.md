@@ -49,6 +49,7 @@ user hits; keep it local if it encodes how SECO deploys or what SECO builds.**
 | `patch-db --yes` | [#328](https://github.com/foks-proj/go-foks/pull/328) | Unattended deploys can't answer a prompt. |
 | `Config.RPCLogOptions` via env/config | [#329](https://github.com/foks-proj/go-foks/pull/329) | Flag-only, so the mobile agent could never enable RPC tracing. |
 | `TeamCancelRequest` + `TeamReject` | [#330](https://github.com/foks-proj/go-foks/pull/330) | Deliberately excludes `TeamLeaveSelf` — see Declined, and issue [#331](https://github.com/foks-proj/go-foks/issues/331). |
+| rekeyed team cert verify order | [#350](https://github.com/foks-proj/go-foks/pull/350) | Verifier order was swapped against the signer, so **every** invite to a team past gen 1 failed to accept. Upstream's own `team.OpenTeamCert` was already correct; the client carried a drifted second copy, now deleted. Ours as [#25](https://github.com/SECO-PBC/SECO-FOKS-server/pull/25). |
 
 ## Queued — decided yes, not yet opened
 
