@@ -20,7 +20,11 @@ behaviour the earlier one defines.
 2. **RT offline mode** — client `librt` + design doc. Depends on 1.
 3. **Offline cold-start bootstrap** — client `libclient`/`lib/chains`. Depends
    on 2, and touches shared loaders, so it goes last and invites the most
-   discussion.
+   discussion. Also carries `verifiedAt` and the offline-reads design doc.
+
+Since amended: a fourth PR, [#347](https://github.com/foks-proj/go-foks/pull/347)
+(transport classification), was split out of 2 and opened first. It is
+upstream of the series rather than a new step in it.
 
 Opening 2 before 1 lands would ask a reviewer to judge a drain loop against
 replay semantics that aren't merged yet.
@@ -143,11 +147,13 @@ loses read state entirely.
 - **CLI**: `rt outbox {ls,drain,retry,discard}`, offline banners on
   `rt read`/`rt inbox`, and `rt send` reporting a queued message rather than
   failing.
-- **Transport-vs-semantic classification** (`core.IsTransportError`): default
-  is *semantic*, so an unrecognized error fails fast rather than retrying
-  forever. Built from the error paths of the transport stack — including the
-  snowpack RPC framing errors (`PacketizerError`, `ReceiverError`,
-  `DecodeError`), which is what a connection torn mid-frame surfaces as.
+- ~~**Transport-vs-semantic classification** (`core.IsTransportError`)~~ —
+  **split out and opened separately as
+  [#347](https://github.com/foks-proj/go-foks/pull/347)** on 2026-09-02. It
+  fixes a live inconsistency of its own (a timeout and a refused dial were
+  treated differently in the same outage), so it did not need to wait behind
+  this PR, and removing it makes this one smaller. This PR now *depends* on
+  #347 rather than containing it.
 
 ### Ad-hoc teams
 
