@@ -2355,18 +2355,3 @@ func (d *Minder) ChannelMembers(
 	}
 	return cli.RtChannelMembers(m.Ctx(), chid)
 }
-
-// RawClient returns the Minder's RealTime RPC client for the active user.
-//
-// An escape hatch: the wrapped methods above are the supported surface. It
-// exists because the private-channel tests must assert on the SERVER's error
-// for a channel the caller cannot see -- a wrapped call would resolve the
-// channel against the (correctly filtered) local channel list and fail
-// client-side first, which would prove nothing about the ACL.
-func (d *Minder) RawClient(m MetaContext) (*rem.RealTimeClient, error) {
-	_, cli, err := d.clientLocal(m.Base(), d.au)
-	if err != nil {
-		return nil, err
-	}
-	return cli, nil
-}

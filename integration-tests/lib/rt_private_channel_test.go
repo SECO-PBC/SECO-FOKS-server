@@ -36,17 +36,33 @@ type privActor struct {
 	u      *TestUser
 	m      librt.MetaContext
 	minder *librt.Minder
+	rawCli *rem.RealTimeClient
 }
 
-// raw returns the actor's RealTime RPC client. The wrapped Minder calls
-// resolve a channel against the caller's own (correctly filtered) channel
-// list, so they fail client-side for a channel the caller cannot see -- which
-// would prove nothing about the server's ACL. These tests want the SERVER's
-// answer, so they call it directly.
+// raw returns a RealTime RPC client speaking as this actor, built here rather
+// than borrowed from the Minder.
+//
+// The Minder's wrapped calls resolve a channel against the caller's own
+// (correctly filtered) channel list, so for a channel the caller cannot see
+// they fail client-side and never reach the server -- which would prove
+// nothing about the ACL. These tests want the SERVER's answer. Constructing
+// the client here keeps that need in the tests instead of putting a
+// filtering-bypass hatch on the production Minder, where a future caller could
+// reach for it by accident.
 func (a *privActor) raw(t *testing.T) *rem.RealTimeClient {
-	cli, err := a.minder.RawClient(a.m)
+	if a.rawCli != nil {
+		return a.rawCli
+	}
+	base := a.m.Base()
+	cert, err := base.ActiveUserClientCert()
 	require.NoError(t, err)
-	return cli
+	pr := base.G().ActiveUser().HomeServer()
+	require.NotNil(t, pr)
+	gcli, err := pr.RPCClient(base, proto.ServerType_RealTime, cert)
+	require.NoError(t, err)
+	cli := core.NewRealTimeClient(gcli, base)
+	a.rawCli = &cli
+	return a.rawCli
 }
 
 // privScene is a team with a private channel in it, plus the five actors.

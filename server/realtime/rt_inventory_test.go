@@ -137,60 +137,69 @@ var protectedTables = []string{
 	"channel_acl",
 }
 
+// allowedQueries is one signed-off function: how many references to protected
+// tables its body is expected to contain, and why reaching that data there is
+// safe.
+//
+// The count matters as much as the name. Keying only on the function name would
+// catch a protected query landing in a NEW function while missing a second one
+// slipped into an already-allowlisted one -- and the allowlisted functions are
+// precisely where a careless future path is most likely to be added, since they
+// are already full of this SQL. Pinning the count makes any added reference,
+// anywhere, trip the guard and force its author to re-justify the total.
+type allowedQueries struct {
+	n   int
+	why string
+}
+
 // queryAllowlist maps a function that legitimately queries a protected table
-// to why that is safe. Everything else fails the test.
+// to its expected reference count and why that is safe. Everything else fails
+// the test.
 //
 // The rule being enforced: no path may reach channel or message rows on behalf
 // of a caller without first passing through authorizeChannel, or -- for the
 // two paths that read many channels at once -- through the equivalent
 // set-based predicate, privateVisibleToCaller / channelPrivacyCols.
-var queryAllowlist = map[string]string{
+var queryAllowlist = map[string]allowedQueries{
 	// --- the chokepoint and its helpers (acl.go) ---
-	"authorizeChannel":         "the chokepoint itself",
-	"readChannelAclRole":       "chokepoint step 5",
-	"privateVisibleToCaller":   "the set-based form of chokepoint step 5",
-	"insertChannelAcl":         "ACL write, reached only via authorizeChannel(accessManage)",
-	"dropChannelMember":        "ACL + delivery write, reached only via authorizeChannel(accessManage) or the send-time prune",
-	"pruneStaleChannelMembers": "team-leave cascade; reads its own channel's delivery rows inside the send transaction, after authorizeChannel",
-	"activeTeamMembers":        "reads team_members (users DB), not a protected table; listed because the allowlist is by function",
-	"ListChannelMembers":       "gated by authorizeChannel(accessRead) on the line above the query",
+	"authorizeChannel":         {1, "the chokepoint itself"},
+	"readChannelAclRole":       {1, "chokepoint step 5"},
+	"privateVisibleToCaller":   {1, "the set-based form of chokepoint step 5"},
+	"insertChannelAcl":         {1, "ACL write, reached only via authorizeChannel(accessManage)"},
+	"dropChannelMember":        {2, "ACL + delivery write, reached only via authorizeChannel(accessManage) or the send-time prune"},
+	"pruneStaleChannelMembers": {1, "team-leave cascade; reads its own channel's delivery rows inside the send transaction, after authorizeChannel"},
+	"ListChannelMembers":       {1, "gated by authorizeChannel(accessRead) on the line above the query"},
 
 	// --- set-based paths that embed the predicate ---
-	"readAllChannels":     "SET-BASED (inventory row 5): embeds privateVisibleToCaller",
-	"channelPrivacyCols":  "the embedded predicate's column list",
-	"readChangedChannels": "SET-BASED (inventory row 7): selects channelPrivacyCols; GetChangedThreads drops rows whose aclMember is false",
-	"findMissingChannels": "SET-BASED (inventory row 9): excludes private channels outright (AND NOT c.private)",
+	"readAllChannels":     {1, "SET-BASED (inventory row 5): embeds privateVisibleToCaller"},
+	"readChangedChannels": {2, "SET-BASED (inventory row 7): selects channelPrivacyCols; GetChangedThreads drops rows whose aclMember is false"},
+	"findMissingChannels": {2, "SET-BASED (inventory row 9): excludes private channels outright (AND NOT c.private)"},
 
 	// --- writes that run after the chokepoint authorized the caller ---
-	"messageSender.internSender":  "send path; runs after lockChannel -> authorizeChannel(accessWrite)",
-	"messageSender.insertMessage": "send path; runs after lockChannel -> authorizeChannel(accessWrite)",
-	"messageSender.fanoutInboxVersions": "send path; recipients are the channel's user_channels rows, " +
+	"messageSender.internSender":  {2, "send path; runs after lockChannel -> authorizeChannel(accessWrite)"},
+	"messageSender.insertMessage": {2, "send path; runs after lockChannel -> authorizeChannel(accessWrite)"},
+	"messageSender.fanoutInboxVersions": {3, "send path; recipients are the channel's user_channels rows, " +
 		"which for a private channel equal its ACL (invariant asserted by " +
 		"TestPrivateAclEqualsUserChannels) and are re-validated against the team " +
-		"roster by pruneStaleChannelMembers immediately before this runs",
-	"touchChannelSet":                     "grant path; runs after authorizeChannel(accessManage) and touches only version bookkeeping",
-	"channelMaker.insertChannel":          "creation; runs after channelMaker.checkPerms -> authorizeChannelCreate",
-	"channelMaker.fanoutUsers":            "creation fan-out; private channels fan out to the creator alone",
-	"fanUserIntoChannel":                  "delivery-row write, reached from creation fan-out, grant, or the (private-excluding) fan-in",
-	"channelMaker.fanoutToUser":           "thin wrapper over fanUserIntoChannel, inside the creation transaction",
-	"channelMaker.insertNewChannelSetRow": "channel-set version bookkeeping; carries no channel identity to a caller",
-	"channelMaker.updateChannelSet":       "channel-set version bookkeeping; carries no channel identity to a caller",
-	"readChannelSet":                      "channel-set version only; no per-channel data",
+		"roster by pruneStaleChannelMembers immediately before this runs"},
+	"touchChannelSet":                     {2, "grant path; runs after authorizeChannel(accessManage) and touches only version bookkeeping"},
+	"channelMaker.insertChannel":          {1, "creation; runs after channelMaker.checkPerms -> authorizeChannelCreate"},
+	"fanUserIntoChannel":                  {1, "delivery-row write, reached from creation fan-out, grant, or the (private-excluding) fan-in"},
+	"channelMaker.fanoutToUser":           {1, "thin wrapper over fanUserIntoChannel, inside the creation transaction"},
+	"channelMaker.insertNewChannelSetRow": {1, "channel-set version bookkeeping; carries no channel identity to a caller"},
+	"channelMaker.updateChannelSet":       {1, "channel-set version bookkeeping; carries no channel identity to a caller"},
+	"readChannelSet":                      {1, "channel-set version only; no per-channel data"},
 
 	// --- reads that run after the chokepoint authorized the caller ---
-	// --- shared SQL fragments (top-level consts), each reached only from the
-	// allowlisted functions above ---
-	"channelMetadataCols": "column list; every query that selects it is set-based and allowlisted",
-	"lastSenderJoin":      "join fragment used only by the two allowlisted set-based queries",
-	"threadMsgSelect":     "message column list + sender join; used only by the allowlisted thread reads",
-	"channelAuthCols":     "the chokepoint's own column list",
+	"readThroughMarker.run": {3, "calls loadChannel -> authorizeChannel(accessRead) before anything else"},
 
-	"readThreadBookends":    "runs inside getThreadGeneric, after authorizeChannel(accessRead)",
-	"readThreadRecents":     "runs inside getThreadGeneric, after authorizeChannel(accessRead)",
-	"readMsgsBySeq":         "runs inside getThreadGeneric, after authorizeChannel(accessRead)",
-	"messageSender.run":     "calls lockChannel -> authorizeChannel(accessWrite) before anything else",
-	"readThroughMarker.run": "calls loadChannel -> authorizeChannel(accessRead) before anything else",
-	"reconcileUserChannels": "fan-in bookkeeping; the channel selection it acts on is findMissingChannels, which excludes private channels",
+	// --- shared SQL fragments (top-level consts). The functions that
+	// interpolate these carry no protected-table reference of their own, so
+	// the fragment is where the sign-off lives. ---
+	"lastSenderJoin": {1, "LEFT JOIN onto channel_parties; used only by the two allowlisted set-based queries"},
+	"threadMsgSelect": {2, "message column list + sender join; used only by readThreadBookends, " +
+		"readThreadRecents and readMsgsBySeq, all of which run inside " +
+		"getThreadGeneric after authorizeChannel(accessRead)"},
 }
 
 // rpcLine matches a method declaration in a snowp protocol block, e.g.
@@ -287,9 +296,14 @@ func TestRealtimeProtectedTableQueries(t *testing.T) {
 		protected[tbl] = true
 	}
 
-	type hit struct{ file, fn, table string }
+	type hit struct {
+		file, fn, tables string
+		got, want        int
+	}
 	var offenders []hit
+	var counts []hit
 	var sawAny int
+	seen := map[string]bool{}
 
 	for _, e := range entries {
 		nm := e.Name()
@@ -308,15 +322,28 @@ func TestRealtimeProtectedTableQueries(t *testing.T) {
 		var block strings.Builder
 
 		scanBlock := func(fn string, text string) {
+			var n int
+			var tables []string
 			for _, mm := range fromLine.FindAllStringSubmatch(text, -1) {
 				tbl := strings.ToLower(mm[1])
 				if !protected[tbl] {
 					continue
 				}
-				sawAny++
-				if _, ok := queryAllowlist[fn]; !ok {
-					offenders = append(offenders, hit{nm, fn, tbl})
-				}
+				n++
+				tables = append(tables, tbl)
+			}
+			if n == 0 {
+				return
+			}
+			sawAny += n
+			seen[fn] = true
+			allowed, ok := queryAllowlist[fn]
+			if !ok {
+				offenders = append(offenders, hit{nm, fn, strings.Join(tables, ", "), n, 0})
+				return
+			}
+			if allowed.n != n {
+				counts = append(counts, hit{nm, fn, strings.Join(tables, ", "), n, allowed.n})
 			}
 		}
 
@@ -334,6 +361,12 @@ func TestRealtimeProtectedTableQueries(t *testing.T) {
 				scanBlock(curFn, block.String())
 				block.Reset()
 				curFn = next
+				// Keep the declaration line's own text, attributed to the new
+				// declaration: a single-line const like lastSenderJoin carries
+				// its whole query on the `const ... = ` line, so dropping it
+				// would hide that SQL from the guard entirely.
+				block.WriteString(line)
+				block.WriteString("\n")
 				continue
 			}
 			// Skip Go comments: the prose in this package names these tables
@@ -351,6 +384,30 @@ func TestRealtimeProtectedTableQueries(t *testing.T) {
 		"found almost no queries against the protected tables -- the scanner has "+
 			"drifted and this guard is silently vacuous")
 
+	for _, c := range counts {
+		t.Errorf(
+			"%s: %s() now makes %d references to protected tables (%s), but "+
+				"queryAllowlist records %d.\n"+
+				"A query was added to a function that was already signed off. That is "+
+				"exactly where an ungated read is easiest to miss, because the function "+
+				"is already full of this SQL. Confirm the new one reaches channel or "+
+				"message rows only after authorizeChannel (or behind "+
+				"privateVisibleToCaller / channelPrivacyCols), then update the count and "+
+				"the justification in queryAllowlist, and add a test. "+
+				"See docs/rt-private-channel-acl.md §5 and §8.3.",
+			c.file, c.fn, c.got, c.tables, c.want)
+	}
+
+	// A stale entry makes the allowlist look more considered than it is, and
+	// leaves a name signed off for a function that no longer exists -- which a
+	// future function could then reuse for free.
+	for fn := range queryAllowlist {
+		if !seen[fn] {
+			t.Errorf("queryAllowlist has an entry for %q, which no longer queries "+
+				"any protected table; remove it", fn)
+		}
+	}
+
 	for _, o := range offenders {
 		t.Errorf(
 			"%s: %s() queries protected table %q but is not in queryAllowlist.\n"+
@@ -361,6 +418,6 @@ func TestRealtimeProtectedTableQueries(t *testing.T) {
 				"privateVisibleToCaller / channelPrivacyCols), then add an entry to "+
 				"queryAllowlist saying why it is safe, plus a test. "+
 				"See docs/rt-private-channel-acl.md §5 and §8.3.",
-			o.file, o.fn, o.table)
+			o.file, o.fn, o.tables)
 	}
 }

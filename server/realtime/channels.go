@@ -222,13 +222,14 @@ const channelMetadataCols = `c.channel_id_full, c.seqno, c.name_box, c.desc_box,
 // both queries that scan channelMetadataRaw. uidParam is the placeholder
 // holding the caller's uid in the enclosing query, which differs between the
 // two -- hence a function rather than a second const.
+//
+// acl_member is privateVisibleToCaller verbatim, by construction rather than by
+// copy: readAllChannels puts the same expression in its WHERE and here in its
+// SELECT, and if the two ever drifted the listing would filter on one rule
+// while labelling rows by another -- admitting a channel it marks as
+// non-member, or the reverse. One source of truth removes the possibility.
 func channelPrivacyCols(uidParam string) string {
-	return `, c.private,
-	        (NOT c.private OR EXISTS (
-	            SELECT 1 FROM channel_acl acl
-	            WHERE acl.short_host_id = c.short_host_id
-	            AND acl.channel_id = c.channel_id
-	            AND acl.uid = ` + uidParam + `)) AS acl_member`
+	return `, c.private, ` + privateVisibleToCaller("c", uidParam) + ` AS acl_member`
 }
 
 // lastSenderJoin attributes the channel's denormalized last message to its
