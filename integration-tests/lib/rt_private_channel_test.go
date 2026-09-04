@@ -224,6 +224,25 @@ func (s *privScene) rtdbUIDs(t *testing.T, q string) map[string]bool {
 	return ret
 }
 
+// channelTier reads a channel's stored tier straight from the database, so a
+// test can assert which gate it is actually exercising rather than assert it in
+// a comment that can drift.
+func (s *privScene) channelTier(t *testing.T, id proto.RTChannelID) proto.RTChannelTier {
+	m := s.tew.MetaContext()
+	db, err := m.Db(shared.DbTypeRealTime)
+	require.NoError(t, err)
+	defer db.Release()
+	var raw string
+	var private bool
+	require.NoError(t, db.QueryRow(m.Ctx(),
+		`SELECT tier, private FROM channels WHERE short_host_id=$1 AND channel_id=$2`,
+		m.ShortHostID(), id.Short().Int64()).Scan(&raw, &private))
+	require.True(t, private)
+	var tier proto.RTChannelTier
+	require.NoError(t, tier.ImportFromDB(raw))
+	return tier
+}
+
 func (s *privScene) aclUIDs(t *testing.T) map[string]bool {
 	return s.rtdbUIDs(t,
 		`SELECT uid FROM channel_acl WHERE short_host_id=$1 AND channel_id=$2`)
@@ -864,13 +883,26 @@ func TestPrivateSameErrorAsMissingChannel(t *testing.T) {
 	// "permission denied" is itself a disclosure: it says a channel exists at
 	// this id, which is the one thing a private channel must not admit.
 	highID, _ := sc.makePrivateAt(t, sc.alice, proto.OwnerRole)
+
+	// One channel covers both gates that could answer ahead of the ACL check.
+	// A read role of Owner puts it above cleo (the role gate), and the tier is
+	// DERIVED from the read role -- anything admin-or-above lands in the Admin
+	// tier -- so it is admin-tier too, and cleo is below that (the tier gate).
+	// Asserted rather than asserted-in-prose: if channel creation ever stops
+	// deriving the tier this way, this test should say so instead of quietly
+	// covering one gate while claiming two.
+	require.Equal(t, proto.RTChannelTier_Admin, sc.channelTier(t, highID),
+		"expected an admin-tier channel, so this case exercises the tier gate "+
+			"and the role gate together")
+
 	_, errPrivate = sc.cleo.raw(t).RtGetThread(sc.cleo.m.Ctx(), q(highID))
 	require.Equal(t, errMissingThread, errPrivate,
-		"a private channel whose read role is above the caller must still be "+
-			"indistinguishable from one that does not exist")
+		"a private channel whose read role and tier are both above the caller "+
+			"must still be indistinguishable from one that does not exist")
 
-	// Same for an admin-tier private channel probed from below admin: the tier
-	// gate must not answer before the ACL check either.
+	// The same channel through the recents path: what is new here is the RPC,
+	// not the channel. Both thread reads share getThreadGeneric, so this pins
+	// the second entry point to the same answer.
 	_, errPrivate = sc.cleo.raw(t).RtGetThreadRecents(sc.cleo.m.Ctx(),
 		rem.RtGetThreadRecentsArg{Ch: highID, Lim: 10})
 	_, errMissingRecents := sc.cleo.raw(t).RtGetThreadRecents(sc.cleo.m.Ctx(),
