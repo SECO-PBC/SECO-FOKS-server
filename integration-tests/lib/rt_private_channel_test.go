@@ -152,6 +152,24 @@ func setupPrivScene(t *testing.T, skipChannel bool) *privScene {
 
 func (s *privScene) teamCfg() lcl.ConfigTeam { return team.WrapNamedPtr(s.fqt) }
 
+// makePrivateAt creates an extra private channel at a chosen read/write role,
+// so tests can cover the case where the channel's read role sits ABOVE the
+// role of the person probing it (or above a team admin's).
+func (s *privScene) makePrivateAt(
+	t *testing.T, by *privActor, role proto.Role,
+) (proto.RTChannelID, proto.RTChannelName) {
+	nm, err := core.RandomDomain()
+	require.NoError(t, err)
+	name := proto.RTChannelName("hi-" + nm)
+	chid, err := by.minder.MakeChannelWithOpts(
+		by.m, s.teamCfg(), proto.RTAppID_Chat, name, "high read role",
+		proto.RolePairOpt{Read: &role, Write: &role},
+		librt.MakeChannelOpts{Private: true}, nil,
+	)
+	require.NoError(t, err)
+	return *chid, name
+}
+
 func (s *privScene) spec() lcl.RTChannelSpecifier {
 	return lcl.NewRTChannelSpecifierWithId(s.chid)
 }
@@ -739,15 +757,57 @@ func TestPrivateAclEqualsUserChannels(t *testing.T) {
 	// it must not do is deliver the message to him.
 	require.GreaterOrEqual(t, sc.inboxVersion(t, sc.eddie), before)
 
-	// Re-admitting him to the team does NOT put him back in the channel: the
-	// re-grant has to be explicit.
+	// Re-admitting him to the team does NOT put him back in the channel, BECAUSE
+	// the send above already pruned him: the rows are gone and a re-grant has to
+	// be explicit. (The order matters -- see the test below for what happens
+	// when no send intervenes.)
 	sc.tm.makeChanges(t, sc.tew.MetaContext(), sc.alice.u,
 		[]proto.MemberRole{sc.eddie.u.toMemberRole(t, proto.DefaultRole, sc.tm.hepks)}, nil)
 	_, err := sc.eddie.minder.GetChangedThreads(sc.eddie.m, proto.RTAppID_Chat, 0, 0)
 	require.NoError(t, err)
 	require.False(t, sc.aclUIDs(t)[sc.eddie.u.uid.EncodeHex()],
-		"re-joining the team must not silently re-join the private channel")
+		"re-joining the team after a prune must not silently re-join the channel")
 	same("after re-admission to the team")
+}
+
+// TestPrivateReadmissionBeforeAnySendKeepsMembership pins the LIMIT of the
+// team-leave cascade, so the guarantee in §6.3 is the one the code actually
+// gives rather than the one it would be nice to have.
+//
+// Pruning happens at send time and nothing else removes the rows, so a member
+// removed from the team and re-admitted before the channel's next message was
+// never pruned and is still a member. That is a real gap -- closing it needs an
+// eager cross-database cascade on team removal, which §7.2 rejects -- but it is
+// bounded: while they are out, every read is denied against the current roster,
+// so membership survives without any access surviving with it.
+func TestPrivateReadmissionBeforeAnySendKeepsMembership(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	sc.grant(t, sc.alice, sc.eddie, false)
+	require.True(t, sc.aclUIDs(t)[sc.eddie.u.uid.EncodeHex()])
+
+	// Out of the team, with no message sent in between.
+	sc.tm.makeChanges(t, sc.tew.MetaContext(), sc.alice.u,
+		[]proto.MemberRole{
+			sc.eddie.u.toMemberRole(t, proto.NewRoleDefault(proto.RoleType_NONE), nil),
+		}, nil)
+
+	// While out, he reads nothing -- the outer gate is what carries the
+	// guarantee here, not the ACL.
+	_, err := sc.eddie.raw(t).RtGetThreadRecents(sc.eddie.m.Ctx(),
+		rem.RtGetThreadRecentsArg{Ch: sc.chid, Lim: 10})
+	require.Error(t, err, "an ex-team-member must read nothing, ACL row or not")
+
+	// Back in the team, still with no send having occurred.
+	sc.tm.makeChanges(t, sc.tew.MetaContext(), sc.alice.u,
+		[]proto.MemberRole{sc.eddie.u.toMemberRole(t, proto.DefaultRole, sc.tm.hepks)}, nil)
+
+	require.True(t, sc.aclUIDs(t)[sc.eddie.u.uid.EncodeHex()],
+		"documented v1 behaviour: with no send to prune them, the ACL row "+
+			"survives a team round trip and membership comes back without a "+
+			"re-grant (§6.3). If this ever starts failing, the cascade became "+
+			"eager -- update §6.3, which currently promises only the post-prune "+
+			"guarantee.")
+	require.Equal(t, sc.aclUIDs(t), sc.deliveryUIDs(t))
 }
 
 // TestPrivateNoInboxBumpForNonMember: a non-member's inbox version and push
@@ -784,10 +844,11 @@ func TestPrivateSameErrorAsMissingChannel(t *testing.T) {
 		}
 	}
 	_, errPrivate := sc.cleo.raw(t).RtGetThread(sc.cleo.m.Ctx(), q(sc.chid))
-	_, errMissing := sc.cleo.raw(t).RtGetThread(sc.cleo.m.Ctx(), q(*missing))
+	_, errMissingThread := sc.cleo.raw(t).RtGetThread(sc.cleo.m.Ctx(), q(*missing))
 	require.Error(t, errPrivate)
-	require.Equal(t, errMissing, errPrivate,
+	require.Equal(t, errMissingThread, errPrivate,
 		"a private channel must be indistinguishable from one that does not exist")
+	errMissing := errMissingThread
 
 	errPrivate = sc.cleo.raw(t).RtReadThrough(sc.cleo.m.Ctx(),
 		rem.RTReadThroughArg{ChannelID: sc.chid, Seq: 1})
@@ -795,4 +856,60 @@ func TestPrivateSameErrorAsMissingChannel(t *testing.T) {
 		rem.RTReadThroughArg{ChannelID: *missing, Seq: 1})
 	require.Error(t, errPrivate)
 	require.Equal(t, errMissing, errPrivate)
+
+	// The case above is the easy one: cleo's team role clears the channel's
+	// read role, so only the ACL stands between her and it. The dangerous case
+	// is a private channel whose read role sits ABOVE her -- there, a role gate
+	// running before the ACL check would answer PermissionError, and
+	// "permission denied" is itself a disclosure: it says a channel exists at
+	// this id, which is the one thing a private channel must not admit.
+	highID, _ := sc.makePrivateAt(t, sc.alice, proto.OwnerRole)
+	_, errPrivate = sc.cleo.raw(t).RtGetThread(sc.cleo.m.Ctx(), q(highID))
+	require.Equal(t, errMissingThread, errPrivate,
+		"a private channel whose read role is above the caller must still be "+
+			"indistinguishable from one that does not exist")
+
+	// Same for an admin-tier private channel probed from below admin: the tier
+	// gate must not answer before the ACL check either.
+	_, errPrivate = sc.cleo.raw(t).RtGetThreadRecents(sc.cleo.m.Ctx(),
+		rem.RtGetThreadRecentsArg{Ch: highID, Lim: 10})
+	_, errMissingRecents := sc.cleo.raw(t).RtGetThreadRecents(sc.cleo.m.Ctx(),
+		rem.RtGetThreadRecentsArg{Ch: *missing, Lim: 10})
+	require.Error(t, errPrivate)
+	require.Equal(t, errMissingRecents, errPrivate)
+}
+
+// TestPrivateAdminManagesAboveOwnReadRole covers the authority §6.1 gives team
+// admins over private channels they cannot themselves read.
+//
+// A private channel whose read role is Owner is exactly the kind most likely
+// to need moderating, and an admin sits below its read role. Gating management
+// on readability would silently withdraw the documented power precisely there.
+func TestPrivateAdminManagesAboveOwnReadRole(t *testing.T) {
+	sc := setupPrivScene(t, true)
+
+	// alice (owner) makes a private channel readable only at Owner, and puts
+	// nobody else in it. dara is a team admin: below the read role.
+	highID, _ := sc.makePrivateAt(t, sc.alice, proto.OwnerRole)
+
+	// dara can see who is in it and can revoke, without being able to read it.
+	members, err := sc.dara.minder.ChannelMembers(sc.dara.m, highID)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	require.Equal(t, sc.alice.u.uid, members[0].Uid)
+
+	require.NoError(t, sc.dara.minder.RevokeChannelMember(sc.dara.m, highID, sc.alice.u.uid),
+		"a team admin must be able to moderate a private channel whose read "+
+			"role is above their own")
+
+	// But management is not a way in: dara still cannot grant a reader who
+	// does not clear the read role -- including herself.
+	err = sc.dara.minder.GrantChannelMember(sc.dara.m, highID, sc.dara.u.uid, false)
+	require.True(t, core.IsPermissionError(err),
+		"management must not let an admin smuggle in a reader below the read role; got %v", err)
+
+	// And she still cannot read it.
+	_, err = sc.dara.raw(t).RtGetThreadRecents(sc.dara.m.Ctx(),
+		rem.RtGetThreadRecentsArg{Ch: highID, Lim: 10})
+	require.Error(t, err, "managing a channel is not reading it")
 }

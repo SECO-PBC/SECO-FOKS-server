@@ -47,7 +47,20 @@ const (
 	// channel's members through channel_acl.granted_by, which is what makes
 	// "leaders can join, and you can see that they did" honest.
 	accessManage
+	// accessRoster: read the channel's ACL. Every channel MEMBER may, which is
+	// what makes an admin's self-grant visible to the channel rather than
+	// invisible (§6.1) -- so this is weaker than accessManage. Team admins may
+	// too, and must: an admin's authority to revoke is useless if they cannot
+	// first see who is in the channel.
+	accessRoster
 )
+
+// managementKind reports whether this access is about the ACL rather than the
+// channel's contents. Both skip the read-role gate: a team admin has to be
+// able to moderate a private channel whose read role sits above their own.
+func (a accessKind) managementKind() bool {
+	return a == accessManage || a == accessRoster
+}
 
 // Values stored in channel_acl.acl_role.
 const (
@@ -153,15 +166,47 @@ func authorizeChannel(
 	}
 	ca.teamRole = role
 
-	// 3. Tier gate: an admin-tier channel is invisible below admin. Implied by
+	// 3. Private existence gate, and it runs FIRST -- before the tier and role
+	// gates -- because those answer with PermissionError, which is itself a
+	// disclosure: it says "a channel exists at this id". For a public channel
+	// that is fine; for a private one, existence is the thing being hidden.
+	// A caller below the read role of a private channel they are not in must
+	// be unable to tell it from a channel id that was never issued.
+	if ca.private {
+		aclRole, found, err := readChannelAclRole(m, rtdb, channelID, m.UID())
+		if err != nil {
+			return nil, err
+		}
+		ca.aclOwner = found && aclRole == aclRoleOwner
+
+		// A team admin may manage (and hence join) a private channel they are
+		// not in -- Q1/Q2: leaders are transparently peers rather than
+		// invisible ones. Everyone else needs an ACL row, and gets the
+		// missing-channel error without one.
+		if !found && !(want.managementKind() && role.IsAdminOrAbove()) {
+			return nil, core.RowNotFoundError{}
+		}
+	}
+
+	// 4. Tier gate: an admin-tier channel is invisible below admin. Implied by
 	// the read-role gate for every channel librt creates (the tier is derived
 	// from the read role), but stated here so the chokepoint does not depend
-	// on that coincidence.
+	// on that coincidence. Reached only by a caller who already holds an ACL
+	// row (or is an admin managing), so it cannot disclose a private channel.
 	if ca.tier == proto.RTChannelTier_Admin && !role.IsAdminOrAbove() {
 		return nil, core.PermissionError("user role too low for an admin-tier channel")
 	}
 
-	// 4. Role gate.
+	// 5. Role gate, for reads and writes only.
+	//
+	// Management is deliberately NOT gated on the read role. A team admin must
+	// be able to moderate -- above all, to revoke someone from -- a private
+	// channel whose read role sits above their own; that is the whole of the
+	// authority §6.1 gives them, and gating it on readability would silently
+	// withdraw it for exactly the channels most likely to need moderating.
+	// Management cannot be used to smuggle an ineligible reader in either way:
+	// GrantChannelMember independently requires the GRANTEE to clear the read
+	// role, so an admin below it cannot even grant themselves.
 	switch want {
 	case accessWrite:
 		writeRole, err := core.ImportRole(ca.writeRole)
@@ -171,7 +216,7 @@ func authorizeChannel(
 		if role.LessThan(*writeRole) {
 			return nil, core.PermissionError("user role too low to send into channel")
 		}
-	default:
+	case accessRead:
 		readRole, err := core.ImportRole(ca.readRole)
 		if err != nil {
 			return nil, err
@@ -179,32 +224,24 @@ func authorizeChannel(
 		if role.LessThan(*readRole) {
 			return nil, core.PermissionError("user role too low to read channel")
 		}
+	case accessManage, accessRoster:
+		// see above
 	}
 
-	// 5. Private gate.
-	if !ca.private {
-		if want == accessManage {
+	// 6. ACL authority.
+	if want.managementKind() {
+		if !ca.private {
+			// Reached only after the tier gate, so this cannot be used to
+			// probe for an admin-tier channel from below admin.
 			return nil, core.BadArgsError("channel is not private; it has no ACL")
 		}
-		return &ca, nil
-	}
-	aclRole, found, err := readChannelAclRole(m, rtdb, channelID, m.UID())
-	if err != nil {
-		return nil, err
-	}
-	ca.aclOwner = found && aclRole == aclRoleOwner
-
-	// A team admin may manage (and hence join) a private channel they are not
-	// in -- Q1/Q2: leaders are transparently peers rather than invisible ones.
-	// Everyone else needs an ACL row, and gets the missing-channel error if
-	// they lack one, so existence is not disclosed.
-	if !found && !(want == accessManage && role.IsAdminOrAbove()) {
-		return nil, core.RowNotFoundError{}
-	}
-	if want == accessManage && !ca.aclOwner && !role.IsAdminOrAbove() {
-		// The caller is a plain channel member: they already know the channel
-		// exists, so there is nothing to hide behind RowNotFound here.
-		return nil, core.PermissionError("must be a channel owner or team admin to manage membership")
+		// Reading the roster needs no more than the membership (or admin
+		// standing) established in step 3. Changing it needs ownership.
+		if want == accessManage && !ca.aclOwner && !role.IsAdminOrAbove() {
+			// The caller holds an ACL row, so they already know the channel
+			// exists: there is nothing left to hide behind RowNotFound.
+			return nil, core.PermissionError("must be a channel owner or team admin to manage membership")
+		}
 	}
 	return &ca, nil
 }
@@ -464,9 +501,25 @@ func activeTeamMembers(
 // For a private channel the fix is exact and cheap, because private channels
 // are small: at send time, re-validate every recipient against the team roster
 // and drop the ACL + delivery rows of anyone who has left. A member removed
-// from the team therefore stops receiving anything from the first message
-// after their removal, and -- because channel_acl carries granted_by -- is not
-// silently back in the channel if they are later re-admitted to the team.
+// from the team stops receiving anything from the first message after their
+// removal.
+//
+// Two limits, both from the same laziness, both stated exactly rather than
+// rounded up (§6.3):
+//
+//   - It runs at SEND time and nothing else prunes, so a member removed from
+//     the team and re-admitted before the channel's next message keeps their
+//     rows throughout and is still a member -- no re-grant needed. They read
+//     nothing while out, because the outer gate re-checks the roster on every
+//     access; this is membership surviving a round trip, not a read leak.
+//   - team_members lives in the users DB and cannot join this transaction, so
+//     a removal committing between the roster read and the fan-out lets that
+//     one message bump the removed member's inbox version and queue a
+//     content-free push wake. The next send prunes them. The residual is one
+//     "something happened" signal, never content.
+//
+// Closing either would take an eager cross-database cascade on team removal --
+// exactly the lifecycle coupling §7.2 rejects.
 //
 // Runs in the send's transaction, before the fan-out selects its recipients.
 func pruneStaleChannelMembers(
@@ -713,10 +766,13 @@ func RevokeChannelMember(
 
 // ListChannelMembers returns a private channel's ACL.
 //
-// Gated at accessRead, not accessManage: §6.1 turns on every member being able
-// to see who is in the channel and who let them in, since that is what makes a
-// team admin's self-grant transparent rather than invisible. Non-members still
-// get the missing-channel error from the chokepoint.
+// Gated at accessRoster, which is weaker than accessManage on purpose: §6.1
+// turns on every MEMBER being able to see who is in the channel and who let
+// them in, since that is what makes a team admin's self-grant transparent
+// rather than invisible. It is also why this is not accessRead -- a team admin
+// below the channel's read role must still be able to enumerate it, or their
+// authority to revoke someone is useless for want of knowing who is there.
+// Non-members still get the missing-channel error from the chokepoint.
 func ListChannelMembers(
 	m shared.MetaContext,
 	channelID proto.RTChannelID,
@@ -736,12 +792,9 @@ func ListChannelMembers(
 	defer userdb.Release()
 
 	chid := channelID.Short().Int64()
-	ca, err := authorizeChannel(m, rtdb, userdb, chid, accessRead, false)
+	_, err = authorizeChannel(m, rtdb, userdb, chid, accessRoster, false)
 	if err != nil {
 		return nil, err
-	}
-	if !ca.private {
-		return nil, core.BadArgsError("channel is not private; it has no ACL")
 	}
 	rows, err := rtdb.Query(
 		m.Ctx(),

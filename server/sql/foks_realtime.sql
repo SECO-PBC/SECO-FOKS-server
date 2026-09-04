@@ -143,7 +143,11 @@ CREATE TABLE channel_acl (
     short_host_id SMALLINT NOT NULL,
     channel_id BIGINT NOT NULL,
     uid BYTEA NOT NULL,
-    acl_role SMALLINT NOT NULL, /* 0 = member, 1 = owner (may grant/revoke) */
+    /* 0 = member, 1 = owner (may grant/revoke). Constrained rather than merely
+     * documented: the authorization code reads 1 as owner and treats anything
+     * else as member, so an out-of-domain value written by a future writer or
+     * a hand-run data repair would silently demote an owner rather than fail. */
+    acl_role SMALLINT NOT NULL CHECK (acl_role IN (0, 1)),
     granted_by BYTEA NOT NULL, /* uid of the granter; audit trail, shown to members */
     ctime TIMESTAMPTZ NOT NULL,
     PRIMARY KEY(short_host_id, channel_id, uid),

@@ -462,50 +462,6 @@ type RTChannelMetadataInternal__ struct {
 	Deprecated17 *struct{}
 	Deprecated18 *struct{}
 	Deprecated19 *struct{}
-	Deprecated20 *struct{}
-	Deprecated21 *struct{}
-	Deprecated22 *struct{}
-	Deprecated23 *struct{}
-	Deprecated24 *struct{}
-	Deprecated25 *struct{}
-	Deprecated26 *struct{}
-	Deprecated27 *struct{}
-	Deprecated28 *struct{}
-	Deprecated29 *struct{}
-	Deprecated30 *struct{}
-	Deprecated31 *struct{}
-	Deprecated32 *struct{}
-	Deprecated33 *struct{}
-	Deprecated34 *struct{}
-	Deprecated35 *struct{}
-	Deprecated36 *struct{}
-	Deprecated37 *struct{}
-	Deprecated38 *struct{}
-	Deprecated39 *struct{}
-	Deprecated40 *struct{}
-	Deprecated41 *struct{}
-	Deprecated42 *struct{}
-	Deprecated43 *struct{}
-	Deprecated44 *struct{}
-	Deprecated45 *struct{}
-	Deprecated46 *struct{}
-	Deprecated47 *struct{}
-	Deprecated48 *struct{}
-	Deprecated49 *struct{}
-	Deprecated50 *struct{}
-	Deprecated51 *struct{}
-	Deprecated52 *struct{}
-	Deprecated53 *struct{}
-	Deprecated54 *struct{}
-	Deprecated55 *struct{}
-	Deprecated56 *struct{}
-	Deprecated57 *struct{}
-	Deprecated58 *struct{}
-	Deprecated59 *struct{}
-	Deprecated60 *struct{}
-	Deprecated61 *struct{}
-	Deprecated62 *struct{}
-	Deprecated63 *struct{}
 	Private      *bool
 }
 

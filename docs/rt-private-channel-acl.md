@@ -174,6 +174,18 @@ here for fork-only methods. If any of this is ever proposed upstream, the
 numbers get renegotiated at that point — a rename/renumber is a mechanical
 change, a collision in the field is not.
 
+**Correction (as built): sparse RPC numbers are free, sparse FIELD numbers are
+not.** This section treated the two as one decision, and they are not the same
+mechanism. RPC numbers are method ids, so `@200+` costs nothing. Struct fields
+are *positional* — the codegen emits `codec:",toarray"` — so every skipped field
+number becomes a nil placeholder on every encoded record. Measured: `private
+@64` made an otherwise-empty `RTChannelMetadata` 133 bytes against 80 with no
+gap — 53 bytes of padding on a struct returned once per channel in every
+`rtListAllChannelsForTeam` response and every `rtGetChangedThreads` page (up to
+1000 per page). Shipped as `private @20`: 89 bytes, still seven free slots above
+upstream's current `@12`, and a collision there fails loudly at merge because
+snowpc rejects duplicate field numbers.
+
 `rtNewChannel @0` with `md.private == true` creates the channel with the
 creator as ACL owner and fans out ONLY to the creator (not the team). Members
 are added via `rtChannelGrant`. (Alternative considered: an initial members
@@ -181,7 +193,7 @@ list on create — rejected for v1; two RPCs beat a new arg struct, and
 "create then invite" mirrors the UI anyway.)
 
 `RTChannelMetadata` (`proto-src/rem/realtime.snowp:62-74`) gains
-`private @64 : Bool`, alongside the existing `tier @11` / `unreadable @12`.
+`private @20 : Bool`, alongside the existing `tier @11` / `unreadable @12`.
 
 ### 4.5 librt (`client/librt/minder.go`)
 
@@ -226,7 +238,7 @@ that must exist (§8).
 | 9 | Late-join fan-in (`fanin.go:267`) | adds `user_channels` rows | role ≥ readRole | `AND NOT c.private` | `TestPrivateNotFannedInOnJoin` |
 | 10 | `rtReadThrough @7` (`messages.go:547`) | — | needs a `user_channels` row | unchanged (row deleted on revoke) | `TestPrivateReadThroughAfterRevoke` |
 | 11 | `rtNewChannel @0` creation + fan-out (`channels.go:630`) | `user_channels` rows for the team | all team members ≥ readRole | creator must be admin+ (Q2b); fan-out to creator only | `TestPrivateCreateRequiresAdmin`, `TestPrivateCreateFansOutToCreatorOnly` |
-| 12 | `rtChannelGrant/Revoke/Members @12-14` | ACL | — | chokepoint `want=manage` (owner or team admin) | `TestPrivateGrantRequiresOwnerOrAdmin` |
+| 12 | `rtChannelGrant/Revoke @200-201`, `rtChannelMembers @202` | ACL | — | chokepoint `want=manage` (owner or team admin); `rtChannelMembers` is `want=roster` — every member may read the ACL (§6.1), and a team admin may too even below the read role, or their authority to revoke is useless for want of knowing who is there | `TestPrivateGrantRequiresOwnerOrAdmin`, `TestPrivateAdminManagesAboveOwnReadRole` |
 | 13 | `rtSelectVHost @9`, `rtSetPushToken @11` | — | n/a | n/a (no channel data) | inventory guard only |
 | 14 | `channel_parties` / `lastSenderJoin` (`channels.go:201`) | last sender in listing | rides on 5 | rides on 5 | covered by 5 |
 | 15 | push relay (`seco-server/push-relay`) | APNs wake | reads `push_outbox` | content-free; correct iff 4 is | covered by 4 |
@@ -299,8 +311,29 @@ against `team_members` (users DB, one indexed lookup per recipient) and, for
 any that fail, delete their `channel_acl` + `user_channels` rows in the same
 transaction before fanning out. A revoked-by-team-leave member thus stops
 receiving anything from the first message after their removal. `channel_acl`
-rows also carry `granted_by` so a member removed and later re-admitted to the
-team is NOT silently back in the channel — re-grant is explicit.
+rows also carry `granted_by`, so once the prune has run, a member removed and
+later re-admitted to the team is NOT silently back in the channel — re-grant is
+explicit.
+
+**Bounded by the prune's laziness, and stated exactly (as built).** The prune
+happens at send time, and the late-join fan-in skips private channels, so
+nothing removes the rows in between. A member removed from the team and
+re-admitted *before the channel's next message* therefore keeps their
+`channel_acl` and `user_channels` rows throughout, and is still a member — no
+re-grant required. They read nothing while out (the outer gate denies every
+access against the current roster), so this is a membership-survives-a-round-trip
+window, not a read leak. Closing it would need an eager cascade on team removal
+— a cross-database write from the team code into the realtime DB, and exactly
+the lifecycle coupling §7.2 rejects — so v1 accepts it and says so here rather
+than claiming a guarantee it does not have.
+
+The same laziness bounds the send-time check itself: it reads `team_members`
+from the users DB, which cannot join the realtime send transaction (separate
+databases, no cross-DB transaction). A removal committing between that read and
+the fan-out lets *that one message* bump the removed member's inbox version and
+queue a content-free push wake; the next send prunes them. The residual is one
+"something happened" signal to a just-removed member, never content — every read
+path re-authorizes against the current roster.
 
 ### 6.4 Channel owner leaves the team
 ACL row pruned by §6.3. If no owner remains, team admins retain management

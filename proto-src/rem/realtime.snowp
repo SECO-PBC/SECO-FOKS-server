@@ -73,11 +73,21 @@ struct RTChannelMetadata @0xddf6b26b2ace1535 {
     tier @11 : lib.RTChannelTier;
     unreadable @12 : Bool; // caller's role is below the read role: name is shown
                            // (for collision detection) but desc/lastMsg withheld
-    // FORK-ONLY (see docs/rt-private-channel-acl.md). Sparse-numbered from @64
-    // so upstream can keep appending at @13+ without colliding on merge.
-    // A private channel additionally requires a channel_acl row; privacy is
-    // orthogonal to tier, not a third tier.
-    private @64 : Bool;
+    // FORK-ONLY (see docs/rt-private-channel-acl.md). A private channel
+    // additionally requires a channel_acl row; privacy is orthogonal to tier,
+    // not a third tier.
+    //
+    // Numbered @20, not @64. Struct fields here are POSITIONAL (the codegen
+    // emits `codec:",toarray"`), so every skipped number becomes a nil
+    // placeholder on the wire: @64 measured 133 bytes for an otherwise-empty
+    // RTChannelMetadata against 80 at a low number -- 53 bytes of padding on
+    // a record returned once per channel in every listing and every inbox
+    // page. RPC numbers are method ids and cost nothing to scatter (hence
+    // @200+ below); field numbers are array slots and do not. @20 still
+    // leaves upstream seven slots after its current @12, and a collision
+    // there is a loud one -- snowpc rejects duplicate field numbers, so it
+    // surfaces at merge, not in the field.
+    private @20 : Bool;
 }
 
 // FORK-ONLY. One member of a private channel's ACL. grantedBy is the audit
