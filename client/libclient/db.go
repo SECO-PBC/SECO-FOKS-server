@@ -211,6 +211,13 @@ type PutArg struct {
 	Counter *int64
 	Set     bool
 	Idx     *int64
+
+	// Del turns this row into a delete of (Scope, Typ, Key) from
+	// scoped_data, so a caller can retire one row and rewrite another in a
+	// single transaction rather than leaving a window where the two
+	// disagree. Val must be nil; Idx (ranged_data) is not supported.
+	// Deleting a row that is not there is not an error.
+	Del bool
 }
 
 func (g *GlobalContext) DbPut(ctx context.Context, which DbType, row PutArg) error {
@@ -791,6 +798,27 @@ func (d *DB) PutTx(m MetaContext, rows []PutArg) error {
 			checkRows := true
 
 			switch {
+			case row.Del:
+				// Set means global_set, which this arm does not touch; without
+				// rejecting it a Del+Set row would silently delete nothing
+				// from scoped_data and report success.
+				if row.Val != nil || row.Counter != nil || row.Idx != nil || row.Set {
+					return core.InternalError("delete row takes only scope/typ/key")
+				}
+				key, err := core.NewDbKey(row.Key)
+				if err != nil {
+					return err
+				}
+				if scopeIDs[i] == 0 {
+					return core.InternalError("scopeID is 0")
+				}
+				rkey = key
+				q = `DELETE FROM scoped_data WHERE scope_id=$1 AND typ=$2 AND key=$3`
+				args = []any{int(scopeIDs[i]), row.Typ.ExportToDB(), key.ExportToDB()}
+				// A delete of an absent row affects zero rows and is fine:
+				// callers use this to converge state, not to assert it.
+				checkRows = false
+
 			case row.Typ == lcl.DataType_None:
 				if valRaw == nil {
 					return core.InternalError("nil value on insert")

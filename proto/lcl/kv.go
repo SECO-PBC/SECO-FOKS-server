@@ -500,12 +500,14 @@ type GetFileRes struct {
 	Chunk GetFileChunkRes
 	De    lib.KVDirent
 	Id    *lib.FileID
+	Stale bool
 }
 type GetFileResInternal__ struct {
 	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
 	Chunk   *GetFileChunkResInternal__
 	De      *lib.KVDirentInternal__
 	Id      *lib.FileIDInternal__
+	Stale   *bool
 }
 
 func (g GetFileResInternal__) Import() GetFileRes {
@@ -534,6 +536,12 @@ func (g GetFileResInternal__) Import() GetFileRes {
 			})(x)
 			return &tmp
 		})(g.Id),
+		Stale: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(g.Stale),
 	}
 }
 func (g GetFileRes) Export() *GetFileResInternal__ {
@@ -546,6 +554,7 @@ func (g GetFileRes) Export() *GetFileResInternal__ {
 			}
 			return (*x).Export()
 		})(g.Id),
+		Stale: &g.Stale,
 	}
 }
 func (g *GetFileRes) Encode(enc rpc.Encoder) error {
@@ -863,6 +872,7 @@ type KVStat struct {
 	V     KVStatVar
 	Read  lib.RoleAndGen
 	Write lib.Role
+	Stale bool
 }
 type KVStatInternal__ struct {
 	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -870,6 +880,7 @@ type KVStatInternal__ struct {
 	V       *KVStatVarInternal__
 	Read    *lib.RoleAndGenInternal__
 	Write   *lib.RoleInternal__
+	Stale   *bool
 }
 
 func (k KVStatInternal__) Import() KVStat {
@@ -904,6 +915,12 @@ func (k KVStatInternal__) Import() KVStat {
 			}
 			return x.Import()
 		})(k.Write),
+		Stale: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(k.Stale),
 	}
 }
 func (k KVStat) Export() *KVStatInternal__ {
@@ -917,6 +934,7 @@ func (k KVStat) Export() *KVStatInternal__ {
 		V:     k.V.Export(),
 		Read:  k.Read.Export(),
 		Write: k.Write.Export(),
+		Stale: &k.Stale,
 	}
 }
 func (k *KVStat) Encode(enc rpc.Encoder) error {
@@ -934,6 +952,411 @@ func (k *KVStat) Decode(dec rpc.Decoder) error {
 }
 
 func (k *KVStat) Bytes() []byte { return nil }
+
+type KVOutboxOp int
+
+const (
+	KVOutboxOp_PutSmallFile KVOutboxOp = 0
+	KVOutboxOp_PutSymlink   KVOutboxOp = 1
+	KVOutboxOp_Unlink       KVOutboxOp = 2
+	KVOutboxOp_Mkdir        KVOutboxOp = 3
+)
+
+var KVOutboxOpMap = map[string]KVOutboxOp{
+	"PutSmallFile": 0,
+	"PutSymlink":   1,
+	"Unlink":       2,
+	"Mkdir":        3,
+}
+var KVOutboxOpRevMap = map[KVOutboxOp]string{
+	0: "PutSmallFile",
+	1: "PutSymlink",
+	2: "Unlink",
+	3: "Mkdir",
+}
+
+type KVOutboxOpInternal__ KVOutboxOp
+
+func (k KVOutboxOpInternal__) Import() KVOutboxOp {
+	return KVOutboxOp(k)
+}
+func (k KVOutboxOp) Export() *KVOutboxOpInternal__ {
+	return ((*KVOutboxOpInternal__)(&k))
+}
+
+type KVOutboxState int
+
+const (
+	KVOutboxState_Queued     KVOutboxState = 0
+	KVOutboxState_Conflicted KVOutboxState = 1
+	KVOutboxState_Failed     KVOutboxState = 2
+)
+
+var KVOutboxStateMap = map[string]KVOutboxState{
+	"Queued":     0,
+	"Conflicted": 1,
+	"Failed":     2,
+}
+var KVOutboxStateRevMap = map[KVOutboxState]string{
+	0: "Queued",
+	1: "Conflicted",
+	2: "Failed",
+}
+
+type KVOutboxStateInternal__ KVOutboxState
+
+func (k KVOutboxStateInternal__) Import() KVOutboxState {
+	return KVOutboxState(k)
+}
+func (k KVOutboxState) Export() *KVOutboxStateInternal__ {
+	return ((*KVOutboxStateInternal__)(&k))
+}
+
+type KVOutboxPayload struct {
+	Op          KVOutboxOp
+	Path        lib.KVPath
+	Nid         lib.KVNodeID
+	Sfb         lib.SmallFileBox
+	ReadRole    lib.Role
+	WriteRole   lib.Role
+	DirentVers  lib.KVVersion
+	OverwriteOk bool
+	Dir         *lib.KVDir
+}
+type KVOutboxPayloadInternal__ struct {
+	_struct     struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Op          *KVOutboxOpInternal__
+	Path        *lib.KVPathInternal__
+	Nid         *lib.KVNodeIDInternal__
+	Sfb         *lib.SmallFileBoxInternal__
+	ReadRole    *lib.RoleInternal__
+	WriteRole   *lib.RoleInternal__
+	DirentVers  *lib.KVVersionInternal__
+	OverwriteOk *bool
+	Dir         *lib.KVDirInternal__
+}
+
+func (k KVOutboxPayloadInternal__) Import() KVOutboxPayload {
+	return KVOutboxPayload{
+		Op: (func(x *KVOutboxOpInternal__) (ret KVOutboxOp) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Op),
+		Path: (func(x *lib.KVPathInternal__) (ret lib.KVPath) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Path),
+		Nid: (func(x *lib.KVNodeIDInternal__) (ret lib.KVNodeID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Nid),
+		Sfb: (func(x *lib.SmallFileBoxInternal__) (ret lib.SmallFileBox) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Sfb),
+		ReadRole: (func(x *lib.RoleInternal__) (ret lib.Role) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.ReadRole),
+		WriteRole: (func(x *lib.RoleInternal__) (ret lib.Role) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.WriteRole),
+		DirentVers: (func(x *lib.KVVersionInternal__) (ret lib.KVVersion) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.DirentVers),
+		OverwriteOk: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(k.OverwriteOk),
+		Dir: (func(x *lib.KVDirInternal__) *lib.KVDir {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *lib.KVDirInternal__) (ret lib.KVDir) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(k.Dir),
+	}
+}
+func (k KVOutboxPayload) Export() *KVOutboxPayloadInternal__ {
+	return &KVOutboxPayloadInternal__{
+		Op:          k.Op.Export(),
+		Path:        k.Path.Export(),
+		Nid:         k.Nid.Export(),
+		Sfb:         k.Sfb.Export(),
+		ReadRole:    k.ReadRole.Export(),
+		WriteRole:   k.WriteRole.Export(),
+		DirentVers:  k.DirentVers.Export(),
+		OverwriteOk: &k.OverwriteOk,
+		Dir: (func(x *lib.KVDir) *lib.KVDirInternal__ {
+			if x == nil {
+				return nil
+			}
+			return (*x).Export()
+		})(k.Dir),
+	}
+}
+func (k *KVOutboxPayload) Encode(enc rpc.Encoder) error {
+	return enc.Encode(k.Export())
+}
+
+func (k *KVOutboxPayload) Decode(dec rpc.Decoder) error {
+	var tmp KVOutboxPayloadInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*k = tmp.Import()
+	return nil
+}
+
+var KVOutboxPayloadTypeUniqueID = rpc.TypeUniqueID(0xb85398c1e77ad402)
+
+func (k *KVOutboxPayload) GetTypeUniqueID() rpc.TypeUniqueID {
+	return KVOutboxPayloadTypeUniqueID
+}
+func (k *KVOutboxPayload) Bytes() []byte { return nil }
+
+type KVOutboxEntry struct {
+	State       KVOutboxState
+	Rg          lib.RoleAndGen
+	Box         lib.SecretBox
+	Attempts    uint64
+	LastErrCode lib.StatusCode
+	Ord         uint64
+	Ctime       lib.TimeMicro
+}
+type KVOutboxEntryInternal__ struct {
+	_struct     struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	State       *KVOutboxStateInternal__
+	Rg          *lib.RoleAndGenInternal__
+	Box         *lib.SecretBoxInternal__
+	Attempts    *uint64
+	LastErrCode *lib.StatusCodeInternal__
+	Ord         *uint64
+	Ctime       *lib.TimeMicroInternal__
+}
+
+func (k KVOutboxEntryInternal__) Import() KVOutboxEntry {
+	return KVOutboxEntry{
+		State: (func(x *KVOutboxStateInternal__) (ret KVOutboxState) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.State),
+		Rg: (func(x *lib.RoleAndGenInternal__) (ret lib.RoleAndGen) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Rg),
+		Box: (func(x *lib.SecretBoxInternal__) (ret lib.SecretBox) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Box),
+		Attempts: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(k.Attempts),
+		LastErrCode: (func(x *lib.StatusCodeInternal__) (ret lib.StatusCode) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.LastErrCode),
+		Ord: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(k.Ord),
+		Ctime: (func(x *lib.TimeMicroInternal__) (ret lib.TimeMicro) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Ctime),
+	}
+}
+func (k KVOutboxEntry) Export() *KVOutboxEntryInternal__ {
+	return &KVOutboxEntryInternal__{
+		State:       k.State.Export(),
+		Rg:          k.Rg.Export(),
+		Box:         k.Box.Export(),
+		Attempts:    &k.Attempts,
+		LastErrCode: k.LastErrCode.Export(),
+		Ord:         &k.Ord,
+		Ctime:       k.Ctime.Export(),
+	}
+}
+func (k *KVOutboxEntry) Encode(enc rpc.Encoder) error {
+	return enc.Encode(k.Export())
+}
+
+func (k *KVOutboxEntry) Decode(dec rpc.Decoder) error {
+	var tmp KVOutboxEntryInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*k = tmp.Import()
+	return nil
+}
+
+func (k *KVOutboxEntry) Bytes() []byte { return nil }
+
+type KVOutboxIndexEntry struct {
+	Ord   uint64
+	Eid   lib.KVNodeID
+	State KVOutboxState
+}
+type KVOutboxIndexEntryInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Ord     *uint64
+	Eid     *lib.KVNodeIDInternal__
+	State   *KVOutboxStateInternal__
+}
+
+func (k KVOutboxIndexEntryInternal__) Import() KVOutboxIndexEntry {
+	return KVOutboxIndexEntry{
+		Ord: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(k.Ord),
+		Eid: (func(x *lib.KVNodeIDInternal__) (ret lib.KVNodeID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Eid),
+		State: (func(x *KVOutboxStateInternal__) (ret KVOutboxState) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.State),
+	}
+}
+func (k KVOutboxIndexEntry) Export() *KVOutboxIndexEntryInternal__ {
+	return &KVOutboxIndexEntryInternal__{
+		Ord:   &k.Ord,
+		Eid:   k.Eid.Export(),
+		State: k.State.Export(),
+	}
+}
+func (k *KVOutboxIndexEntry) Encode(enc rpc.Encoder) error {
+	return enc.Encode(k.Export())
+}
+
+func (k *KVOutboxIndexEntry) Decode(dec rpc.Decoder) error {
+	var tmp KVOutboxIndexEntryInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*k = tmp.Import()
+	return nil
+}
+
+func (k *KVOutboxIndexEntry) Bytes() []byte { return nil }
+
+type KVOutboxIndex struct {
+	Entries []KVOutboxIndexEntry
+	NextOrd uint64
+}
+type KVOutboxIndexInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Entries *[](*KVOutboxIndexEntryInternal__)
+	NextOrd *uint64
+}
+
+func (k KVOutboxIndexInternal__) Import() KVOutboxIndex {
+	return KVOutboxIndex{
+		Entries: (func(x *[](*KVOutboxIndexEntryInternal__)) (ret []KVOutboxIndexEntry) {
+			if x == nil || len(*x) == 0 {
+				return nil
+			}
+			ret = make([]KVOutboxIndexEntry, len(*x))
+			for k, v := range *x {
+				if v == nil {
+					continue
+				}
+				ret[k] = (func(x *KVOutboxIndexEntryInternal__) (ret KVOutboxIndexEntry) {
+					if x == nil {
+						return ret
+					}
+					return x.Import()
+				})(v)
+			}
+			return ret
+		})(k.Entries),
+		NextOrd: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(k.NextOrd),
+	}
+}
+func (k KVOutboxIndex) Export() *KVOutboxIndexInternal__ {
+	return &KVOutboxIndexInternal__{
+		Entries: (func(x []KVOutboxIndexEntry) *[](*KVOutboxIndexEntryInternal__) {
+			if len(x) == 0 {
+				return nil
+			}
+			ret := make([](*KVOutboxIndexEntryInternal__), len(x))
+			for k, v := range x {
+				ret[k] = v.Export()
+			}
+			return &ret
+		})(k.Entries),
+		NextOrd: &k.NextOrd,
+	}
+}
+func (k *KVOutboxIndex) Encode(enc rpc.Encoder) error {
+	return enc.Encode(k.Export())
+}
+
+func (k *KVOutboxIndex) Decode(dec rpc.Decoder) error {
+	var tmp KVOutboxIndexInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*k = tmp.Import()
+	return nil
+}
+
+func (k *KVOutboxIndex) Bytes() []byte { return nil }
 
 type KVListNext struct {
 	Id  lib.DirID
@@ -987,12 +1410,14 @@ type CliKVListRes struct {
 	Ents   []KVListEntry
 	Nxt    *KVListNext
 	Parent lib.KVPath
+	Stale  bool
 }
 type CliKVListResInternal__ struct {
 	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
 	Ents    *[](*KVListEntryInternal__)
 	Nxt     *KVListNextInternal__
 	Parent  *lib.KVPathInternal__
+	Stale   *bool
 }
 
 func (c CliKVListResInternal__) Import() CliKVListRes {
@@ -1033,6 +1458,12 @@ func (c CliKVListResInternal__) Import() CliKVListRes {
 			}
 			return x.Import()
 		})(c.Parent),
+		Stale: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(c.Stale),
 	}
 }
 func (c CliKVListRes) Export() *CliKVListResInternal__ {
@@ -1054,6 +1485,7 @@ func (c CliKVListRes) Export() *CliKVListResInternal__ {
 			return (*x).Export()
 		})(c.Nxt),
 		Parent: c.Parent.Export(),
+		Stale:  &c.Stale,
 	}
 }
 func (c *CliKVListRes) Encode(enc rpc.Encoder) error {
@@ -2966,6 +3398,7 @@ func init() {
 	rpc.AddUnique(SmallFileBoxPayloadTypeUniqueID)
 	rpc.AddUnique(KVDirentNamePayloadTypeUniqueID)
 	rpc.AddUnique(FileKeyBoxPayloadTypeUniqueID)
+	rpc.AddUnique(KVOutboxPayloadTypeUniqueID)
 	rpc.AddUnique(ChunkNoncePayloadTypeUniqueID)
 	rpc.AddUnique(KVProtocolID)
 }

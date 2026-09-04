@@ -47,6 +47,7 @@ struct GetFileRes {
     chunk @0 : GetFileChunkRes;
     de @1 : lib.KVDirent; // returned if we need to lock this file later
     id @2 : Option(lib.FileID); // Only needed for large files, with >1 chunk
+    stale @3 : Bool; // served from local cache; server unreachable, so unvalidated
 }
 
 struct KVStatFile {
@@ -73,6 +74,68 @@ struct KVStat {
     v @1 : KVStatVar;             // variant that varies per node type
     read @2 : lib.RoleAndGen;     // minimum role for reading, and also, which PTK gen it's encrypted for
     write @3 : lib.Role;          // minimum roles required to write it
+    stale @4 : Bool;              // served from local cache; server unreachable, so unvalidated
+}
+
+enum KVOutboxOp {
+    PutSmallFile @0;
+    PutSymlink @1;
+    Unlink @2;
+    Mkdir @3;
+}
+
+enum KVOutboxState {
+    Queued @0;     // waiting on a drain; the write has not happened yet
+    Conflicted @1; // CAS lost to another writer at drain; held for the user (D6)
+    Failed @2;     // semantic rejection at drain (e.g. quota); held, not retried
+}
+
+// The sealed intent of one queued KV write (docs/kv_offline.md D3): what the
+// drain needs to re-run the write against live key material -- not a prepared
+// dirent, which cannot survive a directory rotation (D4). Boxed under the
+// party's KV-store key before it reaches the local DB, which stores values
+// unencrypted; a queued path must not land on disk in the clear.
+struct KVOutboxPayload @0xb85398c1e77ad402 {
+    op @0 : KVOutboxOp;
+    path @1 : lib.KVPath;
+    nid @2 : lib.KVNodeID;         // client-chosen at queue time; stable across drains (D5)
+    sfb @3 : lib.SmallFileBox;     // sealed node content; zero for Unlink
+    readRole @4 : lib.Role;
+    writeRole @5 : lib.Role;
+    direntVers @6 : lib.KVVersion; // CAS predicate observed at queue time; 0 = expect absent
+    overwriteOk @7 : Bool;
+    dir @8 : Option(lib.KVDir);    // Mkdir only: the sealed dir (id, v1, boxed seed, roles)
+}
+
+// One queued KV write, stored in the local soft DB under the party scope,
+// keyed by its ord. The intent is sealed (see KVOutboxPayload); rg names the
+// party key generation that sealed it so the drain can re-derive.
+struct KVOutboxEntry {
+    state @0 : KVOutboxState;
+    rg @1 : lib.RoleAndGen;
+    box @2 : lib.SecretBox;    // a KVOutboxPayload
+    attempts @3 : Uint;
+    // The last drain rejection, as a status code rather than its message.
+    // Error strings carry paths -- KVNoentError prints the path it could not
+    // find -- and the local DB stores values unencrypted, which is the whole
+    // reason the payload above is sealed. A closed enum cannot leak one.
+    lastErrCode @4 : lib.StatusCode;
+    ord @5 : Uint;
+    ctime @6 : lib.TimeMicro;
+}
+
+struct KVOutboxIndexEntry {
+    ord @0 : Uint;
+    eid @1 : lib.KVNodeID;     // opaque entry id; the entry row's key. Equal to
+                               // the payload nid for puts; minted fresh for unlinks
+    state @2 : KVOutboxState;  // mirrors the entry row
+}
+
+// Singleton row (per party scope) indexing the outbox entries, since the DB
+// layer can't enumerate keys within a scope (the RTOutboxIndex pattern).
+struct KVOutboxIndex {
+    entries @0 : List(KVOutboxIndexEntry);
+    nextOrd @1 : Uint;
 }
 
 struct KVListNext {
@@ -84,6 +147,7 @@ struct CliKVListRes {
     ents @0 : List(KVListEntry);
     nxt @1 : Option(KVListNext);
     parent @2 : lib.KVPath;
+    stale @3 : Bool; // served from local cache; server unreachable, so unvalidated
 }
 
 struct KVListEntry {

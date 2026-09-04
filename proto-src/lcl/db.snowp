@@ -36,6 +36,9 @@ enum DataType {
     KVSymlink @72;
     KVGitRefSet @73;
 
+    KVOutboxEntry @108;    // one queued/conflicted/failed KV write; see libkv outbox
+    KVOutboxIndex @109;    // singleton index of KV outbox entries; see libkv outbox
+
     RTThreadMsgData @97;
     RTOutboxMsg @98;
     RTChannelSet @99;

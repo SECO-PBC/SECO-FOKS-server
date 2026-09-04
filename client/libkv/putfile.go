@@ -16,122 +16,122 @@ import (
 	"golang.org/x/crypto/nacl/secretbox"
 )
 
-func (k *Minder) prepSmallFile(
+// sealedNode is a node sealed locally and not yet sent: everything the
+// upload and the outbox (on a transport failure) need. Sealing takes no
+// network; the write's first RPC comes after (docs/kv_offline.md D3).
+type sealedNode struct {
+	nid      proto.KVNodeID
+	sfb      proto.SmallFileBox
+	key      *kv.KeyBundle    // party key that sealed the content
+	rg       proto.RoleAndGen // its role+generation, recorded for the outbox
+	op       lcl.KVOutboxOp
+	uploaded bool // node already sent inside seal (large files); skip upload, never queue
+	cachePut func(m MetaContext) error
+}
+
+func (k *Minder) sealSmallFile(
 	m MetaContext,
 	kvp *KVParty,
 	data lcl.SmallFileData,
 	rp *proto.RolePair,
 ) (
-	*proto.KVNodeID,
-	func(m MetaContext) error,
+	*sealedNode,
 	error,
 ) {
-	auth, cli, err := k.client(m, kvp)
-	if err != nil {
-		return nil, nil, err
-	}
 	key, gen, err := kvp.kvStoreKeyCurrent(m, rp.Read)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	nid, err := newNodeID(proto.KVNodeType_SmallFile)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	sfid, err := nid.ToSmallFileID()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	payload := lcl.NewSmallFileBoxPayloadWithSmallfile(data)
 
 	ctext, err := key.BoxPaddedWithNonce(&payload, nid.NaclNonce())
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
+	rg := proto.RoleAndGen{Role: rp.Read, Gen: gen}
 	sfb := proto.SmallFileBox{
-		Rg:      proto.RoleAndGen{Role: rp.Read, Gen: gen},
+		Rg:      rg,
 		DataBox: ctext,
 	}
 
-	err = cli.KvPutSmallFileOrSymlink(m.Ctx(), rem.KvPutSmallFileOrSymlinkArg{
-		Auth: *auth,
-		Id:   *nid,
-		Sfb:  sfb,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	cachePut := func(m MetaContext) error {
-		return kvp.caches.smallFile.Put(m.Base(), *sfid, sfb, &data)
-	}
-
-	return nid, cachePut, err
+	return &sealedNode{
+		nid: *nid,
+		sfb: sfb,
+		key: key,
+		rg:  rg,
+		op:  lcl.KVOutboxOp_PutSmallFile,
+		cachePut: func(m MetaContext) error {
+			return kvp.caches.smallFile.Put(m.Base(), *sfid, sfb, &data)
+		},
+	}, nil
 }
 
-func (k *Minder) prepSymlink(
+func (k *Minder) sealSymlink(
 	m MetaContext,
 	kvp *KVParty,
 	path proto.KVPath,
 	rp *proto.RolePair,
 ) (
-	*proto.KVNodeID,
-	func(m MetaContext) error,
+	*sealedNode,
 	error,
 ) {
-	auth, cli, err := k.client(m, kvp)
-	if err != nil {
-		return nil, nil, err
-	}
 	key, gen, err := kvp.kvStoreKeyCurrent(m, rp.Read)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	nid, err := newNodeID(proto.KVNodeType_Symlink)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	sid, err := nid.ToSymlinkID()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	pyld := lcl.NewSmallFileBoxPayloadWithSymlink(path)
 
 	ctext, err := key.BoxPaddedWithNonce(&pyld, nid.NaclNonce())
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
+	rg := proto.RoleAndGen{Role: rp.Read, Gen: gen}
 	sfb := proto.SmallFileBox{
-		Rg:      proto.RoleAndGen{Role: rp.Read, Gen: gen},
+		Rg:      rg,
 		DataBox: ctext,
 	}
 
-	err = cli.KvPutSmallFileOrSymlink(m.Ctx(), rem.KvPutSmallFileOrSymlinkArg{
-		Auth: *auth,
-		Id:   *nid,
-		Sfb:  sfb,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
 	ppath, err := kv.ParsePath(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	cacheVal := Symlink{
 		Path: *ppath,
 		Raw:  path,
 	}
-	cachePut := func(m MetaContext) error {
-		return kvp.caches.symlink.Put(m.Base(), *sid, sfb, &cacheVal)
-	}
 
-	return nid, cachePut, err
+	return &sealedNode{
+		nid: *nid,
+		sfb: sfb,
+		key: key,
+		rg:  rg,
+		op:  lcl.KVOutboxOp_PutSymlink,
+		cachePut: func(m MetaContext) error {
+			return kvp.caches.symlink.Put(m.Base(), *sid, sfb, &cacheVal)
+		},
+	}, nil
 }
 
 func (k *Minder) putSymlink(
@@ -141,8 +141,8 @@ func (k *Minder) putSymlink(
 	target proto.KVPath,
 ) (*PutFileRes, error) {
 	return k.putFile(m, cfg, path,
-		func(kvp *KVParty, rp *proto.RolePair) (*proto.KVNodeID, func(m MetaContext) error, error) {
-			return k.prepSymlink(m, kvp, target, rp)
+		func(kvp *KVParty, rp *proto.RolePair) (*sealedNode, error) {
+			return k.sealSymlink(m, kvp, target, rp)
 		},
 	)
 }
@@ -158,8 +158,8 @@ func (k *Minder) putSmallFile(
 	data lcl.SmallFileData,
 ) (*PutFileRes, error) {
 	return k.putFile(m, cfg, path,
-		func(kvp *KVParty, rp *proto.RolePair) (*proto.KVNodeID, func(m MetaContext) error, error) {
-			return k.prepSmallFile(m, kvp, data, rp)
+		func(kvp *KVParty, rp *proto.RolePair) (*sealedNode, error) {
+			return k.sealSmallFile(m, kvp, data, rp)
 		},
 	)
 }
@@ -173,7 +173,7 @@ func (k *Minder) putFile(
 	m MetaContext,
 	cfg lcl.KVConfig,
 	path proto.KVPath,
-	prep func(kvp *KVParty, rp *proto.RolePair) (*proto.KVNodeID, func(m MetaContext) error, error),
+	seal func(kvp *KVParty, rp *proto.RolePair) (*sealedNode, error),
 ) (
 	*PutFileRes,
 	error,
@@ -215,24 +215,64 @@ func (k *Minder) putFile(
 			return core.InternalError("unexpected nil directory")
 		}
 
-		newFileID, cacheFn, err := prep(kvp, rp)
+		// Seal locally, resolve the dirent (cache-first), and only then make
+		// the write's RPCs -- so a transport failure at either RPC leaves a
+		// complete intent to queue (docs/kv_offline.md D3). The dirent
+		// resolved here is discarded by a drain, which re-prepares against
+		// live key material (D4); only the version it observed survives as
+		// the CAS predicate.
+		sn, err := seal(kvp, rp)
 		if err != nil {
 			return err
 		}
 		lno := linkNodeOpts{perms: *rp, overwriteOk: cfg.OverwriteOk, direntVers: cfg.AssertVersion}
-		de, err := k.linkNode(m, kvp, dp.dir, file, *newFileID, lno)
+		newDirent, err := k.prepareDirent(m, kvp, dp.dir, file, sn.nid, lno)
 		if err != nil {
 			return err
 		}
-		if cacheFn != nil {
-			err = cacheFn(m)
+		queueOnTransport := func(sendErr error) error {
+			if sn.uploaded {
+				// Large files stay out of the outbox (scope: small files
+				// and symlinks only); their failure propagates plainly.
+				return nil
+			}
+			return k.maybeQueueWrite(m, kvp, sendErr, sn.nid, sn.key, sn.rg,
+				&lcl.KVOutboxPayload{
+					Op:          sn.op,
+					Path:        path,
+					Nid:         sn.nid,
+					Sfb:         sn.sfb,
+					ReadRole:    rp.Read,
+					WriteRole:   rp.Write,
+					DirentVers:  newDirent.Version - 1,
+					OverwriteOk: cfg.OverwriteOk,
+				})
+		}
+		if !sn.uploaded {
+			err = k.uploadNode(m, kvp, sn.nid, sn.sfb)
+			if err != nil {
+				if qerr := queueOnTransport(err); qerr != nil {
+					return qerr
+				}
+				return err
+			}
+		}
+		err = k.putDirent(m, kvp, []*Dirent{newDirent})
+		if err != nil {
+			if qerr := queueOnTransport(err); qerr != nil {
+				return qerr
+			}
+			return err
+		}
+		if sn.cachePut != nil {
+			err = sn.cachePut(m)
 			if err != nil {
 				return err
 			}
 		}
 		ret = &PutFileRes{
-			NodeID: *newFileID,
-			Dirent: de,
+			NodeID: sn.nid,
+			Dirent: newDirent,
 		}
 		return nil
 	})
@@ -325,31 +365,31 @@ func (k *Minder) PutFileFirst(
 		return k.putSmallFile(m, cfg, path, lcl.SmallFileData(data))
 	}
 
-	f := func(kvp *KVParty, rp *proto.RolePair) (*proto.KVNodeID, func(m MetaContext) error, error) {
+	f := func(kvp *KVParty, rp *proto.RolePair) (*sealedNode, error) {
 
 		auth, cli, err := k.client(m, kvp)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		key, gen, err := kvp.kvStoreKeyCurrent(m, rp.Read)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		nid, err := newNodeID(proto.KVNodeType_File)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		var fks proto.FileKeySeed
 		err = core.RandomFill(fks[:])
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		fid, err := nid.ToFileID()
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		vers := proto.KVVersion(1)
 
@@ -361,7 +401,7 @@ func (k *Minder) PutFileFirst(
 
 		ctext, err := key.Box(&pld)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		md := proto.LargeFileMetadata{
@@ -375,7 +415,7 @@ func (k *Minder) PutFileFirst(
 
 		ulc, sz, err := boxChunk(&fks, data, *fid, 0, isFinal, 0)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		arg := rem.KvFileUploadInitArg{
@@ -386,7 +426,7 @@ func (k *Minder) PutFileFirst(
 		}
 		err = cli.KvFileUploadInit(m.Ctx(), arg)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		// Cache the result in case we decide to fetch it again soon.
@@ -408,7 +448,18 @@ func (k *Minder) PutFileFirst(
 				sz:  sz,
 			}
 		}
-		return nid, cacheFn, nil
+		// Large files upload through their own chunked state machine before
+		// the dirent link, so the node is already sent by the time putFile
+		// takes over; uploaded=true also keeps large files out of the
+		// outbox, which queues small files and symlinks only
+		// (docs/kv_offline.md scope).
+		return &sealedNode{
+			nid:      *nid,
+			key:      key,
+			rg:       proto.RoleAndGen{Role: rp.Read, Gen: gen},
+			uploaded: true,
+			cachePut: cacheFn,
+		}, nil
 	}
 
 	return k.putFile(m, cfg, path, f)

@@ -29,6 +29,21 @@ type walkOpts struct {
 	unlink         bool            // walk down for an unlink; can't end at a dir or somethhing not there
 	writePermsRoot *proto.RolePair // if non-nil, we can create root with these write perms
 
+	// mkdirQ, when non-nil, captures the intent of a directory creation that
+	// failed on transport, so Mkdir can queue it (docs/kv_offline.md D3).
+	// Only the walk's dir-create step fills it.
+	mkdirQ *mkdirQueueCtx
+}
+
+// mkdirQueueCtx is what an interrupted dir-create leaves behind for the
+// enqueue decision: the sealed dir whose write failed, the dirent version
+// observed at queue time (the CAS predicate), and whether the failed
+// component was the path's leaf -- only leaf creations queue; a missing
+// intermediate means the rest of the chain could not proceed anyway.
+type mkdirQueueCtx struct {
+	dir        *proto.KVDir
+	direntVers proto.KVVersion
+	leaf       bool
 }
 
 func (wo walkOpts) forLast(last bool) walkOpts {
@@ -43,6 +58,7 @@ func (wo walkOpts) forLast(last bool) walkOpts {
 	if wo.writePerms != nil && (wo.mkdirP || last) {
 		ret.writePerms = wo.writePerms
 	}
+	ret.mkdirQ = wo.mkdirQ
 	return ret
 }
 
@@ -356,11 +372,31 @@ func (k *Minder) walkOne(
 		return nil, core.KVNoentError{Path: proto.PathComponentJoin(path)}
 	}
 
-	newDir, _, err := k.makeEmptyDir(m, kvp, *opts.writePerms)
+	// Seal locally first, so a transport failure at either RPC leaves a
+	// complete intent for Mkdir to queue (docs/kv_offline.md D3). The
+	// fill-on-failure below records the dirent version *before* the bump:
+	// that is the CAS predicate a drain asserts (0 = expect absent).
+	kvd, seed, _, err := k.sealEmptyDir(m, kvp, *opts.writePerms)
 	if err != nil {
 		return nil, err
 	}
-
+	fillQ := func(sendErr error) {
+		if opts.mkdirQ != nil && core.IsTransportError(sendErr) {
+			opts.mkdirQ.dir = kvd
+			opts.mkdirQ.direntVers = newDirent.Version
+			opts.mkdirQ.leaf = len(rest) == 0
+		}
+	}
+	err = k.uploadDir(m, kvp, kvd)
+	if err != nil {
+		fillQ(err)
+		return nil, err
+	}
+	newDir := NewDirPairFromSingle(kvp.Id(), *kvd, *seed)
+	err = kvp.caches.dir.Put(m, newDir)
+	if err != nil {
+		return nil, err
+	}
 	// Next dirent is +1 the previous. Will be 1 for first version
 	newDirent.Version++
 	newNodeID := newDir.Id()
@@ -374,6 +410,11 @@ func (k *Minder) walkOne(
 
 	err = k.putDirent(m, kvp, []*Dirent{newDirent})
 	if err != nil {
+		if opts.mkdirQ != nil && core.IsTransportError(err) {
+			opts.mkdirQ.dir = kvd
+			opts.mkdirQ.direntVers = newDirent.Version - 1
+			opts.mkdirQ.leaf = len(rest) == 0
+		}
 		return nil, err
 	}
 

@@ -104,6 +104,17 @@ func (m MetaContext) makeVersionVector() (
 
 type kvRetryOptions struct {
 	skipCacheCheck bool
+
+	// serveStaleOnTransport makes the cache-race loop tolerate an offline
+	// validation: when the operation itself completed against the cache and
+	// only the closing KvCacheCheck failed on a transport-class error, the
+	// result is served anyway and *staleOut records that it went unvalidated.
+	// Read paths opt in; write paths must not (a write that cannot reach the
+	// server has not happened, and pretending otherwise needs an outbox, not
+	// a flag). A KV_STALE_CACHE_ERROR is unaffected: the server told us we
+	// are stale, and the clear-and-retry path still runs.
+	serveStaleOnTransport bool
+	staleOut              *bool
 }
 
 // isStaleTeamTokenError reports the server refusing the team VO bearer token
@@ -175,6 +186,26 @@ func (k *Minder) retryCacheLoopWithOptions(
 	})
 }
 
+// retryCacheLoopRead runs f under the cache-race loop with offline tolerance:
+// if f completes from cache and only the closing validation fails on
+// transport, the result stands and the returned bool is true (served stale).
+// For read paths only; see kvRetryOptions.serveStaleOnTransport.
+func (k *Minder) retryCacheLoopRead(
+	m MetaContext,
+	kvp *KVParty,
+	opts kvRetryOptions,
+	f func(m MetaContext) error,
+) (
+	bool,
+	error,
+) {
+	var stale bool
+	opts.serveStaleOnTransport = true
+	opts.staleOut = &stale
+	err := k.retryCacheLoopWithOptions(m, kvp, opts, f)
+	return stale, err
+}
+
 func (k *Minder) cacheRaceLoop(
 	m MetaContext,
 	kvp *KVParty,
@@ -239,14 +270,35 @@ func (k *Minder) cacheRaceLoop(
 
 			// the FS operation succeeded, and either
 			// there were no unchecked cache uses, or
-			// we successfully checked them with the server
+			// we successfully checked them with the server.
+			// A successful validation is also proof of connectivity, which
+			// makes it the drain trigger for any queued offline writes
+			// (docs/kv_offline.md Phase 2 triggers).
 			case err == nil && ferr == nil:
+				k.maybeDrainOutbox(m, kvp)
 				return nil
 
 				// the FS operation succeeded, but the cache check showed there
 				// were stale items used in the operation. We need to clear the
 				// cache and try again.
+				//
+				// One carve-out: if the check failed because the server was
+				// unreachable (not because it said "stale"), a read that has
+				// opted in serves the completed result anyway, marked
+				// unvalidated. The operation ran wholly against cache entries
+				// that were verified when written; the network's absence
+				// changes their freshness claim, not their authenticity.
 			case err == nil && ferr != nil:
+				if opts.serveStaleOnTransport && core.IsTransportError(ferr) {
+					if opts.staleOut != nil {
+						*opts.staleOut = true
+					}
+					m.Infow("cacheRaceLoop",
+						"stage", "serve-stale",
+						"party", kvp.Id(),
+						"err", ferr)
+					return nil
+				}
 				err = ferr
 
 				// The FS operation failed, but we didn't actually wind up
