@@ -59,6 +59,26 @@ func mcpKVTextResult(text string) *mcp.CallToolResult {
 	}
 }
 
+// mcpKVStaleNotice is prepended, as its own content block, to any result
+// served from the local cache without server validation. The CLI prints an
+// equivalent line; an agent reading through MCP needs the same signal, and
+// it must not be spliced into the payload itself (`get` may be returning
+// base64 or raw bytes).
+const mcpKVStaleNotice = "NOTE: served from the local cache and NOT validated " +
+	"with the server, which was unreachable. The content may be out of date."
+
+func mcpKVMaybeStaleResult(stale bool, text string) *mcp.CallToolResult {
+	if !stale {
+		return mcpKVTextResult(text)
+	}
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: mcpKVStaleNotice},
+			&mcp.TextContent{Text: text},
+		},
+	}
+}
+
 func mcpKVErrorResult(err error) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		IsError: true,
@@ -82,6 +102,7 @@ func (k *mcpKV) list(ctx context.Context, req *mcp.CallToolRequest, input mcpKVL
 	num := k.m.G().Cfg().KVListPageSize()
 	var entries []lcl.KVListEntry
 	var dirID *proto.DirID
+	var stale bool
 	nxt := proto.NewKVListPaginationWithNone()
 	for {
 		res, err := k.cli.ClientKVList(ctx, lcl.ClientKVListArg{
@@ -94,6 +115,7 @@ func (k *mcpKV) list(ctx context.Context, req *mcp.CallToolRequest, input mcpKVL
 		if err != nil {
 			return mcpKVErrorResult(err), nil, nil
 		}
+		stale = stale || res.Stale
 		entries = append(entries, res.Ents...)
 		if res.Nxt == nil {
 			break
@@ -117,7 +139,7 @@ func (k *mcpKV) list(ctx context.Context, req *mcp.CallToolRequest, input mcpKVL
 		mtime := ent.Mtime.Import().UTC().Format("2006-01-02T15:04:05Z")
 		fmt.Fprintf(&sb, "%s\t%s\t%s\n", ent.Name, typ, mtime)
 	}
-	return mcpKVTextResult(sb.String()), nil, nil
+	return mcpKVMaybeStaleResult(stale, sb.String()), nil, nil
 }
 
 type mcpKVGetInput struct {
@@ -133,13 +155,18 @@ func (k *mcpKV) get(ctx context.Context, req *mcp.CallToolRequest, input mcpKVGe
 	}
 	path := mcpKVMakePath(input.Path)
 	var buf bytes.Buffer
+	var stale bool
 	err = libkv.GetFile(
 		&buf,
 		func() (lcl.GetFileRes, error) {
-			return k.cli.ClientKVGetFile(ctx, lcl.ClientKVGetFileArg{
+			res, err := k.cli.ClientKVGetFile(ctx, lcl.ClientKVGetFileArg{
 				Cfg:  cfg,
 				Path: path,
 			})
+			if err == nil && res.Stale {
+				stale = true
+			}
+			return res, err
 		},
 		func(id proto.FileID, offset proto.Offset) (lcl.GetFileChunkRes, error) {
 			return k.cli.ClientKVGetFileChunk(ctx, lcl.ClientKVGetFileChunkArg{
@@ -154,12 +181,12 @@ func (k *mcpKV) get(ctx context.Context, req *mcp.CallToolRequest, input mcpKVGe
 	}
 	data := buf.Bytes()
 	if input.Base64 {
-		return mcpKVTextResult(base64.StdEncoding.EncodeToString(data)), nil, nil
+		return mcpKVMaybeStaleResult(stale, base64.StdEncoding.EncodeToString(data)), nil, nil
 	}
 	if isProbablyBinary(data) {
 		return nil, nil, TerminalError("refusing to output binary data over MCP; try supplying base64:true flag")
 	}
-	return mcpKVTextResult(string(data)), nil, nil
+	return mcpKVMaybeStaleResult(stale, string(data)), nil, nil
 }
 
 type mcpKVPutInput struct {
