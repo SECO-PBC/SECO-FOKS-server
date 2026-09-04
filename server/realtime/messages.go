@@ -33,6 +33,7 @@ type messageSender struct {
 	readRole   proto.Role
 	prevSeq    proto.RTMsgSeq
 	appID      proto.RTAppID
+	private    bool
 
 	// members whose inbox versions the fanout bumped; the caller wakes their
 	// parked long-pollers after the transaction commits.
@@ -41,48 +42,26 @@ type messageSender struct {
 
 func (s *messageSender) channelID() int64 { return int64(s.arg.Chid) }
 
-// lockChannel reads (and row-locks) the channel being sent into. The FOR UPDATE
-// serializes concurrent sends to the same channel, so seq assignment below is
-// race-free.
+// lockChannel reads (and row-locks) the channel being sent into, and
+// authorizes the sender. The FOR UPDATE serializes concurrent sends to the
+// same channel, so seq assignment below is race-free.
+//
+// Inventory row 3 (rtSend sender auth): the load and the authorization are one
+// call through the chokepoint, so a private channel can never be sent into by
+// someone without an ACL row -- and a non-member cannot learn it exists,
+// because they get the same RowNotFound a missing channel gives.
 func (s *messageSender) lockChannel(m shared.MetaContext) error {
-	var teamRaw []byte
-	var wrt, wvl, rrt, rvl int
-	var prevSeqRaw *int64
-	var appRaw string
-	err := s.tx.QueryRow(
-		m.Ctx(),
-		`SELECT parent_team_id, write_role_type, write_role_viz_level,
-		        read_role_type, read_role_viz_level, last_msg_seq, app_id
-		 FROM channels
-		 WHERE short_host_id=$1 AND channel_id=$2
-		 FOR UPDATE`,
-		m.ShortHostID(),
-		s.channelID(),
-	).Scan(&teamRaw, &wrt, &wvl, &rrt, &rvl, &prevSeqRaw, &appRaw)
-	if err == pgx.ErrNoRows {
-		return core.RowNotFoundError{}
-	}
+	ca, err := authorizeChannel(m, s.tx, s.userdb, s.channelID(), accessWrite, true)
 	if err != nil {
 		return err
 	}
-	err = s.parentTeam.ImportFromDB(teamRaw)
-	if err != nil {
-		return err
-	}
-	err = s.writeRole.ImportFromDB(wrt, wvl)
-	if err != nil {
-		return err
-	}
-	err = s.readRole.ImportFromDB(rrt, rvl)
-	if err != nil {
-		return err
-	}
-	err = s.appID.ImportFromDB(appRaw)
-	if err != nil {
-		return err
-	}
-	if prevSeqRaw != nil {
-		s.prevSeq = proto.RTMsgSeq(*prevSeqRaw)
+	s.parentTeam = ca.team
+	s.writeRole = ca.writeRole
+	s.readRole = ca.readRole
+	s.appID = ca.appID
+	s.private = ca.private
+	if ca.lastMsgSeq != nil {
+		s.prevSeq = proto.RTMsgSeq(*ca.lastMsgSeq)
 	}
 	return nil
 }
@@ -103,21 +82,6 @@ func (s *messageSender) checkEncryptionRole(rg proto.RoleAndGen) error {
 	}
 	if !msgRole.Eq(*readRole) {
 		return core.BadArgsError("message must be encrypted at the channel's read role")
-	}
-	return nil
-}
-
-func (s *messageSender) authorize(m shared.MetaContext) error {
-	role, err := AuthorizeUserForTeam(m, s.userdb, s.parentTeam)
-	if err != nil {
-		return err
-	}
-	writeRole, err := core.ImportRole(s.writeRole)
-	if err != nil {
-		return err
-	}
-	if role.LessThan(*writeRole) {
-		return core.PermissionError("user role too low to send into channel")
 	}
 	return nil
 }
@@ -353,9 +317,20 @@ func (s *messageSender) run(m shared.MetaContext) (*rem.RTSendRes, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = s.authorize(m)
-	if err != nil {
-		return nil, err
+	// Inventory row 4, team-leave cascade (§6.3): for a private channel,
+	// re-validate the recipient set against the team roster and drop anyone
+	// who has left, BEFORE the fan-out below selects its recipients from the
+	// same rows. We hold the channels row lock, so no concurrent send can be
+	// fanning out while we prune.
+	if s.private {
+		appDB, err := s.appID.ExportToDB()
+		if err != nil {
+			return nil, err
+		}
+		err = pruneStaleChannelMembers(m, s.tx, s.userdb, s.parentTeam, s.channelID(), appDB)
+		if err != nil {
+			return nil, err
+		}
 	}
 	seq := s.prevSeq + 1
 	// Optional optimistic-concurrency check from the client.
@@ -471,62 +446,34 @@ type readThroughMarker struct {
 
 func (r *readThroughMarker) channelID() int64 { return r.arg.ChannelID.Short().Int64() }
 
-// loadChannel reads the channel's team, read role, last seq, and app. No row
+// loadChannel loads and authorizes the channel in one chokepoint call. No row
 // lock: an honest client only marks messages it has already received, which
 // are committed and thus visible to our snapshot, so last_msg_seq can't race
 // backwards under us.
+//
+// Inventory row 10 (rtReadThrough). The UPDATE below is already gated by the
+// user_channels row -- which revoke deletes -- but the read gate applies here
+// too, so a revoked member's mark fails at the ACL rather than falling through
+// to a "no membership row" answer that would confirm the channel exists.
 func (r *readThroughMarker) loadChannel(m shared.MetaContext) error {
-	var teamRaw []byte
-	var rrt, rvl int
-	err := r.tx.QueryRow(
-		m.Ctx(),
-		`SELECT parent_team_id, read_role_type, read_role_viz_level,
-		        last_msg_seq, app_id
-		 FROM channels
-		 WHERE short_host_id=$1 AND channel_id=$2`,
-		m.ShortHostID(),
-		r.channelID(),
-	).Scan(&teamRaw, &rrt, &rvl, &r.lastSeq, &r.appID)
-	if err == pgx.ErrNoRows {
-		return core.RowNotFoundError{}
-	}
+	ca, err := authorizeChannel(m, r.tx, r.userdb, r.channelID(), accessRead, false)
 	if err != nil {
 		return err
 	}
-	err = r.parentTeam.ImportFromDB(teamRaw)
+	r.parentTeam = ca.team
+	r.readRole = ca.readRole
+	r.lastSeq = ca.lastMsgSeq
+	r.app = ca.appID
+	appDB, err := ca.appID.ExportToDB()
 	if err != nil {
 		return err
 	}
-	err = r.readRole.ImportFromDB(rrt, rvl)
-	if err != nil {
-		return err
-	}
-	return r.app.ImportFromDB(r.appID)
-}
-
-// authorize applies the same check as a thread read: the caller's team role
-// must be at or above the channel's read role.
-func (r *readThroughMarker) authorize(m shared.MetaContext) error {
-	role, err := AuthorizeUserForTeam(m, r.userdb, r.parentTeam)
-	if err != nil {
-		return err
-	}
-	readRole, err := core.ImportRole(r.readRole)
-	if err != nil {
-		return err
-	}
-	if role.LessThan(*readRole) {
-		return core.PermissionError("user role too low to read channel")
-	}
+	r.appID = appDB
 	return nil
 }
 
 func (r *readThroughMarker) run(m shared.MetaContext) error {
 	err := r.loadChannel(m)
-	if err != nil {
-		return err
-	}
-	err = r.authorize(m)
 	if err != nil {
 		return err
 	}
@@ -647,46 +594,6 @@ func MarkReadThrough(
 			}, nil
 		},
 	)
-}
-
-// loadChannelForRead returns the channel's parent team and read role, for
-// authorizing a thread fetch.
-func loadChannelForRead(
-	m shared.MetaContext,
-	db shared.Querier,
-	channelID int64,
-) (
-	proto.TeamID,
-	proto.Role,
-	error,
-) {
-	var team proto.TeamID
-	var readRole proto.Role
-	var teamRaw []byte
-	var rrt, rvl int
-	err := db.QueryRow(
-		m.Ctx(),
-		`SELECT parent_team_id, read_role_type, read_role_viz_level
-		 FROM channels
-		 WHERE short_host_id=$1 AND channel_id=$2`,
-		m.ShortHostID(),
-		channelID,
-	).Scan(&teamRaw, &rrt, &rvl)
-	if err == pgx.ErrNoRows {
-		return team, readRole, core.RowNotFoundError{}
-	}
-	if err != nil {
-		return team, readRole, err
-	}
-	err = team.ImportFromDB(teamRaw)
-	if err != nil {
-		return team, readRole, err
-	}
-	err = readRole.ImportFromDB(rrt, rvl)
-	if err != nil {
-		return team, readRole, err
-	}
-	return team, readRole, nil
 }
 
 // threadMsgSelect is the column list + sender-attribution join shared by every
@@ -1020,20 +927,12 @@ func getThreadGeneric(
 	}
 	defer userdb.Release()
 
-	team, readRole, err := loadChannelForRead(m, rtdb, chid.Short().Int64())
+	// Inventory rows 1 and 2 (rtGetThread, rtGetThreadRecents): the chokepoint
+	// applies the team, tier, read-role and private-ACL gates, and hides a
+	// private channel's existence from a non-member behind RowNotFound.
+	_, err = authorizeChannel(m, rtdb, userdb, chid.Short().Int64(), accessRead, false)
 	if err != nil {
 		return err
-	}
-	role, err := AuthorizeUserForTeam(m, userdb, team)
-	if err != nil {
-		return err
-	}
-	readRoleKey, err := core.ImportRole(readRole)
-	if err != nil {
-		return err
-	}
-	if role.LessThan(*readRoleKey) {
-		return core.PermissionError("user role too low to read channel")
 	}
 
 	err = fn(rtdb)

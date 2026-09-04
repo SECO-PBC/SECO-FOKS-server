@@ -54,6 +54,13 @@ func (c *ClientConn) RtNewChannel(ctx context.Context, arg rem.RtNewChannelArg) 
 	err := MakeChannel(m, arg.Md, arg.SetVers)
 	return err
 }
+
+// RtGetChannel is inventory row 6: unimplemented upstream and unimplemented
+// here. When it is implemented it MUST load and authorize the channel through
+// authorizeChannel(accessRead) like every other per-channel read, not with a
+// bare SELECT. TestRealtimeRpcInventory's source guard fails the build if a
+// query against `channels` appears outside the allowlisted call sites, so this
+// obligation is enforced rather than merely written down.
 func (c *ClientConn) RtGetChannel(ctx context.Context, arg proto.RTChannelID) (res rem.RTChannelMetadata, err error) {
 	return res, core.NotImplementedError{}
 }
@@ -134,6 +141,29 @@ func (c *ClientConn) RtGetThreadRecents(
 		return res, err
 	}
 	return *ret, nil
+}
+
+// Fork-only private-channel ACL management; see docs/rt-private-channel-acl.md.
+
+func (c *ClientConn) RtChannelGrant(ctx context.Context, arg rem.RtChannelGrantArg) error {
+	m := shared.NewMetaContextConn(ctx, c)
+	return GrantChannelMember(m, arg)
+}
+
+func (c *ClientConn) RtChannelRevoke(ctx context.Context, arg rem.RtChannelRevokeArg) error {
+	m := shared.NewMetaContextConn(ctx, c)
+	return RevokeChannelMember(m, arg)
+}
+
+func (c *ClientConn) RtChannelMembers(
+	ctx context.Context,
+	arg proto.RTChannelID,
+) (
+	res []rem.RTChannelAclEntry,
+	err error,
+) {
+	m := shared.NewMetaContextConn(ctx, c)
+	return ListChannelMembers(m, arg)
 }
 
 var _ shared.RPCServer = (*Server)(nil)

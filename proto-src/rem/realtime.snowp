@@ -73,6 +73,31 @@ struct RTChannelMetadata @0xddf6b26b2ace1535 {
     tier @11 : lib.RTChannelTier;
     unreadable @12 : Bool; // caller's role is below the read role: name is shown
                            // (for collision detection) but desc/lastMsg withheld
+    // FORK-ONLY (see docs/rt-private-channel-acl.md). A private channel
+    // additionally requires a channel_acl row; privacy is orthogonal to tier,
+    // not a third tier.
+    //
+    // Numbered @20, not @64. Struct fields here are POSITIONAL (the codegen
+    // emits `codec:",toarray"`), so every skipped number becomes a nil
+    // placeholder on the wire: @64 measured 133 bytes for an otherwise-empty
+    // RTChannelMetadata against 80 at a low number -- 53 bytes of padding on
+    // a record returned once per channel in every listing and every inbox
+    // page. RPC numbers are method ids and cost nothing to scatter (hence
+    // @200+ below); field numbers are array slots and do not. @20 still
+    // leaves upstream seven slots after its current @12, and a collision
+    // there is a loud one -- snowpc rejects duplicate field numbers, so it
+    // surfaces at merge, not in the field.
+    private @20 : Bool;
+}
+
+// FORK-ONLY. One member of a private channel's ACL. grantedBy is the audit
+// trail that makes a team admin's self-grant visible to the channel's members
+// rather than invisible (Q2 in the spec).
+struct RTChannelAclEntry {
+    uid @0 : lib.UID;
+    owner @1 : Bool;          // may grant/revoke; the creator starts as owner
+    grantedBy @2 : lib.UID;
+    ctime @3 : lib.Time;
 }
 
 struct RTChannelSet {
@@ -224,4 +249,31 @@ protocol RealTime
         enabled @3 : Bool
     );
 
+    // FORK-ONLY private-channel ACL management (docs/rt-private-channel-acl.md).
+    // Numbered from @200 so upstream can keep appending after @11 without
+    // colliding on merge; if any of this is ever proposed upstream the numbers
+    // get renegotiated then. A rename/renumber is mechanical; a collision in
+    // the field is not.
+
+    // Add (or re-grant) a user to a private channel's ACL and fan them in.
+    // Caller must be an ACL owner of the channel or a team admin/owner.
+    rtChannelGrant @200 (
+        channelID @0 : lib.RTChannelID,
+        uid @1 : lib.UID,
+        owner @2 : Bool
+    );
+
+    // Remove a user from a private channel's ACL, drop their delivery row and
+    // bump their inbox so their client drops the channel. Same authority as
+    // rtChannelGrant.
+    rtChannelRevoke @201 (
+        channelID @0 : lib.RTChannelID,
+        uid @1 : lib.UID
+    );
+
+    // List a private channel's ACL. Readable by any channel member (that is
+    // what makes an admin's self-grant transparent), not just owners.
+    rtChannelMembers @202 (
+        channelID @0 : lib.RTChannelID
+    ) -> List(RTChannelAclEntry);
 }

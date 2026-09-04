@@ -123,9 +123,20 @@ func readAllChannels(
 	if err != nil {
 		return nil, err
 	}
+	// Inventory row 5. This is one of the two set-based paths that cannot call
+	// authorizeChannel per row, so it embeds the equivalent of the
+	// chokepoint's step 5: a private channel is listed only to callers holding
+	// a channel_acl row -- plus, per Q1, to team admins, who may see that a
+	// private channel exists (and then grant themselves into it, visibly).
+	// The private-channel tests run the same scenarios through this predicate
+	// and through the chokepoint; keep the two in lock-step.
+	privateGate := privateVisibleToCaller("c", "$6")
+	if role.IsAdminOrAbove() {
+		privateGate = "TRUE"
+	}
 	rows, err := db.Query(
 		m.Ctx(),
-		`SELECT `+channelMetadataCols+`
+		`SELECT `+channelMetadataCols+channelPrivacyCols("$6")+`
 		 FROM channels c
 		 `+lastSenderJoin+`
 		 WHERE c.short_host_id=$1
@@ -133,12 +144,14 @@ func readAllChannels(
 		 AND c.app_id=$3
 		 AND c.tier = ANY($4)
 		 AND c.updated_at_set_vers > $5
+		 AND `+privateGate+`
 		 ORDER BY c.channel_id ASC`,
 		m.ShortHostID().ExportToDB(),
 		team.ExportToDB(),
 		appDB,
 		tiers,
 		last.Int(),
+		m.UID().ExportToDB(),
 	)
 	if err != nil {
 		return nil, err
@@ -160,6 +173,7 @@ func readAllChannels(
 		if err != nil {
 			return nil, err
 		}
+		applyPrivateGate(md, raw.aclMember)
 		ret = append(ret, *md)
 	}
 	if err = rows.Err(); err != nil {
@@ -184,6 +198,12 @@ type channelMetadataRaw struct {
 	ctime, mtime                  time.Time
 	updatedAtSetVers              int
 	tierRaw                       string
+	private                       bool
+	// aclMember says whether the CALLER holds a channel_acl row for this
+	// channel. Always true for a non-private channel (which has no ACL);
+	// false only for a team admin looking at a private channel they are not a
+	// member of -- see applyPrivateGate.
+	aclMember bool
 }
 
 // channelMetadataCols is the column list matching channelMetadataRaw.scanDests,
@@ -195,6 +215,22 @@ const channelMetadataCols = `c.channel_id_full, c.seqno, c.name_box, c.desc_box,
 	        c.last_msg_type, c.last_msg_seq, c.last_send_time,
 	        cp.party_id, cp.uid,
 	        c.ctime, c.mtime, c.updated_at_set_vers, c.tier`
+
+// channelPrivacyCols is the fork-only tail of channelMetadataRaw.scanDests:
+// the channel's privacy flag, and whether the CALLER holds a channel_acl row
+// for it. Appended (in this order, immediately after channelMetadataCols) by
+// both queries that scan channelMetadataRaw. uidParam is the placeholder
+// holding the caller's uid in the enclosing query, which differs between the
+// two -- hence a function rather than a second const.
+//
+// acl_member is privateVisibleToCaller verbatim, by construction rather than by
+// copy: readAllChannels puts the same expression in its WHERE and here in its
+// SELECT, and if the two ever drifted the listing would filter on one rule
+// while labelling rows by another -- admitting a channel it marks as
+// non-member, or the reverse. One source of truth removes the possibility.
+func channelPrivacyCols(uidParam string) string {
+	return `, c.private, ` + privateVisibleToCaller("c", uidParam) + ` AS acl_member`
+}
 
 // lastSenderJoin attributes the channel's denormalized last message to its
 // sender; LEFT so channels with no messages still row.
@@ -211,6 +247,7 @@ func (r *channelMetadataRaw) scanDests() []any {
 		&r.partyIDRaw, &r.uidRaw,
 		&r.ctime, &r.mtime, &r.updatedAtSetVers,
 		&r.tierRaw,
+		&r.private, &r.aclMember,
 	}
 }
 
@@ -266,6 +303,7 @@ func (r *channelMetadataRaw) export(
 	if err != nil {
 		return nil, err
 	}
+	md.Private = r.private
 	return &md, nil
 }
 
@@ -347,6 +385,35 @@ func applyReadRoleGate(md *rem.RTChannelMetadata, role core.RoleKey) error {
 	return nil
 }
 
+// applyPrivateGate marks a private channel as such on the wire, and withholds
+// its activity metadata from a caller who is not in its ACL.
+//
+// The only caller who can reach this with aclMember == false is a team admin
+// (Q1: leaders may see that a private channel exists, and then grant
+// themselves into it visibly). They get existence, not activity: no
+// description, no last-message preview, and `unreadable` set, exactly as the
+// read-role gate does for a channel a caller's role cannot read.
+//
+// DEVIATION, recorded deliberately: §6.2 of the spec also says an admin
+// non-member should not receive the channel's name box. That is not
+// expressible today -- RTChannelMetadata.nameBox is a required field and the
+// client decrypts it unconditionally, so an absent box fails the whole list
+// read -- and withholding it would defeat §6.2's own rationale, that an admin
+// must be able to FIND a channel in order to moderate it. The name is sealed
+// at the tier floor, so it is a name every member at that floor could read if
+// they held the ciphertext; handing it to admins is consistent with Q1/Q2
+// making leaders transparent peers rather than invisible ones. If the product
+// later wants existence-without-name, it needs an Option(nameBox) wire change
+// and a client that tolerates it.
+func applyPrivateGate(md *rem.RTChannelMetadata, aclMember bool) {
+	if aclMember {
+		return
+	}
+	md.DescBox = nil
+	md.LastMsg = nil
+	md.Unreadable = true
+}
+
 type channelMaker struct {
 	md      rem.RTChannelMetadata
 	vers    proto.RTChannelSetVersion
@@ -385,7 +452,8 @@ func (c *channelMaker) checkPerms(m shared.MetaContext) error {
 	if c.md.Tier == proto.RTChannelTier_Admin && !c.dstRole.IsAdminOrAbove() {
 		return core.PermissionError("user role too low to make an admin tier channel")
 	}
-	return nil
+	// Inventory row 11: only admins/leaders may create a private channel (Q2b).
+	return authorizeChannelCreate(c.dstRole, c.md.Private)
 }
 
 func (c *channelMaker) checkArgs(m shared.MetaContext) error {
@@ -506,11 +574,11 @@ func (c *channelMaker) insertChannel(m shared.MetaContext) error {
 			(short_host_id, channel_id, parent_team_id, app_id, channel_id_full,
 			 seqno, name_box, name_box_ptk_gen, tier, desc_box, desc_box_ptk_gen,
 			 read_role_type, read_role_viz_level, write_role_type, write_role_viz_level,
-			 ctime, mtime, updated_at_set_vers)
+			 ctime, mtime, updated_at_set_vers, private)
 		VALUES($1, $2, $3, $4, $5,
 		       $6, $7, $8, $9, $10, $11,
 		       $12, $13, $14, $15,
-		       NOW(), NOW(), $16)`,
+		       NOW(), NOW(), $16, $17)`,
 		m.ShortHostID(),
 		int64(c.md.Id.Short()),
 		c.md.ParentTeam.ExportToDB(),
@@ -527,6 +595,7 @@ func (c *channelMaker) insertChannel(m shared.MetaContext) error {
 		writeType,
 		writeViz,
 		c.vers.ExportToDB(),
+		c.md.Private,
 	)
 	if shared.IsDuplicateKeyError(err, "channels_pkey") {
 		return core.RTRaceError{Which: "channels"}
@@ -549,6 +618,24 @@ func (c *channelMaker) fanoutUsers(m shared.MetaContext) error {
 	// creation are fanned in lazily by reconcileUserChannels (fanin.go), which
 	// runs on inbox sync and poll; see issue #301. The inverse (removal) is
 	// handled by re-authorizing at sync time.
+	// Inventory row 11, private half: a private channel fans out to its
+	// creator alone and to nobody else. Members arrive later, one explicit
+	// rtChannelGrant at a time. The creator is seeded as the ACL owner, which
+	// is what lets them grant without being a team admin afterwards.
+	if c.md.Private {
+		err := insertChannelAcl(m, c.rtdbtx, int64(c.md.Id.Short()),
+			m.UID(), aclRoleOwner, m.UID())
+		if err != nil {
+			return err
+		}
+		err = c.fanoutToUser(m, m.UID())
+		if err != nil {
+			return err
+		}
+		c.wakeUIDs = []proto.UID{m.UID()}
+		return nil
+	}
+
 	readRole, err := core.ImportRole(c.md.Roles.Read)
 	if err != nil {
 		return err

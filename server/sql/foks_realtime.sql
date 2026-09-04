@@ -80,6 +80,11 @@ CREATE TABLE channels (
     ctime TIMESTAMPTZ NOT NULL,
     mtime TIMESTAMPTZ NOT NULL,
     updated_at_set_vers INTEGER NOT NULL, /* corresponds to channel_sets at time of update */
+    /* Orthogonal to tier: additionally requires a channel_acl row. Declared
+     * last to match the column order ADD COLUMN gives a patched database
+     * (patches/foks_realtime/p5.sql), so a fresh and a migrated DB dump the
+     * same. */
+    private BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY(short_host_id, channel_id)
 );
 /* no FK to teams (cross-DB); enforced at app layer */
@@ -112,6 +117,44 @@ CREATE TABLE channel_parties (
     UNIQUE(short_host_id, channel_id, party_id),
     FOREIGN KEY(short_host_id, channel_id) REFERENCES channels(short_host_id, channel_id)
 );
+
+/*
+ * channel_acl: the authoritative membership table for private channels
+ * (channels.private = true). See docs/rt-private-channel-acl.md.
+ *
+ * Deliberately NOT user_channels: that is denormalized delivery state which
+ * lingers after a team leave, is self-healed by the late-join fan-in, and
+ * doubles as per-user inbox prefs. Conflating "may read" with "is being
+ * delivered to" is exactly the ambiguity that produces a silent, retroactive
+ * privacy failure. The invariant the two share -- for a private channel the
+ * set of user_channels rows equals the set of channel_acl rows -- is
+ * maintained by grant/revoke/create and asserted by tests, not by a schema
+ * constraint.
+ *
+ * A private channel is an ordinary channel of its tier that ADDITIONALLY
+ * requires a row here. The guarantee is policy, not cryptography: every team
+ * member at the channel's read role holds the key, so an ACL gap exposes the
+ * channel's whole history, retroactively and silently. Every server path that
+ * can return channel rows, message rows, or channel activity metadata must go
+ * through realtime.authorizeChannel (or one of the two set-based predicates
+ * that mirror it).
+ */
+CREATE TABLE channel_acl (
+    short_host_id SMALLINT NOT NULL,
+    channel_id BIGINT NOT NULL,
+    uid BYTEA NOT NULL,
+    /* 0 = member, 1 = owner (may grant/revoke). Constrained rather than merely
+     * documented: the authorization code reads 1 as owner and treats anything
+     * else as member, so an out-of-domain value written by a future writer or
+     * a hand-run data repair would silently demote an owner rather than fail. */
+    acl_role SMALLINT NOT NULL CHECK (acl_role IN (0, 1)),
+    granted_by BYTEA NOT NULL, /* uid of the granter; audit trail, shown to members */
+    ctime TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY(short_host_id, channel_id, uid),
+    FOREIGN KEY(short_host_id, channel_id) REFERENCES channels(short_host_id, channel_id)
+);
+/* "which private channels is this user in", for the set-based listing gate */
+CREATE INDEX channel_acl_uid_idx ON channel_acl(short_host_id, uid);
 
 /*
  * messages_enc: encrypted message log, one row per message.

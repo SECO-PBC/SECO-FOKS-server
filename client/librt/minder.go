@@ -145,6 +145,19 @@ type MakeChannelTestHooks struct {
 	HitRaceHook      func(i int)
 }
 
+// MakeChannelOpts carries the fork-only knobs of channel creation, so adding
+// one does not churn every MakeChannel call site (and does not conflict with
+// upstream's signature on merge). The zero value is the plain upstream
+// behaviour.
+type MakeChannelOpts struct {
+	// Private makes the channel visible only to users the server has an ACL
+	// row for; see docs/rt-private-channel-acl.md. Only team admins may create
+	// one, and the server enforces that -- so this is a request, not a
+	// guarantee. Tier and name-key selection are unchanged: a private channel
+	// is an ordinary channel of its tier that also demands an ACL row.
+	Private bool
+}
+
 func (d *Minder) MakeChannel(
 	m MetaContext,
 	team lcl.ConfigTeam,
@@ -171,13 +184,29 @@ func (d *Minder) MakeChannelWithTestHooks(
 	*proto.RTChannelID,
 	error,
 ) {
+	return d.MakeChannelWithOpts(m, team, appId, nm, desc, roles, MakeChannelOpts{}, test)
+}
+
+func (d *Minder) MakeChannelWithOpts(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appId proto.RTAppID,
+	nm proto.RTChannelName,
+	desc proto.RTChannelDesc,
+	roles proto.RolePairOpt,
+	opts MakeChannelOpts,
+	test *MakeChannelTestHooks,
+) (
+	*proto.RTChannelID,
+	error,
+) {
 	if nm.Eq(proto.RTGeneralChannel) {
 		return nil, core.RTGenericError("cannot make channel named #general")
 	}
 	sleepDur := time.Millisecond
 	numTries := 5
 	for i := range numTries {
-		ret, err := d.makeChannelOneAttempt(m, team, appId, nm, desc, roles, test)
+		ret, err := d.makeChannelOneAttempt(m, team, appId, nm, desc, roles, opts, test)
 		if err == nil {
 			return ret, nil
 		}
@@ -216,6 +245,7 @@ func (d *Minder) makeChannelOneAttempt(
 	nm proto.RTChannelName,
 	desc proto.RTChannelDesc,
 	roles proto.RolePairOpt,
+	opts MakeChannelOpts,
 	test *MakeChannelTestHooks,
 ) (
 	*proto.RTChannelID,
@@ -279,11 +309,17 @@ func (d *Minder) makeChannelOneAttempt(
 		nameRole = proto.AdminRole
 	}
 
-	if _, found := chMap[chKey{
-		name: nm.Normalize(),
-		tier: newChTier,
-	}]; found {
-		return nil, core.RTChannelExistsError{}
+	// Private channels are exempt from team-wide name-collision detection: the
+	// server cannot dedupe names it hides from the caller, the listing the map
+	// was built from is itself filtered, and two private channels sharing a
+	// name is legitimate anyway.
+	if !opts.Private {
+		if _, found := chMap[chKey{
+			name: nm.Normalize(),
+			tier: newChTier,
+		}]; found {
+			return nil, core.RTChannelExistsError{}
+		}
 	}
 	nameKeySeq, err := rtp.PLCNode().SKM().PrivateKeysForRole(m.Base(), nameRole)
 	if err != nil {
@@ -349,6 +385,7 @@ func (d *Minder) makeChannelOneAttempt(
 	}
 	update.UpdatedAt = chlst.Vers + 1
 	update.Tier = newChTier
+	update.Private = opts.Private
 
 	arg := rem.RtNewChannelArg{
 		Md:      update,
@@ -2262,4 +2299,59 @@ func (d *Minder) SetPushToken(m MetaContext, platform string, token []byte, enab
 		DeviceKey: eid,
 		Enabled:   enabled,
 	})
+}
+
+// GrantChannelMember adds uid to a private channel's ACL and fans them in.
+// Caller must be a channel owner or a team admin. Fork-only; see
+// docs/rt-private-channel-acl.md.
+func (d *Minder) GrantChannelMember(
+	m MetaContext,
+	chid proto.RTChannelID,
+	uid proto.UID,
+	owner bool,
+) error {
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return err
+	}
+	return cli.RtChannelGrant(m.Ctx(), rem.RtChannelGrantArg{
+		ChannelID: chid,
+		Uid:       uid,
+		Owner:     owner,
+	})
+}
+
+// RevokeChannelMember removes uid from a private channel's ACL and drops their
+// delivery row. It does NOT rekey the team, so a revoked member who kept their
+// keys can still read ciphertext they already hold.
+func (d *Minder) RevokeChannelMember(
+	m MetaContext,
+	chid proto.RTChannelID,
+	uid proto.UID,
+) error {
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return err
+	}
+	return cli.RtChannelRevoke(m.Ctx(), rem.RtChannelRevokeArg{
+		ChannelID: chid,
+		Uid:       uid,
+	})
+}
+
+// ChannelMembers lists a private channel's ACL, including who granted each
+// member -- the audit trail that makes an admin's self-grant visible to the
+// channel rather than invisible. Readable by any channel member.
+func (d *Minder) ChannelMembers(
+	m MetaContext,
+	chid proto.RTChannelID,
+) (
+	[]rem.RTChannelAclEntry,
+	error,
+) {
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return nil, err
+	}
+	return cli.RtChannelMembers(m.Ctx(), chid)
 }

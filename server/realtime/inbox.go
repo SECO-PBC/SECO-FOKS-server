@@ -202,6 +202,18 @@ func GetChangedThreads(
 		if md.Tier == proto.RTChannelTier_Admin && !role.IsAdminOrAbove() {
 			continue
 		}
+		// Inventory row 7. The other set-based path, so it embeds the
+		// chokepoint's step 5 rather than calling it: skip a private channel
+		// the caller has no channel_acl row for. A user_channels row is not
+		// authority -- it is delivery state that a revoke deletes but that
+		// could linger through a bug -- so this is the same belt-and-braces
+		// the per-team re-authorization above applies to team membership.
+		// Unlike the channel list there is no admin exception: an admin who
+		// has not granted themselves into a private channel has no
+		// user_channels row for it either, so nothing reaches here.
+		if !raw.md.aclMember {
+			continue
+		}
 		err = applyReadRoleGate(md, *role)
 		if err != nil {
 			return nil, err
@@ -244,7 +256,7 @@ func readChangedChannels(
 	}
 	rows, err := db.Query(
 		m.Ctx(),
-		`SELECT `+channelMetadataCols+`,
+		`SELECT `+channelMetadataCols+channelPrivacyCols("$2")+`,
 		        c.parent_team_id,
 		        uc.inbox_version, uc.read_through, uc.hidden, uc.muted
 		 FROM user_channels uc
