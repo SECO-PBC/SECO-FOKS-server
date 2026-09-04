@@ -4,6 +4,8 @@
 package kvStore
 
 import (
+	"bytes"
+
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/lib/kv"
 	proto "github.com/foks-proj/go-foks/proto/lib"
@@ -95,6 +97,32 @@ func putSmallFileOrSymlink(
 
 	rk, err := core.ImportRole(arg.Sfb.Rg.Role)
 	if err != nil {
+		return err
+	}
+
+	// Replay of an identical node is a no-op (docs/kv_offline.md D5): node
+	// IDs are client-chosen and fix the encryption nonce, so an honest
+	// retry -- an offline drain whose earlier attempt landed but whose ack
+	// was lost -- is byte-identical. Check before usageCheckAndInc so a
+	// replay is not double-charged. A same-ID row with different bytes is a
+	// client bug or a stray collision in a 16-byte random space; refuse it
+	// rather than silently keeping either copy.
+	var existing []byte
+	err = tx.QueryRow(
+		m.Ctx(),
+		`SELECT box FROM small_file_or_symlink
+		 WHERE short_host_id=$1 AND short_party_id=$2 AND node_id=$3`,
+		int(m.HostID().Short),
+		pid.Shorten().ExportToDB(),
+		arg.Id.ExportToDB(),
+	).Scan(&existing)
+	if err == nil {
+		if bytes.Equal(existing, arg.Sfb.DataBox) {
+			return nil
+		}
+		return core.KVRaceError("small-file node id replayed with different content")
+	}
+	if err != pgx.ErrNoRows {
 		return err
 	}
 
