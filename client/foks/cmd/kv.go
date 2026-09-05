@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -607,10 +608,87 @@ type nopWriteCloser struct {
 
 func (nopWriteCloser) Close() error { return nil }
 
+// Commit is a no-op for a stream: bytes handed to stdout are already gone,
+// so there is nothing to make visible atomically.
+func (nopWriteCloser) Commit() error { return nil }
+
+// commitWriteCloser is a sink whose output only becomes visible on Commit.
+// `kv get` streams a file chunk by chunk and a chunk can fail mid-stream --
+// notably offline, where the first chunk may be served from cache and a
+// later one is not (docs/kv_offline.md D2) -- so writing straight to the
+// destination would leave a silently truncated file behind. Callers Commit
+// on success and Close on the way out; Close without Commit discards.
+type commitWriteCloser interface {
+	io.WriteCloser
+	Commit() error
+}
+
+// passthroughWriteCloser writes straight to its sink and has nothing to
+// commit. Used for destinations where atomicity is meaningless and a rename
+// would be wrong: character devices, FIFOs, sockets.
+type passthroughWriteCloser struct {
+	io.WriteCloser
+}
+
+func (passthroughWriteCloser) Commit() error { return nil }
+
+// atomicFileWriter writes to a temp file beside the destination and renames
+// over it on Commit, so a failed or abandoned transfer leaves the
+// destination exactly as it was -- absent if it was absent, untouched if it
+// already existed.
+type atomicFileWriter struct {
+	f           *os.File
+	tmpPath     string
+	destPath    string
+	claimedDest bool // we created dest as an exclusivity placeholder
+	committed   bool
+}
+
+func (a *atomicFileWriter) Write(p []byte) (int, error) { return a.f.Write(p) }
+
+func (a *atomicFileWriter) Commit() error {
+	if a.committed {
+		return nil
+	}
+	// Flush before publishing. Without this the rename's metadata can reach
+	// disk ahead of the data, so a crash just after Commit leaves a
+	// full-looking file that is empty or short -- the very outcome this
+	// writer exists to prevent.
+	if err := a.f.Sync(); err != nil {
+		return err
+	}
+	if err := a.f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(a.tmpPath, a.destPath); err != nil {
+		return err
+	}
+	a.committed = true
+	return nil
+}
+
+// Close discards an uncommitted transfer: the temp file goes, and so does
+// the destination if we created it only to reserve the name.
+func (a *atomicFileWriter) Close() error {
+	if a.committed {
+		return nil
+	}
+	a.f.Close()
+	os.Remove(a.tmpPath)
+	if a.claimedDest {
+		os.Remove(a.destPath)
+	}
+	return nil
+}
+
 type terminalOutputWrapper struct {
 	io.WriteCloser
 	didFirst bool
 }
+
+// Commit is a no-op: like the raw stdout sink it wraps, its bytes are gone
+// as soon as they are written, so there is nothing to reveal atomically.
+func (*terminalOutputWrapper) Commit() error { return nil }
 
 func isProbablyBinary(data []byte) bool {
 	if len(data) == 0 {
@@ -651,13 +729,56 @@ func (t *terminalOutputWrapper) Close() error {
 	return t.WriteCloser.Close()
 }
 
+// resolveSymlinkChain follows `p` the way open(2) would: through however many
+// symlinks it takes, to the final target. That target may not exist -- a
+// dangling link is where open with O_CREAT creates the file -- and the path is
+// returned regardless, since it is where the bytes belong.
+//
+// filepath.EvalSymlinks cannot be used for this: it fails whenever the target
+// is missing, and failure alone does not say whether the cause was a dangling
+// link (recoverable, and common) or a loop or a permission error (not). Doing
+// it by hand keeps those apart and follows the whole chain rather than one hop.
+func resolveSymlinkChain(p string) (string, error) {
+	// Linux resolves up to 40 links (MAXSYMLINKS); macOS and the BSDs stop
+	// at 32. Take the higher of the two so this never refuses a chain the
+	// platform's own open(2) would have followed -- being stricter than the
+	// call we are imitating would be its own bug -- while still terminating
+	// on a cycle.
+	const maxHops = 40
+	for i := 0; ; i++ {
+		fi, err := os.Lstat(p)
+		if os.IsNotExist(err) {
+			// The end of the chain, and nothing there: where open would
+			// create the file.
+			return p, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return p, nil
+		}
+		if i >= maxHops {
+			return "", core.BadArgsError("too many levels of symbolic links")
+		}
+		tgt, err := os.Readlink(p)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(tgt) {
+			tgt = filepath.Join(filepath.Dir(p), tgt)
+		}
+		p = tgt
+	}
+}
+
 func openWriter(
 	m libclient.MetaContext,
 	dest string,
 	mode int,
 	force bool,
 	forceOutput bool,
-) (io.WriteCloser, error) {
+) (commitWriteCloser, error) {
 
 	if dest == "-" {
 		tui := m.G().UIs().Terminal
@@ -673,16 +794,109 @@ func openWriter(
 		return stdout, nil
 	}
 
+	// A negative mode means the caller did not ask for one. That matters
+	// below: open-and-truncate ignored its mode argument for a file that
+	// already existed, so an overwrite has to leave the existing
+	// permissions alone rather than imposing the default.
+	explicitMode := mode >= 0
 	if mode < 0 {
 		mode = 0o600
 	}
-	flags := os.O_CREATE | os.O_WRONLY
-	if force {
-		flags |= os.O_TRUNC
-	} else {
-		flags |= os.O_EXCL
+
+	// The path the caller gave is what exclusivity is judged on: open(2) with
+	// O_CREAT|O_EXCL refuses any existing path, a dangling symlink included.
+	// Resolution below moves `dest` to the final target, which is where the
+	// bytes go, but must not become the thing --force is asked about.
+	claimPath := dest
+
+	// Rename replaces the path it is given, so a symlink destination would be
+	// swapped for a regular file while the file it pointed at kept its old
+	// content. Follow the chain the way open(2) does, so a write lands on the
+	// final target.
+	resolved, rerr := resolveSymlinkChain(dest)
+	if rerr != nil {
+		return nil, rerr
 	}
-	return os.OpenFile(dest, flags, os.FileMode(mode))
+	dest = resolved
+
+	fi, statErr := os.Stat(dest)
+
+	// Overwriting an existing file with no --mode keeps the permissions it
+	// already has. Without this the temp file's mode wins at the rename, so
+	// a 0644 file would silently become 0600.
+	if !explicitMode && statErr == nil && fi.Mode().IsRegular() {
+		mode = int(fi.Mode().Perm())
+	}
+
+	// An invalid destination has to fail before the transfer, not after it:
+	// with --force nothing opens the destination up front any more, so
+	// without this a `kv get big ~/somedir --force` would download the whole
+	// file and only then fail at the rename.
+	if statErr == nil && fi.IsDir() {
+		return nil, core.BadArgsError("destination is a directory")
+	}
+
+	// A destination that already exists and is not a regular file -- a
+	// device, FIFO or socket, /dev/null being the common one -- has to be
+	// written through, as open-and-truncate did. Renaming over it would
+	// replace the node itself with a regular file, and the temp file would
+	// have to be created in a directory like /dev in the first place. There
+	// is nothing to make atomic here: such a sink has no prior contents to
+	// preserve. Only reachable with --force, since without it the O_EXCL
+	// claim below refuses any destination that already exists.
+	if force && statErr == nil && !fi.Mode().IsRegular() {
+		f, err := os.OpenFile(dest, os.O_WRONLY, os.FileMode(mode))
+		if err != nil {
+			return nil, err
+		}
+		return passthroughWriteCloser{WriteCloser: f}, nil
+	}
+
+	// Without --force the destination must not already exist. Claim the name
+	// with O_EXCL up front -- so the check is a real reservation and not a
+	// racy stat -- and remember to remove the placeholder if the transfer is
+	// abandoned. With --force the destination is left untouched until the
+	// rename, which is strictly better than truncating it up front.
+	var claimed bool
+	if !force {
+		f, err := os.OpenFile(claimPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(mode))
+		if err != nil {
+			return nil, err
+		}
+		f.Close()
+		claimed = true
+	}
+
+	// The temp file lives beside the destination so the rename stays within
+	// one filesystem.
+	tmp, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".tmp")
+	if err != nil {
+		if claimed {
+			os.Remove(claimPath)
+		}
+		return nil, err
+	}
+	if err := tmp.Chmod(os.FileMode(mode)); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		if claimed {
+			os.Remove(claimPath)
+		}
+		return nil, err
+	}
+	return &atomicFileWriter{
+		f:           tmp,
+		tmpPath:     tmp.Name(),
+		destPath:    dest,
+		claimedDest: claimed,
+	}, nil
+}
+
+// printKVOfflineNotice tells the user a result came from the local cache
+// without being validated against the server. The RT offline work carries an
+// identical helper on its own branch; when both land, collapse them into one.
+func printKVOfflineNotice(m libclient.MetaContext, detail string) {
+	m.G().UIs().Terminal.Printf("(offline: %s)\n", detail)
 }
 
 func kvGetWithArgs(
@@ -699,15 +913,21 @@ func kvGetWithArgs(
 	if err != nil {
 		return err
 	}
+	// Close discards anything uncommitted, so an error below -- including a
+	// chunk that is not in the cache while offline -- leaves no partial file.
 	defer wrt.Close()
 
-	return libkv.GetFile(
+	err = libkv.GetFile(
 		wrt,
 		func() (lcl.GetFileRes, error) {
-			return cli.ClientKVGetFile(m.Ctx(), lcl.ClientKVGetFileArg{
+			res, err := cli.ClientKVGetFile(m.Ctx(), lcl.ClientKVGetFileArg{
 				Cfg:  cfg,
 				Path: path,
 			})
+			if err == nil && res.Stale {
+				printKVOfflineNotice(m, "showing locally cached file content; unvalidated")
+			}
+			return res, err
 		},
 		func(id proto.FileID, offset proto.Offset) (lcl.GetFileChunkRes, error) {
 			return cli.ClientKVGetFileChunk(m.Ctx(), lcl.ClientKVGetFileChunkArg{
@@ -718,6 +938,11 @@ func kvGetWithArgs(
 
 		},
 	)
+	if err != nil {
+		return err
+	}
+	// Every chunk arrived: make the file visible at its destination.
+	return wrt.Commit()
 }
 
 func kvLs(
@@ -763,6 +988,9 @@ func kvLs(
 				})
 				if err != nil {
 					return err
+				}
+				if res.Stale && len(prefix) == 0 {
+					printKVOfflineNotice(m, "showing locally cached listing; unvalidated")
 				}
 				if len(prefix) == 0 {
 					prefix = res.Parent

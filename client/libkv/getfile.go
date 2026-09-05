@@ -124,7 +124,7 @@ func (k *Minder) GetFile(
 		return nil, core.BadArgsError("trailing slash")
 	}
 	var ret *lcl.GetFileRes
-	err = k.retryCacheLoopWithOptions(
+	stale, err := k.retryCacheLoopRead(
 		m,
 		kvp,
 		kvRetryOptions{skipCacheCheck: cfg.SkipCacheCheck},
@@ -152,6 +152,7 @@ func (k *Minder) GetFile(
 	if err != nil {
 		return nil, err
 	}
+	ret.Stale = stale
 	return ret, nil
 }
 

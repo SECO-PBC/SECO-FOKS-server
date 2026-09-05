@@ -4,6 +4,7 @@
 package libkv
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -103,6 +104,44 @@ type Minder struct {
 
 	localCliMu sync.Mutex
 	localCli   *rem.KVStoreClient
+
+	testHooks *MinderTestHooks
+}
+
+// MinderTestHooks let tests fail specific write RPCs in flight -- the state
+// the network conditioner cannot reach, since it refuses dials but cannot
+// kill an established connection. Production sees the same states as RPC
+// EOF/timeout errors.
+type MinderTestHooks struct {
+	// PreRPC, if set, runs before the named write RPC ("uploadNode",
+	// "uploadDir", "putDirent"); a non-nil return is used in place of
+	// issuing the RPC.
+	PreRPC func(op string) error
+
+	// PreDB, if set, runs before a named local-database step in the outbox
+	// ("dbGetOutboxIndex", "enqueueOutbox", "setOutboxState",
+	// "noteOutboxAttempt", "removeOutbox", "openOutboxPayload"); a non-nil
+	// return stands in for the step's failure. Every partial-failure branch
+	// in the outbox is reachable only this way: SQLite does not fail on
+	// demand, and these are the branches that decide whether a queued write
+	// is stranded, re-attempted, or silently hidden.
+	PreDB func(op string) error
+}
+
+func (k *Minder) SetTestHooks(h *MinderTestHooks) { k.testHooks = h }
+
+func (k *Minder) preRPCHook(op string) error {
+	if k.testHooks != nil && k.testHooks.PreRPC != nil {
+		return k.testHooks.PreRPC(op)
+	}
+	return nil
+}
+
+func (k *Minder) preDBHook(op string) error {
+	if k.testHooks != nil && k.testHooks.PreDB != nil {
+		return k.testHooks.PreDB(op)
+	}
+	return nil
 }
 
 func NewMinder(au *libclient.UserContext) *Minder {
@@ -197,7 +236,13 @@ func (k *KVParty) fillAuthToken(
 	}
 	tok := k.plcn.ViewTok()
 	if tok == nil {
-		return core.PermissionError("no VO token")
+		// A nil token here means the team came up from its offline snapshot
+		// (tokens are server-minted; nothing else produces a token-less
+		// node). That is an outage, not a refusal: report it transport-class
+		// so retry/queue layers classify it correctly.
+		return core.NewConnectError(
+			"no view token: team was loaded from an offline snapshot",
+			errors.New("server unreachable"))
 	}
 	*auth = rem.NewKVAuthWithTeam(*tok)
 	return nil
@@ -656,31 +701,35 @@ func (k *Minder) getRoot(
 	return &root, nil
 }
 
-func (k *Minder) makeEmptyDir(
+// sealEmptyDir builds a new directory entirely locally: fresh seed, fresh
+// id, seed boxed for the party key. No network; the first RPC of a mkdir
+// comes after, so a transport failure leaves a complete intent to queue
+// (docs/kv_offline.md D3).
+func (k *Minder) sealEmptyDir(
 	m MetaContext,
 	kvp *KVParty,
 	rp proto.RolePair,
 ) (
-	*DirPair,
+	*proto.KVDir,
+	*proto.DirKeySeed,
 	*keyBundle,
 	error,
 ) {
-
 	var seed proto.DirKeySeed
 	err := core.RandomFill(seed[:])
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	var dirid proto.DirID
 	err = core.RandomFill(dirid[:])
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	box, kb, err := kvp.boxDirSeed(m, rp.Read, &seed, &dirid)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	kvd := proto.KVDir{
@@ -690,22 +739,51 @@ func (k *Minder) makeEmptyDir(
 		WriteRole: rp.Write,
 		Status:    proto.KVDirStatus_Active,
 	}
+	return &kvd, &seed, kb, nil
+}
 
+// uploadDir puts one sealed directory row. An identical replay is a
+// server-side no-op, so the drain may re-issue this blindly (D5).
+func (k *Minder) uploadDir(
+	m MetaContext,
+	kvp *KVParty,
+	kvd *proto.KVDir,
+) error {
+	if err := k.preRPCHook("uploadDir"); err != nil {
+		return err
+	}
 	hdr, cli, err := k.clientWithCacheCheck(m, kvp)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 	err = cli.KvMkdir(m.Ctx(), rem.KvMkdirArg{
 		Hdr: *hdr,
-		Dir: kvd,
+		Dir: *kvd,
 	})
 	if sce := m.catchStaleCacheError(err); sce != nil {
-		return nil, nil, sce
+		return sce
 	}
+	return err
+}
+
+func (k *Minder) makeEmptyDir(
+	m MetaContext,
+	kvp *KVParty,
+	rp proto.RolePair,
+) (
+	*DirPair,
+	*keyBundle,
+	error,
+) {
+	kvd, seed, kb, err := k.sealEmptyDir(m, kvp, rp)
 	if err != nil {
 		return nil, nil, err
 	}
-	ret := NewDirPairFromSingle(kvp.Id(), kvd, seed)
+	err = k.uploadDir(m, kvp, kvd)
+	if err != nil {
+		return nil, nil, err
+	}
+	ret := NewDirPairFromSingle(kvp.Id(), *kvd, *seed)
 	err = kvp.caches.dir.Put(m, ret)
 	if err != nil {
 		return nil, nil, err
@@ -1252,6 +1330,9 @@ func (k *Minder) putDirent(
 	newDirents []*Dirent,
 ) error {
 
+	if err := k.preRPCHook("putDirent"); err != nil {
+		return err
+	}
 	hdr, cli, err := k.clientWithCacheCheck(m, kvp)
 	if err != nil {
 		return err
@@ -1331,6 +1412,7 @@ func (k *Minder) Mkdir(
 	}
 
 	var ret *proto.DirID
+	var qctx mkdirQueueCtx
 
 	err = k.retryCacheLoop(m, kvp, func(m MetaContext) error {
 
@@ -1340,6 +1422,7 @@ func (k *Minder) Mkdir(
 				writePerms:     rp,
 				needCreate:     true,
 				writePermsRoot: kvp.DefaultRootPerms(),
+				mkdirQ:         &qctx,
 			},
 		)
 		if err != nil {
@@ -1353,6 +1436,31 @@ func (k *Minder) Mkdir(
 		return nil
 	})
 	if err != nil {
+		// A leaf directory creation interrupted mid-flight queues as intent
+		// (docs/kv_offline.md D3): the absence check succeeded against live
+		// state before the transport died, so -- unlike an offline-composed
+		// mkdir, which cannot ground "expect absent" without a listing cache
+		// -- the queue-time predicate is real.
+		if qctx.dir != nil && qctx.leaf {
+			key, gen, kerr := kvp.kvStoreKeyCurrent(m, rp.Read)
+			if kerr != nil {
+				return nil, err
+			}
+			nid := qctx.dir.Id.KVNodeID()
+			if qerr := k.maybeQueueWrite(m, kvp, err, *nid, key,
+				proto.RoleAndGen{Role: rp.Read, Gen: gen},
+				&lcl.KVOutboxPayload{
+					Op:         lcl.KVOutboxOp_Mkdir,
+					Path:       path,
+					Nid:        *nid,
+					ReadRole:   rp.Read,
+					WriteRole:  rp.Write,
+					DirentVers: qctx.direntVers,
+					Dir:        qctx.dir,
+				}); qerr != nil {
+				return nil, qerr
+			}
+		}
 		return nil, err
 	}
 	return ret, nil
@@ -1509,6 +1617,30 @@ func (k *Minder) unlinkInner(
 	}
 	err = k.putDirent(m, kvp, []*Dirent{tmp})
 	if err != nil {
+		// A transport failure queues the unlink as intent (docs/kv_offline.md
+		// D3): the payload nid is the tombstone itself -- a drain that finds
+		// the dirent already tombstoned is done (D5) -- and the entry row
+		// needs its own opaque id since tombstones aren't unique.
+		key, gen, kerr := kvp.kvStoreKeyCurrent(m, rp.Read)
+		if kerr != nil {
+			return err
+		}
+		eid, eerr := newNodeID(proto.KVNodeType_None)
+		if eerr != nil {
+			return err
+		}
+		if qerr := k.maybeQueueWrite(m, kvp, err, *eid, key,
+			proto.RoleAndGen{Role: rp.Read, Gen: gen},
+			&lcl.KVOutboxPayload{
+				Op:         lcl.KVOutboxOp_Unlink,
+				Path:       pap.Export(),
+				Nid:        Tombstone(),
+				ReadRole:   rp.Read,
+				WriteRole:  rp.Write,
+				DirentVers: tmp.Version - 1,
+			}); qerr != nil {
+			return qerr
+		}
 		return err
 	}
 	return nil
@@ -1531,7 +1663,7 @@ func (k *Minder) Stat(
 		return nil, err
 	}
 	var ret *lcl.KVStat
-	err = k.retryCacheLoop(m, kvp, func(m MetaContext) error {
+	stale, err := k.retryCacheLoopRead(m, kvp, kvRetryOptions{}, func(m MetaContext) error {
 		tmp, err := k.statInner(m, cfg, kvp, pap)
 		if err != nil {
 			return err
@@ -1542,6 +1674,7 @@ func (k *Minder) Stat(
 	if err != nil {
 		return nil, err
 	}
+	ret.Stale = stale
 	return ret, nil
 }
 
@@ -1689,7 +1822,7 @@ func (k *Minder) List(
 		return nil, err
 	}
 	var ret *lcl.CliKVListRes
-	err = k.retryCacheLoop(m, kvp, func(m MetaContext) error {
+	stale, err := k.retryCacheLoopRead(m, kvp, kvRetryOptions{}, func(m MetaContext) error {
 		tmp, err := k.listInner(m, kvp, pap, opts)
 		if err != nil {
 			return err
@@ -1700,6 +1833,7 @@ func (k *Minder) List(
 	if err != nil {
 		return nil, err
 	}
+	ret.Stale = stale
 	return ret, nil
 }
 

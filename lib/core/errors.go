@@ -1418,6 +1418,27 @@ func (r RTMsgOrderError) Error() string {
 	return "bad message ordering: " + string(r)
 }
 
+// KVWriteQueuedError is a client-generated soft failure (docs/kv_offline.md
+// D10): the write could not reach the server on a transport-class failure and
+// its intent sits durably in the local KV outbox, to be drained on reconnect.
+// NodeID identifies the queued write so callers can reconcile when the drain
+// retires it.
+type KVWriteQueuedError struct {
+	NodeID proto.KVNodeID
+}
+
+func (k KVWriteQueuedError) Error() string {
+	return "KV write queued for delivery on reconnect"
+}
+
+// KVOutboxFullError is a client-generated error: the party's KV outbox is at
+// capacity, and the write is refused rather than shedding a queued entry.
+type KVOutboxFullError struct{}
+
+func (k KVOutboxFullError) Error() string {
+	return "KV outbox is full for this party"
+}
+
 func ErrorToStatus(e error) proto.Status {
 
 	switch {
@@ -1626,6 +1647,10 @@ func ErrorToStatus(e error) proto.Status {
 		return proto.NewStatusWithRtNotFoundError(string(te))
 	case RTMsgOrderError:
 		return proto.NewStatusWithRtMsgOrderError(string(te))
+	case KVWriteQueuedError:
+		return proto.NewStatusWithKvWriteQueued(te.NodeID)
+	case KVOutboxFullError:
+		return proto.NewStatusWithKvOutboxFull()
 	case RPCEOFError:
 		return proto.NewStatusWithRpcEof()
 	case OverQuotaError:
@@ -2057,6 +2082,10 @@ func StatusToError(s proto.Status) error {
 		return KVNotAvailableError{}
 	case proto.StatusCode_KV_ABS_PATH_ERROR:
 		return KVAbsPathError{Path: proto.KVPath(s.KvAbsPathError())}
+	case proto.StatusCode_KV_WRITE_QUEUED:
+		return KVWriteQueuedError{NodeID: s.KvWriteQueued()}
+	case proto.StatusCode_KV_OUTBOX_FULL:
+		return KVOutboxFullError{}
 	case proto.StatusCode_STRIPE_SESSION_EXISTS_ERROR:
 		return StripeSessionExistsError{}
 	case proto.StatusCode_BOT_TOKEN_ERROR:
