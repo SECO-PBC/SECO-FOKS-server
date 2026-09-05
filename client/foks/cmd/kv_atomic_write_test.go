@@ -213,6 +213,64 @@ func TestKVGetWriterIsAtomic(t *testing.T) {
 		require.Equal(t, []byte("created through the link"), got)
 	})
 
+	t.Run("force follows a whole symlink chain to a missing target", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "c.bin")
+		mid := filepath.Join(dir, "b.bin")
+		head := filepath.Join(dir, "a.bin")
+		require.NoError(t, os.Symlink(target, mid)) // b -> c (missing)
+		require.NoError(t, os.Symlink(mid, head))   // a -> b
+
+		w, err := openWriter(m, head, 0o600, true, false)
+		require.NoError(t, err)
+		_, err = w.Write([]byte("through the chain"))
+		require.NoError(t, err)
+		require.NoError(t, w.Commit())
+
+		// Both links survive; the bytes landed at the end of the chain, not
+		// on the intermediate link.
+		for _, l := range []string{head, mid} {
+			fi, err := os.Lstat(l)
+			require.NoError(t, err)
+			require.NotZero(t, fi.Mode()&os.ModeSymlink, "%s must stay a symlink", l)
+		}
+		got, err := os.ReadFile(target)
+		require.NoError(t, err)
+		require.Equal(t, []byte("through the chain"), got)
+	})
+
+	t.Run("a symlink loop is an error, not an overwrite", func(t *testing.T) {
+		dir := t.TempDir()
+		loop := filepath.Join(dir, "loop.bin")
+		require.NoError(t, os.Symlink(loop, loop))
+
+		// A resolution failure that is not a missing target must not be
+		// mistaken for a dangling link and renamed over.
+		_, err := openWriter(m, loop, 0o600, true, false)
+		require.Error(t, err)
+
+		fi, err := os.Lstat(loop)
+		require.NoError(t, err)
+		require.NotZero(t, fi.Mode()&os.ModeSymlink, "the loop must not be replaced")
+	})
+
+	t.Run("without force a dangling symlink destination is refused", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "target.bin")
+		link := filepath.Join(dir, "link.bin")
+		require.NoError(t, os.Symlink(target, link)) // target does not exist
+
+		// The destination the user named does exist, so --force is required
+		// even though the link dangles. Exclusivity is judged on that path,
+		// not on the target it resolves to.
+		_, err := openWriter(m, link, 0o600, false, false)
+		require.Error(t, err)
+		require.True(t, os.IsExist(err), "expected an exists error, got %v", err)
+
+		_, err = os.Lstat(target)
+		require.True(t, os.IsNotExist(err), "the target must not have been created")
+	})
+
 	t.Run("committed file carries the requested mode", func(t *testing.T) {
 		dir := t.TempDir()
 		dest := filepath.Join(dir, "out.bin")

@@ -729,6 +729,46 @@ func (t *terminalOutputWrapper) Close() error {
 	return t.WriteCloser.Close()
 }
 
+// resolveSymlinkChain follows `p` the way open(2) would: through however many
+// symlinks it takes, to the final target. That target may not exist -- a
+// dangling link is where open with O_CREAT creates the file -- and the path is
+// returned regardless, since it is where the bytes belong.
+//
+// filepath.EvalSymlinks cannot be used for this: it fails whenever the target
+// is missing, and failure alone does not say whether the cause was a dangling
+// link (recoverable, and common) or a loop or a permission error (not). Doing
+// it by hand keeps those apart and follows the whole chain rather than one hop.
+func resolveSymlinkChain(p string) (string, error) {
+	// Roughly the kernel's own limit; the point is to terminate on a cycle
+	// rather than to match any particular number.
+	const maxHops = 32
+	for i := 0; ; i++ {
+		fi, err := os.Lstat(p)
+		if os.IsNotExist(err) {
+			// The end of the chain, and nothing there: where open would
+			// create the file.
+			return p, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return p, nil
+		}
+		if i >= maxHops {
+			return "", core.BadArgsError("too many levels of symbolic links")
+		}
+		tgt, err := os.Readlink(p)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(tgt) {
+			tgt = filepath.Join(filepath.Dir(p), tgt)
+		}
+		p = tgt
+	}
+}
+
 func openWriter(
 	m libclient.MetaContext,
 	dest string,
@@ -760,24 +800,21 @@ func openWriter(
 		mode = 0o600
 	}
 
+	// The path the caller gave is what exclusivity is judged on: open(2) with
+	// O_CREAT|O_EXCL refuses any existing path, a dangling symlink included.
+	// Resolution below moves `dest` to the final target, which is where the
+	// bytes go, but must not become the thing --force is asked about.
+	claimPath := dest
+
 	// Rename replaces the path it is given, so a symlink destination would be
 	// swapped for a regular file while the file it pointed at kept its old
-	// content. Writing through the link is what open-and-truncate did and
-	// what the user means, so resolve first.
-	if resolved, rerr := filepath.EvalSymlinks(dest); rerr == nil {
-		dest = resolved
-	} else if li, lerr := os.Lstat(dest); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
-		// A dangling link: EvalSymlinks fails because the target is not
-		// there, but open-and-truncate would have followed the link and
-		// created it. Resolve one hop by hand so we do the same, rather than
-		// renaming over the link itself.
-		if tgt, rerr := os.Readlink(dest); rerr == nil {
-			if !filepath.IsAbs(tgt) {
-				tgt = filepath.Join(filepath.Dir(dest), tgt)
-			}
-			dest = tgt
-		}
+	// content. Follow the chain the way open(2) does, so a write lands on the
+	// final target.
+	resolved, rerr := resolveSymlinkChain(dest)
+	if rerr != nil {
+		return nil, rerr
 	}
+	dest = resolved
 
 	fi, statErr := os.Stat(dest)
 
@@ -819,7 +856,7 @@ func openWriter(
 	// rename, which is strictly better than truncating it up front.
 	var claimed bool
 	if !force {
-		f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(mode))
+		f, err := os.OpenFile(claimPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(mode))
 		if err != nil {
 			return nil, err
 		}
@@ -832,7 +869,7 @@ func openWriter(
 	tmp, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".tmp")
 	if err != nil {
 		if claimed {
-			os.Remove(dest)
+			os.Remove(claimPath)
 		}
 		return nil, err
 	}
@@ -840,7 +877,7 @@ func openWriter(
 		tmp.Close()
 		os.Remove(tmp.Name())
 		if claimed {
-			os.Remove(dest)
+			os.Remove(claimPath)
 		}
 		return nil, err
 	}
