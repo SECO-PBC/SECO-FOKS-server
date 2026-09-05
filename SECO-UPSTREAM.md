@@ -10,6 +10,9 @@ or AI — has to re-derive a decision we already made, re-propose something
 already proposed, or wonder why half a change went out and half did not.
 
 Last synced against upstream: **v0.1.9** (`cb2d8ac`), 2026-08-25.
+`upstream/main` has since moved to `d39371c` (11 commits, 2026-09-01) — every
+one of our then-open proposals among them. We have **not** merged it yet, so we
+still carry local copies of everything under Upstreamed until we do.
 
 ## How to use it
 
@@ -17,6 +20,16 @@ Last synced against upstream: **v0.1.9** (`cb2d8ac`), 2026-08-25.
 - **Proposing upstream?** Branch `upstream-pr/<topic>` off `upstream/main` (not
   our `main`), push to SECO-PBC, then
   `gh pr create --repo foks-proj/go-foks --head SECO-PBC:<branch>`.
+- **Sign off first.** `git rebase --signoff`. CONTRIBUTING.md requires a DCO
+  trailer and none of our fork-authored commits carry one by default.
+- **Expect a supersede-PR if review turns up follow-up work.** Our fork is
+  org-owned, so maintainer pushes to our PR branch 403 even with
+  `maintainerCanModify` set. When maxtaco wants a fix or a test on top he
+  cannot push to us: he opens a new PR carrying our commits with authorship
+  preserved plus his work, and closes ours. That is what happened to #323,
+  #324 and #326 — not a rejection, and the credit survives. If we would rather
+  have fixes pushed onto our own branch, propose from a personally-owned fork
+  instead of SECO-PBC.
 - **PR closed or merged?** Update the row the same day. A stale row is worse
   than no row, because it gets trusted.
 - **After each upstream merge?** Re-check every `Proposed` row: merged ones
@@ -41,24 +54,36 @@ user hits; keep it local if it encodes how SECO deploys or what SECO builds.**
 
 | Change | PR | Notes |
 |---|---|---|
-| merkle loop DB resilience | [#323](https://github.com/foks-proj/go-foks/pull/323) | Transient DB error permanently killed the merkle pipeline. |
-| libkv stale VO bearer token re-mint | [#324](https://github.com/foks-proj/go-foks/pull/324) | Freshly-admitted member's first KV write failed for minutes. |
-| explore double-load | [#325](https://github.com/foks-proj/go-foks/pull/325) | 60→36 round trips. Shipped **without** its budget test — see RpcStats below. |
-| roster by member names | [#326](https://github.com/foks-proj/go-foks/pull/326) | Uses upstream's own username cache (#298) on a path that missed it. |
-| `--vhost` strict lookup | [#327](https://github.com/foks-proj/go-foks/pull/327) | Typo'd `--vhost` rewrote the **primary** host's public zone. Found by cubic on our merge PR #21. |
-| `patch-db --yes` | [#328](https://github.com/foks-proj/go-foks/pull/328) | Unattended deploys can't answer a prompt. |
-| `Config.RPCLogOptions` via env/config | [#329](https://github.com/foks-proj/go-foks/pull/329) | Flag-only, so the mobile agent could never enable RPC tracing. |
-| `TeamCancelRequest` + `TeamReject` | [#330](https://github.com/foks-proj/go-foks/pull/330) | Deliberately excludes `TeamLeaveSelf` — see Declined, and issue [#331](https://github.com/foks-proj/go-foks/issues/331). |
+| transport-vs-semantic error classification | [#347](https://github.com/foks-proj/go-foks/pull/347) | `core.IsTransportError`, plus the four call sites that meant "transport" and only matched `ConnectError` — so a timeout or torn frame was treated differently from a refused dial in the same outage. **Carved out of queued PR 2**, where it was originally scoped; it stands alone as a defect fix and makes that PR smaller. `IsCertVerifyError` is deliberately not here, having no consumer until the cold-start PR. |
+| parallel explore waves | [#346](https://github.com/foks-proj/go-foks/pull/346) | 4533→1367ms, same 36 round trips overlapping 4.4x. Follow-on to #325. Carries **only** the waves commit — the RpcStats commit that shares its local branch stays local (see Declined). |
+| KV small-file write idempotent on replay | [#352](https://github.com/foks-proj/go-foks/pull/352) | A retry after a lost ack hit the primary key and read as a raw pg error, so `kvPutSmallFileOrSymlink` could not be retried at all. Node IDs are client-chosen and fix the encryption nonce, so an honest retry is byte-identical and is now a no-op; a same-ID/different-bytes write gets `KV_RACE_ERROR`. Same reasoning as the merged #349. |
+| KV directory creation idempotent on replay | [#353](https://github.com/foks-proj/go-foks/pull/353) | Companion to #352 for `kvMkdir`. Matters most because creation is two calls (mkdir, then link): a drop between them left an unreferenced directory the client could not finish, since the retry failed on step one. |
+
+Note the series is now **four** PRs, not three: #347 was split out of PR 2
+after the fact. `SECO-UPSTREAM-rt-offline.md` is amended to match. #345 has
+since closed, superseded by the merged #349 — see Upstreamed.
+
+The two KV idempotency PRs stand apart from that series: they touch only
+`server/kv-store`, need no proto change, and depend on nothing in the offline
+tracks. Either can land alone, in either order. They are the server half of
+our KV offline work; the client half stays local for now.
+
+The previous eight all resolved on 2026-09-01: five merged as themselves, three
+superseded by maxtaco's own PRs carrying our commits (see Upstreamed, and the
+supersede-PR note in "How to use it").
 
 ## Queued — decided yes, not yet opened
 
 | Change | Waiting on | Notes |
 |---|---|---|
-| parallel explore waves | **#325 landing** | 4533→1367ms. Builds on #325; racing it would conflict. |
+| RT offline mode (client) | **[#347](https://github.com/foks-proj/go-foks/pull/347) landing** | Durable outbox, degraded reads, offline read-marks, `rt outbox` CLI. The replay semantics its drain relies on landed with [#349](https://github.com/foks-proj/go-foks/pull/349); what remains is the transport classifier it uses to tell an outage from a refusal. |
+| RT offline cold-start bootstrap | **the offline-mode PR landing (which waits on [#347](https://github.com/foks-proj/go-foks/pull/347)), and maxtaco's read on the loader altitude** | Serves verified local snapshots from user/team/probe loaders. Touches shared loaders, so it follows rather than leads. Two trust-model questions already answered by maxtaco (cached PTKs offline; view token not needed offline) — recorded in `SECO-UPSTREAM-rt-offline.md`. Now also carries `verifiedAt` (below) and the offline-reads design doc, since the doc's trust-model argument rests on the field. **The branch is built and validated** (`upstream-pr/offline-verified-reads`, off #347) — held, not unready. |
+| snapshot staleness surfacing | **the cold-start PR landing** | `lcl.TeamMembership`/`TeamRoster` carry the verification time outward and the CLI renders it (`Verified` column, `Snapshot verified` footer). Split from the field itself so the cold-start PR stays about the trust model rather than about presentation. Postdates `SECO-UPSTREAM-rt-offline.md`, which does not mention `verifiedAt` at all. |
 
-
-Only one item is queued, and it names a real blocker. Anything else that belongs
-here should be opened instead of parked.
+Both remaining rows name real blockers: with #347 open, they are the second and
+third of one body of work deliberately split into a landing order, and the
+proposal text for all three lives in `SECO-UPSTREAM-rt-offline.md`. Nothing here
+is merely parked.
 
 ## Declined — considered, rejected, stays rejected
 
@@ -74,9 +99,10 @@ bridge cannot open a scope itself because `RpcStats` travels by context value
 and the bridge talks to the agent over loopback RPC. A CLI or server operator
 has zap and needs none of this.
 
-**One open thread:** #325 had to ship without its round-trip budget test, which
-needs this hook. #325's body offers the hook separately. If maxtaco asks for it,
-that is a request, not a re-proposal — reopen this decision then, and not before.
+**Thread closed 2026-09-01.** #325 merged without its round-trip budget test,
+and no comment or review on it asked for the hook. The standing condition —
+"if maxtaco asks, that is a request, not a re-proposal" — is unmet, so the
+decision holds unchanged. Do not re-raise it unprompted.
 
 ### `TeamLeaveSelf`
 **Local pending [#331](https://github.com/foks-proj/go-foks/issues/331)**, the design
@@ -124,3 +150,12 @@ subsystem unrelated to anything we are proposing. Not worth the review cost.
 | iOS `sharedHome` nil guard | [#289](https://github.com/foks-proj/go-foks/pull/289) |
 | libclient public Config setters | [#290](https://github.com/foks-proj/go-foks/pull/290) |
 | rejoin partial unique index | [#316](https://github.com/foks-proj/go-foks/pull/316) — our #288 was closed as superseded; upstream took our text verbatim as `p7.sql` |
+| explore double-load | [#325](https://github.com/foks-proj/go-foks/pull/325) — merged as ours. Shipped without its round-trip budget test; see RpcStats above |
+| `--vhost` strict lookup | [#327](https://github.com/foks-proj/go-foks/pull/327) — merged as ours |
+| `patch-db --yes` | [#328](https://github.com/foks-proj/go-foks/pull/328) — merged as ours |
+| `Config.RPCLogOptions` via env/config | [#329](https://github.com/foks-proj/go-foks/pull/329) — merged as ours |
+| `TeamCancelRequest` + `TeamReject` | [#330](https://github.com/foks-proj/go-foks/pull/330) — merged as ours; maxtaco added the cancel-reject-reaccept test arc in [#338](https://github.com/foks-proj/go-foks/pull/338). Still excludes `TeamLeaveSelf` — [#331](https://github.com/foks-proj/go-foks/issues/331) is **open** |
+| merkle loop DB resilience | our [#323](https://github.com/foks-proj/go-foks/pull/323) closed, superseded by [#344](https://github.com/foks-proj/go-foks/pull/344) — our commit carried unchanged with authorship preserved, plus his fix for a cancellation hazard review found |
+| libkv stale VO bearer token re-mint | our [#324](https://github.com/foks-proj/go-foks/pull/324) closed, superseded by [#343](https://github.com/foks-proj/go-foks/pull/343) — our two commits carried unchanged, plus a typed-error refactor (`TEAM_VO_BEARER_TOKEN_NOT_FOUND_ERROR`) and e2e regression coverage |
+| RT `rtSend` idempotent on `msg_id` | our [#345](https://github.com/foks-proj/go-foks/pull/345) closed, superseded by [#349](https://github.com/foks-proj/go-foks/pull/349) — our commit carried, plus maxtaco's `wasReplay` field on the response. `messages_enc` already had `UNIQUE(msg_id)`; the conflict had surfaced as a raw pg error no client could read |
+| roster by member names | our [#326](https://github.com/foks-proj/go-foks/pull/326) closed, superseded by [#332](https://github.com/foks-proj/go-foks/pull/332) — our commit carried unchanged, plus his fix for a cross-host hostname bug found in review; [#333](https://github.com/foks-proj/go-foks/pull/333) then replaced the member-load flag pair with an ordered `MemberLoadLevel` |
