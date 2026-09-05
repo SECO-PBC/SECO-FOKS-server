@@ -150,7 +150,7 @@ func TestKVGetWriterIsAtomic(t *testing.T) {
 		go func() {
 			f, err := os.OpenFile(fifo, os.O_RDONLY, 0)
 			if err == nil {
-				io.Copy(io.Discard, f)
+				_, _ = io.Copy(io.Discard, f)
 				f.Close()
 			}
 			close(opened)
@@ -170,6 +170,47 @@ func TestKVGetWriterIsAtomic(t *testing.T) {
 		require.NoError(t, err)
 		require.NotZero(t, fi.Mode()&os.ModeNamedPipe, "the FIFO must not be replaced")
 		noStrays(t, dir)
+	})
+
+	t.Run("overwrite keeps the existing mode when none is given", func(t *testing.T) {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "out.bin")
+		require.NoError(t, os.WriteFile(dest, []byte("old"), 0o644))
+
+		// mode < 0 means "the caller did not ask", as --mode defaults to -1.
+		// open-and-truncate ignored its mode argument for an existing file,
+		// so an overwrite must not silently tighten 0644 to the 0600 default.
+		w, err := openWriter(m, dest, -1, true, false)
+		require.NoError(t, err)
+		_, err = w.Write([]byte("new"))
+		require.NoError(t, err)
+		require.NoError(t, w.Commit())
+
+		fi, err := os.Stat(dest)
+		require.NoError(t, err)
+		require.Equal(t, os.FileMode(0o644), fi.Mode().Perm())
+	})
+
+	t.Run("force writes through a dangling symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "target.bin")
+		link := filepath.Join(dir, "link.bin")
+		require.NoError(t, os.Symlink(target, link)) // target does not exist
+
+		w, err := openWriter(m, link, 0o600, true, false)
+		require.NoError(t, err)
+		_, err = w.Write([]byte("created through the link"))
+		require.NoError(t, err)
+		require.NoError(t, w.Commit())
+
+		// The link survives and its target now exists, as open-and-truncate
+		// would have left things.
+		fi, err := os.Lstat(link)
+		require.NoError(t, err)
+		require.NotZero(t, fi.Mode()&os.ModeSymlink, "the symlink must not be replaced")
+		got, err := os.ReadFile(target)
+		require.NoError(t, err)
+		require.Equal(t, []byte("created through the link"), got)
 	})
 
 	t.Run("committed file carries the requested mode", func(t *testing.T) {

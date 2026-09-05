@@ -520,6 +520,13 @@ of D1–D12 does not depend on where it lands.
 
 - Offline coverage equals what was browsed online. Until D13 lands, a client
   that never visited a directory cannot list it offline.
+- **A queued write is not visible to a later offline read.** The outbox holds
+  intent; it does not update the read caches, so reading the path back while
+  still offline returns the last validated content, not what was just queued.
+  The chat outbox solves this by overlaying pending messages on the thread
+  view; the KV equivalent -- a pending overlay covering the node and its
+  dirent -- is not built. Until it is, "save offline, then reopen" shows the
+  old bytes, which is the most surprising thing in this design.
 - Deletions are invisible offline. A file removed by another party still reads
   locally until a validation call succeeds; there is no tombstone in the cache
   and no feed to learn one from.

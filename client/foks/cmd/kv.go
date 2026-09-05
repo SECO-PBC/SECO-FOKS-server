@@ -751,6 +751,11 @@ func openWriter(
 		return stdout, nil
 	}
 
+	// A negative mode means the caller did not ask for one. That matters
+	// below: open-and-truncate ignored its mode argument for a file that
+	// already existed, so an overwrite has to leave the existing
+	// permissions alone rather than imposing the default.
+	explicitMode := mode >= 0
 	if mode < 0 {
 		mode = 0o600
 	}
@@ -758,13 +763,30 @@ func openWriter(
 	// Rename replaces the path it is given, so a symlink destination would be
 	// swapped for a regular file while the file it pointed at kept its old
 	// content. Writing through the link is what open-and-truncate did and
-	// what the user means, so resolve first; a destination that does not
-	// exist yet (or a dangling link) resolves to itself and is handled below.
+	// what the user means, so resolve first.
 	if resolved, rerr := filepath.EvalSymlinks(dest); rerr == nil {
 		dest = resolved
+	} else if li, lerr := os.Lstat(dest); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
+		// A dangling link: EvalSymlinks fails because the target is not
+		// there, but open-and-truncate would have followed the link and
+		// created it. Resolve one hop by hand so we do the same, rather than
+		// renaming over the link itself.
+		if tgt, rerr := os.Readlink(dest); rerr == nil {
+			if !filepath.IsAbs(tgt) {
+				tgt = filepath.Join(filepath.Dir(dest), tgt)
+			}
+			dest = tgt
+		}
 	}
 
 	fi, statErr := os.Stat(dest)
+
+	// Overwriting an existing file with no --mode keeps the permissions it
+	// already has. Without this the temp file's mode wins at the rename, so
+	// a 0644 file would silently become 0600.
+	if !explicitMode && statErr == nil && fi.Mode().IsRegular() {
+		mode = int(fi.Mode().Perm())
+	}
 
 	// An invalid destination has to fail before the transfer, not after it:
 	// with --force nothing opens the destination up front any more, so

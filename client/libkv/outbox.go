@@ -143,17 +143,29 @@ func (k *Minder) maybeDrainOutbox(m MetaContext, kvp *KVParty) {
 	case kvOutboxHintEmpty:
 		return
 	case kvOutboxHintUnknown:
+		// Probe and publish under the outbox lock. Unlocked, an enqueue
+		// landing between the read and the store would have its Work
+		// overwritten by our Empty, and the trigger would stay off for the
+		// life of the process -- the invariant this file claims for every
+		// hint-clearing transition. The lock is released before the drain
+		// itself, which must not hold it.
+		lk := kvOutboxLock(kvp)
+		lk.Lock()
 		work, err := k.hasOutboxWork(m, kvp)
+		if err == nil && !work {
+			hint.Store(kvOutboxHintEmpty)
+		} else if err == nil {
+			hint.Store(kvOutboxHintWork)
+		}
+		lk.Unlock()
 		if err != nil {
 			// Leave the hint Unknown so the next operation re-checks.
 			m.Warnw("kvOutbox", "stage", "hint-probe", "party", kvp.Id(), "err", err)
 			return
 		}
 		if !work {
-			hint.Store(kvOutboxHintEmpty)
 			return
 		}
-		hint.Store(kvOutboxHintWork)
 	}
 	if !flag.CompareAndSwap(false, true) {
 		return
@@ -203,20 +215,6 @@ func (k *Minder) dbGetOutboxIndex(
 		return lcl.KVOutboxIndex{}, err
 	}
 	return ret, nil
-}
-
-func (k *Minder) dbPutOutboxIndex(
-	m MetaContext,
-	kvp *KVParty,
-	idx *lcl.KVOutboxIndex,
-) error {
-	scope := kvp.Id()
-	return m.DbPut(libclient.DbTypeSoft, libclient.PutArg{
-		Scope: &scope,
-		Typ:   lcl.DataType_KVOutboxIndex,
-		Key:   core.EmptyKey{},
-		Val:   idx,
-	})
 }
 
 func (k *Minder) dbGetOutboxEntry(
@@ -984,10 +982,7 @@ func isDrainRaceError(err error) bool {
 		return true
 	}
 	var exists core.KVExistsError
-	if errors.As(err, &exists) {
-		return true
-	}
-	return false
+	return errors.As(err, &exists)
 }
 
 // drainPut re-runs a queued put: node upload (an identical replay is a
