@@ -65,15 +65,22 @@ result:
 
 ### Two deliberate non-changes
 
-**No wire change.** We first drafted a `replay bool` on `RTSendRes` and then
-dropped it. Snowpack structs encode as positional msgpack arrays
-(`codec:",toarray"` with per-field pointers), which makes a *new* decoder
-reading an *old* shorter array safe, but leaves an *old* client decoding a
-server's *grown* array unproven. `rtSend` responses flow server→client — the
-risky direction — and a chat server shouldn't need flag-day client upgrades.
-The only caller that wants the distinction is a drain loop, which already
-knows it's retrying. If a replay indicator ever earns its place (metrics,
-CLI), `rtSendV2` is the honest way to add it.
+**No wire change** — *proposed, and overruled; see the note below.* We first
+drafted a `replay bool` on `RTSendRes` and then dropped it. Snowpack structs
+encode as positional msgpack arrays (`codec:",toarray"` with per-field
+pointers), which makes a *new* decoder reading an *old* shorter array safe,
+but leaves an *old* client decoding a server's *grown* array unproven.
+`rtSend` responses flow server→client — the risky direction — and a chat
+server shouldn't need flag-day client upgrades. The only caller that wants
+the distinction is a drain loop, which already knows it's retrying.
+
+> **What actually shipped.** PR 1 was superseded by upstream
+> [#349](https://github.com/foks-proj/go-foks/pull/349), which carried our
+> commit *and added the field* — `wasReplay` on `RTSendRes`. maxtaco took the
+> other side of this argument, so the response did grow, and `rtSendV2` was
+> not needed. The reasoning above is kept as the record of what we proposed
+> and why, not as a description of the merged behaviour. Anything downstream
+> that reads this section should follow #349, not this paragraph.
 
 **The constraint is named, not added.** The base schema now spells
 `CONSTRAINT messages_enc_msg_id_key UNIQUE(msg_id)` because the name is
