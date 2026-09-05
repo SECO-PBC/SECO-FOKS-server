@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -237,6 +238,31 @@ func TestKVGetWriterIsAtomic(t *testing.T) {
 		got, err := os.ReadFile(target)
 		require.NoError(t, err)
 		require.Equal(t, []byte("through the chain"), got)
+	})
+
+	t.Run("a long but finite symlink chain still resolves", func(t *testing.T) {
+		dir := t.TempDir()
+		// Longer than the BSD limit of 32 and within the Linux limit of 40,
+		// so open(2) on Linux would follow it; the resolver must not be
+		// stricter than the call it imitates.
+		const links = 35
+		target := filepath.Join(dir, "end.bin")
+		prev := target
+		for i := range links {
+			l := filepath.Join(dir, fmt.Sprintf("l%02d.bin", i))
+			require.NoError(t, os.Symlink(prev, l))
+			prev = l
+		}
+
+		w, err := openWriter(m, prev, 0o600, true, false)
+		require.NoError(t, err)
+		_, err = w.Write([]byte("end of a long chain"))
+		require.NoError(t, err)
+		require.NoError(t, w.Commit())
+
+		got, err := os.ReadFile(target)
+		require.NoError(t, err)
+		require.Equal(t, []byte("end of a long chain"), got)
 	})
 
 	t.Run("a symlink loop is an error, not an overwrite", func(t *testing.T) {

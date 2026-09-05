@@ -739,9 +739,12 @@ func (t *terminalOutputWrapper) Close() error {
 // link (recoverable, and common) or a loop or a permission error (not). Doing
 // it by hand keeps those apart and follows the whole chain rather than one hop.
 func resolveSymlinkChain(p string) (string, error) {
-	// Roughly the kernel's own limit; the point is to terminate on a cycle
-	// rather than to match any particular number.
-	const maxHops = 32
+	// Linux resolves up to 40 links (MAXSYMLINKS); macOS and the BSDs stop
+	// at 32. Take the higher of the two so this never refuses a chain the
+	// platform's own open(2) would have followed -- being stricter than the
+	// call we are imitating would be its own bug -- while still terminating
+	// on a cycle.
+	const maxHops = 40
 	for i := 0; ; i++ {
 		fi, err := os.Lstat(p)
 		if os.IsNotExist(err) {
