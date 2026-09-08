@@ -1334,6 +1334,57 @@ func (t *TeamMinder) TeamCancelRequest(m MetaContext, inviteCode string) error {
 	return ucli.PostGenericLink(m.Ctx(), *arg)
 }
 
+// TeamLeaveSelf posts a Removed-state TML link for an active (Approved)
+// team membership, recording on the caller's own membership chain that
+// they have left the team. This is the same primitive as
+// TeamCancelRequest but for an active membership rather than a pending
+// one -- and unlike Cancel, the team IS in the local exploration index
+// (Approved teams always are), so we can resolve the FQTeam directly via
+// ResolveAndReindex without the cert-lookup detour.
+//
+// Important: this is a self-attestation only. It does NOT update the
+// server-side `team_members` row or rotate the team's PTKs -- those
+// require an admin (typically the owner) to call EditTeam with role
+// NONE for this user. The complete leave story therefore involves both
+// halves: the leaver posts this link AND signals the owner (e.g. via a
+// system message) so the owner's client can run EditTeam. Consumers must
+// treat the window in between as "still on the roster": every
+// server-backed membership check keeps answering for the old membership
+// until the owner's EditTeam lands.
+//
+// SECO-only, deliberately: #330 upstreamed the two request-lifecycle
+// methods beside it (TeamCancelRequest, TeamReject) and left this one
+// out, because a self-attested leave has no server-side effect for
+// upstream to act on. Dropping it from the fork's forward line broke the
+// app's Leave for a release cycle, so it lives here until either upstream
+// grows an equivalent or the app stops needing it.
+func (t *TeamMinder) TeamLeaveSelf(m MetaContext, fqtp proto.FQTeamParsed) error {
+	fqt, err := t.ResolveAndReindex(m, team.WrapNamed(fqtp), nil)
+	if err != nil {
+		return err
+	}
+	if fqt == nil {
+		return core.TeamNotFoundError{}
+	}
+
+	glp := proto.NewGenericLinkPayloadWithTeammembership(
+		proto.TeamMembershipLink{
+			Team:    *fqt,
+			SrcRole: team.UserSrcRole,
+			State:   proto.NewTeamMembershipDetailsDefault(proto.TeamMembershipLinkState_Removed),
+		},
+	)
+	arg, err := t.makeMembershipChainLink(m, nil, glp, nil)
+	if err != nil {
+		return err
+	}
+	ucli, err := t.au.UserClient(m)
+	if err != nil {
+		return err
+	}
+	return ucli.PostGenericLink(m.Ctx(), *arg)
+}
+
 // TeamReject retires a single pending join request via the server's
 // RejectJoinReq RPC, which moves the row to state='rejected'. The inbox lists
 // only pending rows, so a rejected request does not reappear on subsequent
