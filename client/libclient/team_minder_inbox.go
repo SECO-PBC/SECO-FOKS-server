@@ -461,38 +461,17 @@ func (t *TeamMinder) lookupCert(
 	return &cert, nil
 }
 
+// openCert verifies a team cert and additionally checks that it was issued for
+// the host we expect. The verify itself lives in exactly one place on purpose:
+// this used to carry its own copy, which had drifted to the wrong
+// stacked-signature order and so rejected every cert from a rekeyed team.
 func openCert(c *rem.TeamCert, hostID proto.HostID) (*rem.TeamCertV1Payload, error) {
-	v, err := c.GetV()
-	if err != nil {
-		return nil, err
-	}
-	if v != rem.TeamCertVersion_V1 {
-		return nil, core.VersionNotSupportedError("team cert != v1")
-	}
-	signed := c.V1()
-	ret, err := signed.Payload.AllocAndDecode(core.DecoderFactory{})
+	ret, err := team.OpenTeamCert(*c)
 	if err != nil {
 		return nil, err
 	}
 	if !ret.Team.Host.Eq(hostID) {
 		return nil, core.HostMismatchError{}
-	}
-	var verifiers []core.Verifier
-	ep, err := core.ImportEntityPublic(ret.Team.Team.EntityID())
-	if err != nil {
-		return nil, err
-	}
-	verifiers = append(verifiers, ep)
-	if !ret.Ptk.Gen.IsFirst() {
-		ep, err := core.ImportEntityPublic(ret.Ptk.VerifyKey)
-		if err != nil {
-			return nil, err
-		}
-		verifiers = append(verifiers, ep)
-	}
-	err = core.VerifyStackedSignature(&signed, verifiers)
-	if err != nil {
-		return nil, err
 	}
 	return ret, nil
 }
@@ -1340,6 +1319,88 @@ func (t *TeamMinder) TeamCancelRequest(m MetaContext, inviteCode string) error {
 	glp := proto.NewGenericLinkPayloadWithTeammembership(
 		proto.TeamMembershipLink{
 			Team:    fqt,
+			SrcRole: team.UserSrcRole,
+			State:   proto.NewTeamMembershipDetailsDefault(proto.TeamMembershipLinkState_Removed),
+		},
+	)
+	arg, err := t.makeMembershipChainLink(m, nil, glp, nil)
+	if err != nil {
+		return err
+	}
+	ucli, err := t.au.UserClient(m)
+	if err != nil {
+		return err
+	}
+	return ucli.PostGenericLink(m.Ctx(), *arg)
+}
+
+// TeamLeaveSelf posts a Removed-state TML link for an active (Approved)
+// team membership, recording on the caller's own membership chain that
+// they have left the team. This is the same primitive as
+// TeamCancelRequest but for an active membership rather than a pending
+// one, so it can resolve the FQTeam directly rather than going through
+// Cancel's cert-lookup detour.
+//
+// Resolution is NOT membership, though, so the state is checked
+// explicitly: resolveTeamNamed short-circuits an explicit team id + host
+// straight to an FQTeam without consulting the exploration index at all,
+// and that is exactly how the SECO app calls this -- with an opaque
+// `<id>@<host>`. Resolving alone would let a caller post a Removed link
+// for a team they had never joined, or over a Requested-state one where
+// TeamCancelRequest is the right call.
+//
+// Important: this is a self-attestation only. It does NOT update the
+// server-side `team_members` row or rotate the team's PTKs -- those
+// require an admin (typically the owner) to call EditTeam with role
+// NONE for this user. The complete leave story therefore involves both
+// halves: the leaver posts this link AND signals the owner (e.g. via a
+// system message) so the owner's client can run EditTeam. Consumers must
+// treat the window in between as "still on the roster": every
+// server-backed membership check keeps answering for the old membership
+// until the owner's EditTeam lands.
+//
+// SECO-only, deliberately: #330 upstreamed the two request-lifecycle
+// methods beside it (TeamCancelRequest, TeamReject) and left this one
+// out, because a self-attested leave has no server-side effect for
+// upstream to act on. Dropping it from the fork's forward line broke the
+// app's Leave for a release cycle, so it lives here until either upstream
+// grows an equivalent or the app stops needing it.
+func (t *TeamMinder) TeamLeaveSelf(m MetaContext, fqtp proto.FQTeamParsed) error {
+	fqt, err := t.ResolveAndReindex(m, team.WrapNamed(fqtp), nil)
+	if err != nil {
+		return err
+	}
+	if fqt == nil {
+		return core.TeamNotFoundError{}
+	}
+
+	tmw, err := t.refreshUserTML(m)
+	if err != nil {
+		return err
+	}
+	var key FQTeamSrcRole
+	err = key.Import(*fqt, team.UserSrcRole)
+	if err != nil {
+		return err
+	}
+	link, ok := tmw.Map[key]
+	if !ok {
+		return core.TeamNotFoundError{}
+	}
+	state, err := link.State.GetT()
+	if err != nil {
+		return err
+	}
+	if state != proto.TeamMembershipLinkState_Approved &&
+		state != proto.TeamMembershipLinkState_ApprovedAdHoc {
+		return core.BadArgsError(
+			"not an active team membership; use TeamCancelRequest for a pending request",
+		)
+	}
+
+	glp := proto.NewGenericLinkPayloadWithTeammembership(
+		proto.TeamMembershipLink{
+			Team:    *fqt,
 			SrcRole: team.UserSrcRole,
 			State:   proto.NewTeamMembershipDetailsDefault(proto.TeamMembershipLinkState_Removed),
 		},

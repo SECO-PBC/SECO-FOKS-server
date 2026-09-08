@@ -34,18 +34,7 @@ type inboxFixture struct {
 }
 
 func (f *inboxFixture) minderFor(t *testing.T, u *TestUser) (libclient.MetaContext, *libclient.TeamMinder) {
-	m := f.tew.NewClientMetaContext(t, u)
-	tmm, err := m.G().TeamMinder()
-	require.NoError(t, err)
-	// Chain posts need the merkle tree to advance before the next read, which
-	// in production happens on the server's own schedule.
-	tmm.TestHooks = &libclient.TeamMinderTestHooks{
-		PostChainHook: func() error {
-			f.tew.DirectDoubleMerklePokeInTest(t)
-			return nil
-		},
-	}
-	return m, tmm
+	return f.tew.teamMinderFor(t, u)
 }
 
 func newInboxFixture(t *testing.T) *inboxFixture {
@@ -264,4 +253,76 @@ func TestTeamCancelRejectThenReaccept(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, proto.TeamMembershipLinkState_Requested, state)
 	require.Len(t, f.inboxRows(t), 1)
+}
+
+// TeamLeaveSelf is the Approved-membership counterpart to TeamCancelRequest:
+// the same Removed-state TML link, but for a membership the owner has already
+// admitted rather than a pending request.
+//
+// It is SECO-only. #330 upstreamed the two request-lifecycle methods beside it
+// and left this one out, and the fork's forward line then lost it entirely --
+// which broke the app's Leave until it was restored. This test is what keeps
+// it here: a rework that drops the method now fails to compile.
+//
+// The second half is the property every consumer gets wrong. A self-attested
+// leave has NO server-side effect: the leaver stays on the roster until an
+// admin runs EditTeam with role NONE. Pinning that here makes the contract
+// legible to the next reader, because "I left" and "the team knows I left" are
+// two different events with a window in between.
+func TestTeamLeaveSelf(t *testing.T) {
+	f := newInboxFixture(t)
+
+	rows := f.inboxRows(t)
+	require.Len(t, rows, 1)
+	err := f.tmo.TeamAdmit(f.mo, lcl.TeamAdmitArg{
+		Team:    f.fqtp,
+		Members: []lcl.TokRole{{Tok: rows[0].Tok, Role: proto.DefaultRole}},
+	})
+	require.NoError(t, err)
+	f.tew.DirectDoubleMerklePokeInTest(t)
+
+	state, found := f.membershipState(t)
+	require.True(t, found)
+	require.Equal(t, proto.TeamMembershipLinkState_Approved, state,
+		"admission should move the joiner's own membership link to Approved")
+
+	err = f.tmj.TeamLeaveSelf(f.mj, f.fqtp)
+	require.NoError(t, err)
+	f.tew.DirectDoubleMerklePokeInTest(t)
+
+	state, found = f.membershipState(t)
+	require.True(t, found)
+	require.Equal(t, proto.TeamMembershipLinkState_Removed, state,
+		"leaving should reset the leaver's own membership state")
+
+	// ...and the roster is untouched: the leave is an attestation on the
+	// leaver's chain, not a removal.
+	roster, err := f.tmo.ListTeamRoster(f.mo, f.fqtp)
+	require.NoError(t, err)
+	require.Len(t, roster.Members, 2,
+		"TeamLeaveSelf must not remove the leaver server-side -- that needs the owner's EditTeam")
+}
+
+// Resolving a team is not the same as being in it. The fixture's FQTeamParsed
+// carries an explicit team id and host, which resolveTeamNamed short-circuits
+// straight to an FQTeam without consulting the exploration index -- so the
+// resolve step alone cannot tell an Approved membership from a Requested one.
+// That is the shape the SECO app uses (opaque `<id>@<host>`), and without the
+// state check it would post a Removed link over a still-pending request
+// instead of cancelling it.
+func TestTeamLeaveSelfRejectsPendingMembership(t *testing.T) {
+	f := newInboxFixture(t)
+
+	state, found := f.membershipState(t)
+	require.True(t, found)
+	require.Equal(t, proto.TeamMembershipLinkState_Requested, state,
+		"the fixture leaves the joiner un-admitted; this test is meaningless otherwise")
+
+	err := f.tmj.TeamLeaveSelf(f.mj, f.fqtp)
+	require.Error(t, err, "leaving a team never joined must not post a Removed link")
+
+	state, found = f.membershipState(t)
+	require.True(t, found)
+	require.Equal(t, proto.TeamMembershipLinkState_Requested, state,
+		"the rejected leave must not have touched the membership chain")
 }
