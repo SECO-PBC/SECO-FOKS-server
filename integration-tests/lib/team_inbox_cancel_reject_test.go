@@ -302,3 +302,27 @@ func TestTeamLeaveSelf(t *testing.T) {
 	require.Len(t, roster.Members, 2,
 		"TeamLeaveSelf must not remove the leaver server-side -- that needs the owner's EditTeam")
 }
+
+// Resolving a team is not the same as being in it. The fixture's FQTeamParsed
+// carries an explicit team id and host, which resolveTeamNamed short-circuits
+// straight to an FQTeam without consulting the exploration index -- so the
+// resolve step alone cannot tell an Approved membership from a Requested one.
+// That is the shape the SECO app uses (opaque `<id>@<host>`), and without the
+// state check it would post a Removed link over a still-pending request
+// instead of cancelling it.
+func TestTeamLeaveSelfRejectsPendingMembership(t *testing.T) {
+	f := newInboxFixture(t)
+
+	state, found := f.membershipState(t)
+	require.True(t, found)
+	require.Equal(t, proto.TeamMembershipLinkState_Requested, state,
+		"the fixture leaves the joiner un-admitted; this test is meaningless otherwise")
+
+	err := f.tmj.TeamLeaveSelf(f.mj, f.fqtp)
+	require.Error(t, err, "leaving a team never joined must not post a Removed link")
+
+	state, found = f.membershipState(t)
+	require.True(t, found)
+	require.Equal(t, proto.TeamMembershipLinkState_Requested, state,
+		"the rejected leave must not have touched the membership chain")
+}

@@ -1338,9 +1338,16 @@ func (t *TeamMinder) TeamCancelRequest(m MetaContext, inviteCode string) error {
 // team membership, recording on the caller's own membership chain that
 // they have left the team. This is the same primitive as
 // TeamCancelRequest but for an active membership rather than a pending
-// one -- and unlike Cancel, the team IS in the local exploration index
-// (Approved teams always are), so we can resolve the FQTeam directly via
-// ResolveAndReindex without the cert-lookup detour.
+// one, so it can resolve the FQTeam directly rather than going through
+// Cancel's cert-lookup detour.
+//
+// Resolution is NOT membership, though, so the state is checked
+// explicitly: resolveTeamNamed short-circuits an explicit team id + host
+// straight to an FQTeam without consulting the exploration index at all,
+// and that is exactly how the SECO app calls this -- with an opaque
+// `<id>@<host>`. Resolving alone would let a caller post a Removed link
+// for a team they had never joined, or over a Requested-state one where
+// TeamCancelRequest is the right call.
 //
 // Important: this is a self-attestation only. It does NOT update the
 // server-side `team_members` row or rotate the team's PTKs -- those
@@ -1365,6 +1372,30 @@ func (t *TeamMinder) TeamLeaveSelf(m MetaContext, fqtp proto.FQTeamParsed) error
 	}
 	if fqt == nil {
 		return core.TeamNotFoundError{}
+	}
+
+	tmw, err := t.refreshUserTML(m)
+	if err != nil {
+		return err
+	}
+	var key FQTeamSrcRole
+	err = key.Import(*fqt, team.UserSrcRole)
+	if err != nil {
+		return err
+	}
+	link, ok := tmw.Map[key]
+	if !ok {
+		return core.TeamNotFoundError{}
+	}
+	state, err := link.State.GetT()
+	if err != nil {
+		return err
+	}
+	if state != proto.TeamMembershipLinkState_Approved &&
+		state != proto.TeamMembershipLinkState_ApprovedAdHoc {
+		return core.BadArgsError(
+			"not an active team membership; use TeamCancelRequest for a pending request",
+		)
 	}
 
 	glp := proto.NewGenericLinkPayloadWithTeammembership(
