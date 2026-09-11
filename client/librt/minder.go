@@ -156,6 +156,12 @@ type MakeChannelOpts struct {
 	// guarantee. Tier and name-key selection are unchanged: a private channel
 	// is an ordinary channel of its tier that also demands an ACL row.
 	Private bool
+
+	// NoPush excludes the channel from the push_outbox fan-out on every
+	// send: long-poll wakes still fire, but no phone is buzzed. For
+	// machine-to-machine control channels (the app's `seco-` prefix).
+	// Creation-time only; any member may set it (it only reduces noise).
+	NoPush bool
 }
 
 func (d *Minder) MakeChannel(
@@ -202,6 +208,18 @@ func (d *Minder) MakeChannelWithOpts(
 ) {
 	if nm.Eq(proto.RTGeneralChannel) {
 		return nil, core.RTGenericError("cannot make channel named #general")
+	}
+	// The default channel may never be created no-push, and this is the only
+	// layer that can say so: channel names are PTK-encrypted, and the default
+	// channel is resolved client-side (findChannel, on the empty name), so the
+	// server sees an ordinary MakeChannel it has no way to distinguish. The
+	// flag is creation-only with no flip path, so getting it wrong here kills
+	// push for every conversational message in the team permanently --
+	// recoverable only by editing the database. Both shipped creators of the
+	// default channel pass an empty name (the app's #general self-heal and the
+	// daemon's), which is exactly where a stray flag would come from.
+	if nm.IsEmpty() && opts.NoPush {
+		return nil, core.RTGenericError("cannot make the default channel no-push")
 	}
 	sleepDur := time.Millisecond
 	numTries := 5
@@ -386,6 +404,7 @@ func (d *Minder) makeChannelOneAttempt(
 	update.UpdatedAt = chlst.Vers + 1
 	update.Tier = newChTier
 	update.Private = opts.Private
+	update.NoPush = opts.NoPush
 
 	arg := rem.RtNewChannelArg{
 		Md:      update,
@@ -571,6 +590,7 @@ func (k *Minder) decryptChannelMetadata(
 	ret.Tier = chmdenc.Tier
 	ret.UpdatedAt = chmdenc.UpdatedAt
 	ret.Unreadable = chmdenc.Unreadable
+	ret.NoPush = chmdenc.NoPush
 
 	return &ret, nil
 }

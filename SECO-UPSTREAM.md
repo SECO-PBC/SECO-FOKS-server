@@ -70,6 +70,7 @@ callers, and the typed-message test from #341 is updated in the PR to match.
 | Change | Waiting on | Notes |
 |---|---|---|
 | snapshot staleness surfacing | **the cold-start PR landing** | `lcl.TeamMembership`/`TeamRoster` carry the verification time outward and the CLI renders it (`Verified` column, `Snapshot verified` footer). Split from the field itself so the cold-start PR stays about the trust model rather than about presentation. Postdates `SECO-UPSTREAM-rt-offline.md`, which does not mention `verifiedAt` at all. |
+| no-push channels | **a staging run proving it, and upstream's RT work settling** | Fork PR #30. A creation-time per-channel flag that drops the channel from the `push_outbox` fan-out on send; inbox-version wakes are untouched. Generic and small, so it is a reasonable upstream candidate — but the mechanism is only worth proposing once we have run it: the value claim is "control traffic stops waking phones", and we have not yet measured that end to end. Upstream is also mid-rebuild of realtime (`chat(1d)` series), and `RTChannelMetadata` is exactly the struct in motion, so expect `noPush @21` to be renumbered on the way in. Our own use is the member-DM first-contact handshake (`dm-handshake-over-rt` in SECO-FOKS), which needs a control channel that never buzzes a community. |
 
 That row names a real blocker: it is the fourth of one body of work deliberately
 split into a landing order. Nothing here is merely parked.

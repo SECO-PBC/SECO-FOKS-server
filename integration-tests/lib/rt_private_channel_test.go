@@ -270,9 +270,7 @@ func (s *privScene) inboxVersion(t *testing.T, a *privActor) int64 {
 }
 
 func (s *privScene) pushRows(t *testing.T, a *privActor) int {
-	return s.rtdbCount(t,
-		`SELECT count(*) FROM push_outbox WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3`,
-		s.tew.MetaContext().ShortHostID(), s.chid.Short().Int64(), a.u.uid.ExportToDB())
+	return s.pushRowsFor(t, s.chid, a)
 }
 
 // requireHidden asserts the error is exactly the one a non-existent channel

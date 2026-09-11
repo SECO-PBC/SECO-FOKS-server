@@ -34,6 +34,7 @@ type messageSender struct {
 	prevSeq    proto.RTMsgSeq
 	appID      proto.RTAppID
 	private    bool
+	noPush     bool
 
 	// members whose inbox versions the fanout bumped; the caller wakes their
 	// parked long-pollers after the transaction commits.
@@ -60,6 +61,7 @@ func (s *messageSender) lockChannel(m shared.MetaContext) error {
 	s.readRole = ca.readRole
 	s.appID = ca.appID
 	s.private = ca.private
+	s.noPush = ca.noPush
 	if ca.lastMsgSeq != nil {
 		s.prevSeq = proto.RTMsgSeq(*ca.lastMsgSeq)
 	}
@@ -298,6 +300,16 @@ func (s *messageSender) fanoutInboxVersions(
 	// does. push_outbox is already in the schema; this is the writer.
 	// kind='msg', data=NULL — a pure wake: no message content, sender or
 	// channel name leaves the E2EE boundary for a push provider.
+	//
+	// A no-push channel (fork-only, dm-handshake-over-rt) skips ONLY this
+	// fan-out: the inbox-version bump above already woke every member's
+	// parked long-poller, so online delivery is untouched — what a no-push
+	// channel never does is buzz a phone about machine-to-machine traffic.
+	// Channel names are PTK-encrypted at rest, so this per-channel flag is
+	// the only way the server can tell a control channel from conversation.
+	if s.noPush {
+		return nil
+	}
 	_, err = s.tx.Exec(
 		m.Ctx(),
 		`INSERT INTO push_outbox (short_host_id, uid, channel_id, kind, seq, status, ctime, mtime)
