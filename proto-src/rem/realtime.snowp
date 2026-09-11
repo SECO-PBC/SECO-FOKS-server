@@ -88,6 +88,14 @@ struct RTChannelMetadata @0xddf6b26b2ace1535 {
     // there is a loud one -- snowpc rejects duplicate field numbers, so it
     // surfaces at merge, not in the field.
     private @20 : Bool;
+    // FORK-ONLY (dm-handshake-over-rt). A no-push channel is excluded from
+    // the push_outbox fan-out on every send: long-poll inbox wakes still
+    // fire (online delivery is unaffected), but no APNs/FCM wake is queued.
+    // Set at creation for machine-to-machine control channels (`seco-` name
+    // prefix) whose traffic no human should be buzzed about; there is no
+    // flip path -- a channel is born silent or not. @21 keeps the positional
+    // encoding dense (see the note above @20).
+    noPush @21 : Bool;
 }
 
 // FORK-ONLY. One member of a private channel's ACL. grantedBy is the audit

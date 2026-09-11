@@ -136,7 +136,7 @@ func readAllChannels(
 	}
 	rows, err := db.Query(
 		m.Ctx(),
-		`SELECT `+channelMetadataCols+channelPrivacyCols("$6")+`
+		`SELECT `+channelMetadataCols+channelForkCols("$6")+`
 		 FROM channels c
 		 `+lastSenderJoin+`
 		 WHERE c.short_host_id=$1
@@ -204,6 +204,10 @@ type channelMetadataRaw struct {
 	// false only for a team admin looking at a private channel they are not a
 	// member of -- see applyPrivateGate.
 	aclMember bool
+	// noPush: the channel is excluded from push fan-out (fork-only). Read
+	// back so a listing's metadata is truthful, not because any client
+	// decision hangs on it.
+	noPush bool
 }
 
 // channelMetadataCols is the column list matching channelMetadataRaw.scanDests,
@@ -216,20 +220,27 @@ const channelMetadataCols = `c.channel_id_full, c.seqno, c.name_box, c.desc_box,
 	        cp.party_id, cp.uid,
 	        c.ctime, c.mtime, c.updated_at_set_vers, c.tier`
 
-// channelPrivacyCols is the fork-only tail of channelMetadataRaw.scanDests:
-// the channel's privacy flag, and whether the CALLER holds a channel_acl row
-// for it. Appended (in this order, immediately after channelMetadataCols) by
+// channelForkCols is the fork-only tail of channelMetadataRaw.scanDests: the
+// channel's privacy flag, whether the CALLER holds a channel_acl row for it,
+// and its no-push flag. Appended (immediately after channelMetadataCols) by
 // both queries that scan channelMetadataRaw. uidParam is the placeholder
 // holding the caller's uid in the enclosing query, which differs between the
 // two -- hence a function rather than a second const.
+//
+// ORDER IS THE CONTRACT, and it is positional in both directions: scanDests
+// lists its destinations in exactly this sequence, and nothing checks the two
+// agree. A new fork column therefore goes at the END of both, never in the
+// middle of either -- inserting one here without the matching insertion in
+// scanDests silently scans each later column into its neighbour's
+// destination, in the team listing and the inbox changed-threads path alike.
 //
 // acl_member is privateVisibleToCaller verbatim, by construction rather than by
 // copy: readAllChannels puts the same expression in its WHERE and here in its
 // SELECT, and if the two ever drifted the listing would filter on one rule
 // while labelling rows by another -- admitting a channel it marks as
 // non-member, or the reverse. One source of truth removes the possibility.
-func channelPrivacyCols(uidParam string) string {
-	return `, c.private, ` + privateVisibleToCaller("c", uidParam) + ` AS acl_member`
+func channelForkCols(uidParam string) string {
+	return `, c.private, ` + privateVisibleToCaller("c", uidParam) + ` AS acl_member, c.no_push`
 }
 
 // lastSenderJoin attributes the channel's denormalized last message to its
@@ -247,7 +258,7 @@ func (r *channelMetadataRaw) scanDests() []any {
 		&r.partyIDRaw, &r.uidRaw,
 		&r.ctime, &r.mtime, &r.updatedAtSetVers,
 		&r.tierRaw,
-		&r.private, &r.aclMember,
+		&r.private, &r.aclMember, &r.noPush,
 	}
 }
 
@@ -304,6 +315,7 @@ func (r *channelMetadataRaw) export(
 		return nil, err
 	}
 	md.Private = r.private
+	md.NoPush = r.noPush
 	return &md, nil
 }
 
@@ -574,11 +586,11 @@ func (c *channelMaker) insertChannel(m shared.MetaContext) error {
 			(short_host_id, channel_id, parent_team_id, app_id, channel_id_full,
 			 seqno, name_box, name_box_ptk_gen, tier, desc_box, desc_box_ptk_gen,
 			 read_role_type, read_role_viz_level, write_role_type, write_role_viz_level,
-			 ctime, mtime, updated_at_set_vers, private)
+			 ctime, mtime, updated_at_set_vers, private, no_push)
 		VALUES($1, $2, $3, $4, $5,
 		       $6, $7, $8, $9, $10, $11,
 		       $12, $13, $14, $15,
-		       NOW(), NOW(), $16, $17)`,
+		       NOW(), NOW(), $16, $17, $18)`,
 		m.ShortHostID(),
 		int64(c.md.Id.Short()),
 		c.md.ParentTeam.ExportToDB(),
@@ -596,6 +608,7 @@ func (c *channelMaker) insertChannel(m shared.MetaContext) error {
 		writeViz,
 		c.vers.ExportToDB(),
 		c.md.Private,
+		c.md.NoPush,
 	)
 	if shared.IsDuplicateKeyError(err, "channels_pkey") {
 		return core.RTRaceError{Which: "channels"}

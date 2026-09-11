@@ -49,6 +49,13 @@ struct RTChannelMetadataPlaintext {
     updatedAt @7 : lib.RTChannelSetVersion;
     unreadable @8 : Bool; // caller can't read this channel (role below read role);
                           // kept for name-collision detection, hidden from the inbox
+    // FORK-ONLY (dm-handshake-over-rt). Mirrors rem.RTChannelMetadata.noPush.
+    // A caller needs this to tell an existing control channel that was
+    // created no-push from one that was not: MakeChannel treats "already
+    // exists" as success, so without it a channel created by a peer on an
+    // older build looks identical to a correctly-flagged one, and every
+    // control message posted there fans out a push to the whole team.
+    noPush @9 : Bool;
 }
 
 struct RTChannelSetForTeam {

@@ -85,6 +85,14 @@ CREATE TABLE channels (
      * (patches/foks_realtime/p5.sql), so a fresh and a migrated DB dump the
      * same. */
     private BOOLEAN NOT NULL DEFAULT false,
+    /* FORK-ONLY (dm-handshake-over-rt): excluded from the push_outbox fan-out
+     * on send; inbox-version wakes unaffected. Names are PTK-encrypted, so
+     * this plaintext flag is the only way the send path can tell a control
+     * channel (the app's `seco-` prefix) from conversation. Creation-time
+     * only. Declared after `private` for the same reason `private` is
+     * declared last -- it matches the order ADD COLUMN gives a patched
+     * database (patches/foks_realtime/p6.sql, which runs after p5). */
+    no_push BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY(short_host_id, channel_id)
 );
 /* no FK to teams (cross-DB); enforced at app layer */

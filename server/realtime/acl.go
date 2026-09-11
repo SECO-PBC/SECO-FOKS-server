@@ -77,6 +77,9 @@ type channelAuth struct {
 	readRole  proto.Role
 	writeRole proto.Role
 	private   bool
+	// noPush excludes the channel from push_outbox fan-out on send
+	// (fork-only, dm-handshake-over-rt); inbox-version wakes unaffected.
+	noPush bool
 
 	// lastMsgSeq is the channel's denormalized last message seq; NULL (nil)
 	// when the channel has no messages yet.
@@ -94,7 +97,7 @@ type channelAuth struct {
 
 // channelAuthCols is the column list authorizeChannel scans. Kept together so
 // the locking and non-locking variants can never drift.
-const channelAuthCols = `parent_team_id, app_id, tier, private,
+const channelAuthCols = `parent_team_id, app_id, tier, private, no_push,
 	 read_role_type, read_role_viz_level,
 	 write_role_type, write_role_viz_level,
 	 last_msg_seq`
@@ -133,7 +136,7 @@ func authorizeChannel(
 		q += ` FOR UPDATE`
 	}
 	err := rtdb.QueryRow(m.Ctx(), q, m.ShortHostID(), channelID).Scan(
-		&teamBytes, &appRaw, &tierRaw, &ca.private,
+		&teamBytes, &appRaw, &tierRaw, &ca.private, &ca.noPush,
 		&rrt, &rvl, &wrt, &wvl, &ca.lastMsgSeq,
 	)
 	if err == pgx.ErrNoRows {

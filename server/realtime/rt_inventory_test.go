@@ -159,7 +159,7 @@ type allowedQueries struct {
 // The rule being enforced: no path may reach channel or message rows on behalf
 // of a caller without first passing through authorizeChannel, or -- for the
 // two paths that read many channels at once -- through the equivalent
-// set-based predicate, privateVisibleToCaller / channelPrivacyCols.
+// set-based predicate, privateVisibleToCaller / channelForkCols.
 var queryAllowlist = map[string]allowedQueries{
 	// --- the chokepoint and its helpers (acl.go) ---
 	"authorizeChannel":         {1, "the chokepoint itself"},
@@ -172,7 +172,7 @@ var queryAllowlist = map[string]allowedQueries{
 
 	// --- set-based paths that embed the predicate ---
 	"readAllChannels":     {1, "SET-BASED (inventory row 5): embeds privateVisibleToCaller"},
-	"readChangedChannels": {2, "SET-BASED (inventory row 7): selects channelPrivacyCols; GetChangedThreads drops rows whose aclMember is false"},
+	"readChangedChannels": {2, "SET-BASED (inventory row 7): selects channelForkCols; GetChangedThreads drops rows whose aclMember is false"},
 	"findMissingChannels": {2, "SET-BASED (inventory row 9): excludes private channels outright (AND NOT c.private)"},
 
 	// --- writes that run after the chokepoint authorized the caller ---
@@ -392,7 +392,7 @@ func TestRealtimeProtectedTableQueries(t *testing.T) {
 				"exactly where an ungated read is easiest to miss, because the function "+
 				"is already full of this SQL. Confirm the new one reaches channel or "+
 				"message rows only after authorizeChannel (or behind "+
-				"privateVisibleToCaller / channelPrivacyCols), then update the count and "+
+				"privateVisibleToCaller / channelForkCols), then update the count and "+
 				"the justification in queryAllowlist, and add a test. "+
 				"See docs/rt-private-channel-acl.md §5 and §8.3.",
 			c.file, c.fn, c.got, c.tables, c.want)
@@ -415,7 +415,7 @@ func TestRealtimeProtectedTableQueries(t *testing.T) {
 				"channel or message rows without the ACL exposes a private channel's "+
 				"entire history, silently and retroactively. Route the read through "+
 				"authorizeChannel (or, for a set-based read, embed "+
-				"privateVisibleToCaller / channelPrivacyCols), then add an entry to "+
+				"privateVisibleToCaller / channelForkCols), then add an entry to "+
 				"queryAllowlist saying why it is safe, plus a test. "+
 				"See docs/rt-private-channel-acl.md §5 and §8.3.",
 			o.file, o.fn, o.tables)

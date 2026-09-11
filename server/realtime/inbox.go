@@ -256,7 +256,7 @@ func readChangedChannels(
 	}
 	rows, err := db.Query(
 		m.Ctx(),
-		`SELECT `+channelMetadataCols+channelPrivacyCols("$2")+`,
+		`SELECT `+channelMetadataCols+channelForkCols("$2")+`,
 		        c.parent_team_id,
 		        uc.inbox_version, uc.read_through, uc.hidden, uc.muted
 		 FROM user_channels uc
