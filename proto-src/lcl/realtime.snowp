@@ -135,7 +135,12 @@ protocol RealTime
 
     clientRTMakeChannel @0 (
         cfg @0 : RTConfig, /* contains the new channel name (if applicable) */
-        desc @1 : lib.RTChannelDesc /* only specify if channel name is specified (above) */
+        desc @1 : lib.RTChannelDesc, /* only specify if channel name is specified (above) */
+        /* FORK-ONLY (dm-handshake-over-rt). Create the channel excluded from
+         * the push fan-out. The app reaches channel creation through this
+         * agent RPC rather than librt directly, so the knob has to cross the
+         * local protocol too; librt.MakeChannelOpts is the other half. */
+        noPush @2 : Bool
     ) -> lib.RTChannelID;
 
     clientRTListChannelsForTeam @1 (

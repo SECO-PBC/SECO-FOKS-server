@@ -1249,13 +1249,15 @@ func (r *RTThreadView) Bytes() []byte { return nil }
 var RealTimeProtocolID rpc.ProtocolUniqueID = rpc.ProtocolUniqueID(0xaaf0cd97)
 
 type ClientRTMakeChannelArg struct {
-	Cfg  RTConfig
-	Desc lib.RTChannelDesc
+	Cfg    RTConfig
+	Desc   lib.RTChannelDesc
+	NoPush bool
 }
 type ClientRTMakeChannelArgInternal__ struct {
 	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
 	Cfg     *RTConfigInternal__
 	Desc    *lib.RTChannelDescInternal__
+	NoPush  *bool
 }
 
 func (c ClientRTMakeChannelArgInternal__) Import() ClientRTMakeChannelArg {
@@ -1272,12 +1274,19 @@ func (c ClientRTMakeChannelArgInternal__) Import() ClientRTMakeChannelArg {
 			}
 			return x.Import()
 		})(c.Desc),
+		NoPush: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(c.NoPush),
 	}
 }
 func (c ClientRTMakeChannelArg) Export() *ClientRTMakeChannelArgInternal__ {
 	return &ClientRTMakeChannelArgInternal__{
-		Cfg:  c.Cfg.Export(),
-		Desc: c.Desc.Export(),
+		Cfg:    c.Cfg.Export(),
+		Desc:   c.Desc.Export(),
+		NoPush: &c.NoPush,
 	}
 }
 func (c *ClientRTMakeChannelArg) Encode(enc rpc.Encoder) error {
