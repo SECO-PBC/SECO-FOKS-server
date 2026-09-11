@@ -25,6 +25,22 @@ changelog:
         closes: ["#324"]
       - desc: server; merkle pipeline loops survive transient DB interruptions instead of stopping until restart
         closes: ["#323"]
+      - desc: rt; make message send idempotent on message ID, so a retry after a lost ack returns the original result
+        closes: ["#345"]
+      - desc: rt; send and open typed (pegged) messages — Reply, Reactji and Edit — so reactions, edits, replies and deletes have a wire representation
+        closes: ["#341"]
+      - desc: rt; write content-free push_outbox rows in the send transaction, and add rtSetPushToken so devices can register for wakes
+        closes: ["#342"]
+      - desc: load the team graph concurrently during team explore (up to 8 teams at once, tunable), instead of one team at a time
+        closes: ["#346"]
+      - desc: fix accepting an invite to a team that has rotated its keys; the stored team cert was verified with its signatures in the wrong order
+        closes: ["#350"]
+      - desc: treat timeouts, DNS, TLS and mid-stream failures like connection errors when deciding whether to tolerate an unreachable server
+        closes: ["#347"]
+      - desc: kv-store; make directory creation idempotent on replay, and report the replay in the kvMkdir result
+        closes: ["#353"]
+      - desc: kv-store; make small-file and symlink writes idempotent on replay, and report the replay in the RPC result
+        closes: ["#352"]
   - version: 0.1.9
     urgency: medium
     stable: true

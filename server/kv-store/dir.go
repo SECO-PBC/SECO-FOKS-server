@@ -78,35 +78,38 @@ func loadDir(
 	return &ret, nil
 }
 
+// putDir creates the directory row and its refcount row. The returned bool
+// reports an idempotent replay: the directory already existed with exactly
+// these contents, and nothing was written.
 func putDir(
 	m shared.MetaContext,
 	tx pgx.Tx,
 	pid proto.PartyID,
 	role proto.Role,
 	dir *proto.KVDir,
-) error {
+) (bool, error) {
 	err := assertAtOrAbove(role, dir.Box.Rg.Role, proto.KVOp_Write, proto.KVNodeType_Dir)
 	if err != nil {
-		return err
+		return false, err
 	}
 	err = assertAtOrAbove(role, dir.WriteRole, proto.KVOp_Write, proto.KVNodeType_Dir)
 	if err != nil {
-		return err
+		return false, err
 	}
 	rtyp, rlev, err := dir.Box.Rg.Role.ExportToDB()
 	if err != nil {
-		return err
+		return false, err
 	}
 	wtyp, wlev, err := dir.WriteRole.ExportToDB()
 	if err != nil {
-		return err
+		return false, err
 	}
 	box, err := core.EncodeToBytes(&dir.Box.Ctext)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if dir.Version != proto.KVVersion(1) {
-		return core.BadArgsError("dir version must be 1 for mkdir")
+		return false, core.BadArgsError("dir version must be 1 for mkdir")
 	}
 	spid := pid.Shorten()
 
@@ -128,11 +131,8 @@ func putDir(
 		box,
 		string(proto.KVDirStatusStringActive),
 	)
-	if shared.IsDuplicateKeyError(err, "dir_pkey") {
-		return core.DuplicateError("dir")
-	}
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if tag.RowsAffected() == 0 {
@@ -147,34 +147,45 @@ func putDir(
 		// Every persisted field is compared, not just the seed: a reused ID
 		// carrying the same seed under a different generation or role is not
 		// the same directory, and silently keeping the stored metadata would
-		// hide the difference.
+		// hide the difference. The stored row must also still be active: a
+		// replay that matches a dead directory did not create anything the
+		// client can go on to use.
+		//
+		// FOR UPDATE anchors the replay decision until this transaction
+		// commits: the comparison runs in a later statement (and snapshot)
+		// than the conflicting insert, so without the lock a future GC could
+		// delete or kill the row in between, leaving the reported success
+		// describing a row that no longer exists.
 		var seed []byte
 		var gen, rt, rl, wt, wl int
+		var status string
 		err = tx.QueryRow(m.Ctx(),
 			`SELECT seed_box, ptk_gen,
 			        read_role_type, read_role_viz_level,
-			        write_role_type, write_role_viz_level
+			        write_role_type, write_role_viz_level, status
 			 FROM dir
-			 WHERE short_host_id=$1 AND short_party_id=$2 AND dir_id=$3 AND version=$4`,
+			 WHERE short_host_id=$1 AND short_party_id=$2 AND dir_id=$3 AND version=$4
+			 FOR UPDATE`,
 			int(m.HostID().Short),
 			spid.ExportToDB(),
 			dir.Id.ExportToDB(),
 			int(dir.Version),
-		).Scan(&seed, &gen, &rt, &rl, &wt, &wl)
+		).Scan(&seed, &gen, &rt, &rl, &wt, &wl, &status)
 		if err != nil {
-			return err
+			return false, err
 		}
-		if bytes.Equal(seed, box) &&
+		if status == string(proto.KVDirStatusStringActive) &&
+			bytes.Equal(seed, box) &&
 			gen == int(dir.Box.Rg.Gen) &&
 			rt == rtyp && rl == rlev &&
 			wt == wtyp && wl == wlev {
 			// An identical replay; the refcount row is already there too.
-			return nil
+			return true, nil
 		}
-		return core.KVRaceError("dir id reused with different contents")
+		return false, core.KVRaceError("dir id reused with different contents")
 	}
 	if tag.RowsAffected() != 1 {
-		return core.InsertError("dir")
+		return false, core.InsertError("dir")
 	}
 	tag, err = tx.Exec(m.Ctx(),
 		`INSERT INTO dir_refcount(
@@ -185,12 +196,12 @@ func putDir(
 		dir.Id.ExportToDB(),
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if tag.RowsAffected() != 1 {
-		return core.InsertError("dir_refcount")
+		return false, core.InsertError("dir_refcount")
 	}
-	return nil
+	return false, nil
 }
 
 func dirRef(

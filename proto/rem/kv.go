@@ -839,6 +839,84 @@ func (l LockID) Bytes() []byte {
 	return (l)[:]
 }
 
+type KVMkdirRes struct {
+	WasReplay bool
+}
+type KVMkdirResInternal__ struct {
+	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	WasReplay *bool
+}
+
+func (k KVMkdirResInternal__) Import() KVMkdirRes {
+	return KVMkdirRes{
+		WasReplay: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(k.WasReplay),
+	}
+}
+func (k KVMkdirRes) Export() *KVMkdirResInternal__ {
+	return &KVMkdirResInternal__{
+		WasReplay: &k.WasReplay,
+	}
+}
+func (k *KVMkdirRes) Encode(enc rpc.Encoder) error {
+	return enc.Encode(k.Export())
+}
+
+func (k *KVMkdirRes) Decode(dec rpc.Decoder) error {
+	var tmp KVMkdirResInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*k = tmp.Import()
+	return nil
+}
+
+func (k *KVMkdirRes) Bytes() []byte { return nil }
+
+type KVPutSmallFileOrSymlinkRes struct {
+	WasReplay bool
+}
+type KVPutSmallFileOrSymlinkResInternal__ struct {
+	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	WasReplay *bool
+}
+
+func (k KVPutSmallFileOrSymlinkResInternal__) Import() KVPutSmallFileOrSymlinkRes {
+	return KVPutSmallFileOrSymlinkRes{
+		WasReplay: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(k.WasReplay),
+	}
+}
+func (k KVPutSmallFileOrSymlinkRes) Export() *KVPutSmallFileOrSymlinkResInternal__ {
+	return &KVPutSmallFileOrSymlinkResInternal__{
+		WasReplay: &k.WasReplay,
+	}
+}
+func (k *KVPutSmallFileOrSymlinkRes) Encode(enc rpc.Encoder) error {
+	return enc.Encode(k.Export())
+}
+
+func (k *KVPutSmallFileOrSymlinkRes) Decode(dec rpc.Decoder) error {
+	var tmp KVPutSmallFileOrSymlinkResInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*k = tmp.Import()
+	return nil
+}
+
+func (k *KVPutSmallFileOrSymlinkRes) Bytes() []byte { return nil }
+
 type KVLock struct {
 	Idp    lib.KVDirentIDPair
 	LockID LockID
@@ -1763,12 +1841,12 @@ func (k *KVSelectVhost) Decode(dec rpc.Decoder) error {
 func (k *KVSelectVhost) Bytes() []byte { return nil }
 
 type KVStoreInterface interface {
-	KvMkdir(context.Context, KvMkdirArg) error
+	KvMkdir(context.Context, KvMkdirArg) (KVMkdirRes, error)
 	KvPut(context.Context, KvPutArg) error
 	KvPutRoot(context.Context, KvPutRootArg) error
 	KvFileUploadInit(context.Context, KvFileUploadInitArg) error
 	KvFileUploadChunk(context.Context, KvFileUploadChunkArg) error
-	KvPutSmallFileOrSymlink(context.Context, KvPutSmallFileOrSymlinkArg) error
+	KvPutSmallFileOrSymlink(context.Context, KvPutSmallFileOrSymlinkArg) (KVPutSmallFileOrSymlinkRes, error)
 	KvGetRoot(context.Context, KVAuth) (lib.KVRoot, error)
 	KvGet(context.Context, KvGetArg) (KVGetRes, error)
 	KvGetNode(context.Context, KvGetNodeArg) (KVGetNodeRes, error)
@@ -1825,14 +1903,14 @@ type KVStoreClient struct {
 	CheckResHeader func(context.Context, lib.Header) error
 }
 
-func (c KVStoreClient) KvMkdir(ctx context.Context, arg KvMkdirArg) (err error) {
+func (c KVStoreClient) KvMkdir(ctx context.Context, arg KvMkdirArg) (res KVMkdirRes, err error) {
 	warg := &rpc.DataWrap[lib.Header, *KvMkdirArgInternal__]{
 		Data: arg.Export(),
 	}
 	if c.MakeArgHeader != nil {
 		warg.Header = c.MakeArgHeader()
 	}
-	var tmp rpc.DataWrap[lib.Header, interface{}]
+	var tmp rpc.DataWrap[lib.Header, KVMkdirResInternal__]
 	err = c.Cli.Call2(ctx, rpc.NewMethodV2(KVStoreProtocolID, 0, "KVStore.kvMkdir"), warg, &tmp, 0*time.Millisecond, kVStoreErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
 	if err != nil {
 		return
@@ -1843,6 +1921,7 @@ func (c KVStoreClient) KvMkdir(ctx context.Context, arg KvMkdirArg) (err error) 
 			return
 		}
 	}
+	res = tmp.Data.Import()
 	return
 }
 func (c KVStoreClient) KvPut(ctx context.Context, arg KvPutArg) (err error) {
@@ -1925,14 +2004,14 @@ func (c KVStoreClient) KvFileUploadChunk(ctx context.Context, arg KvFileUploadCh
 	}
 	return
 }
-func (c KVStoreClient) KvPutSmallFileOrSymlink(ctx context.Context, arg KvPutSmallFileOrSymlinkArg) (err error) {
+func (c KVStoreClient) KvPutSmallFileOrSymlink(ctx context.Context, arg KvPutSmallFileOrSymlinkArg) (res KVPutSmallFileOrSymlinkRes, err error) {
 	warg := &rpc.DataWrap[lib.Header, *KvPutSmallFileOrSymlinkArgInternal__]{
 		Data: arg.Export(),
 	}
 	if c.MakeArgHeader != nil {
 		warg.Header = c.MakeArgHeader()
 	}
-	var tmp rpc.DataWrap[lib.Header, interface{}]
+	var tmp rpc.DataWrap[lib.Header, KVPutSmallFileOrSymlinkResInternal__]
 	err = c.Cli.Call2(ctx, rpc.NewMethodV2(KVStoreProtocolID, 7, "KVStore.kvPutSmallFileOrSymlink"), warg, &tmp, 0*time.Millisecond, kVStoreErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
 	if err != nil {
 		return
@@ -1943,6 +2022,7 @@ func (c KVStoreClient) KvPutSmallFileOrSymlink(ctx context.Context, arg KvPutSma
 			return
 		}
 	}
+	res = tmp.Data.Import()
 	return
 }
 func (c KVStoreClient) KvGetRoot(ctx context.Context, auth KVAuth) (res lib.KVRoot, err error) {
@@ -2205,11 +2285,12 @@ func KVStoreProtocol(i KVStoreInterface) rpc.ProtocolV2 {
 							return nil, err
 						}
 						typedArg := typedWrappedArg.Data
-						err := i.KvMkdir(ctx, (typedArg.Import()))
+						tmp, err := i.KvMkdir(ctx, (typedArg.Import()))
 						if err != nil {
 							return nil, err
 						}
-						ret := rpc.DataWrap[lib.Header, interface{}]{
+						ret := rpc.DataWrap[lib.Header, *KVMkdirResInternal__]{
+							Data:   tmp.Export(),
 							Header: i.MakeResHeader(),
 						}
 						return &ret, nil
@@ -2345,11 +2426,12 @@ func KVStoreProtocol(i KVStoreInterface) rpc.ProtocolV2 {
 							return nil, err
 						}
 						typedArg := typedWrappedArg.Data
-						err := i.KvPutSmallFileOrSymlink(ctx, (typedArg.Import()))
+						tmp, err := i.KvPutSmallFileOrSymlink(ctx, (typedArg.Import()))
 						if err != nil {
 							return nil, err
 						}
-						ret := rpc.DataWrap[lib.Header, interface{}]{
+						ret := rpc.DataWrap[lib.Header, *KVPutSmallFileOrSymlinkResInternal__]{
+							Data:   tmp.Export(),
 							Header: i.MakeResHeader(),
 						}
 						return &ret, nil
