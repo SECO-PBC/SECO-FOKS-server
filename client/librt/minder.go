@@ -885,6 +885,9 @@ type SendTestHooks struct {
 	// EncryptRoleOverride encrypts the body at this role instead of the
 	// channel's read role, to test the server's encryption-role check.
 	EncryptRoleOverride *proto.Role
+	// MsgIDOverride pins the message ID instead of drawing a random one, to
+	// test the server's idempotent-replay path on duplicate msg_ids.
+	MsgIDOverride *proto.RTMsgID
 }
 
 // Send encrypts and sends a basic message into the named channel of a team.
@@ -1082,15 +1085,18 @@ func (d *Minder) sendTyped(
 	if test != nil && test.EncryptRoleOverride != nil {
 		encryptRole = *test.EncryptRoleOverride
 	}
-	// TODO !! Fill in prev's
 	md := proto.RTMsgMetadata{
 		SendTime: proto.ExportTime(m.G().Now()),
 		Typ:      typ,
 	}
 
-	err = core.RandomFill(md.MsgID[:])
-	if err != nil {
-		return nil, err
+	if test != nil && test.MsgIDOverride != nil {
+		md.MsgID = *test.MsgIDOverride
+	} else {
+		err = core.RandomFill(md.MsgID[:])
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	lastMsg, err := dbGetLastMsg(m, d.au, ch.Id)
@@ -1154,12 +1160,28 @@ func (d *Minder) sendTyped(
 	}
 
 	if prevSeq.IsValid() && res.Seq <= prevSeq {
-		return nil, core.RTMsgOrderError(
-			fmt.Sprintf(
-				"sent message has sequence (%d) <= last seen (%d)",
-				res.Seq.Int(), prevSeq.Int(),
-			),
-		)
+		// An acked seq at or below the last locally-seen one is normally
+		// server misbehavior -- except when the server replayed an earlier
+		// delivery of this same msgID (rtSend is idempotent on msg_id, so a
+		// retry of a landed send gets the original seq back). The cached copy
+		// at that seq settles which:
+		// our own msgID there means replay, anything else is a real violation.
+		cached, lookupErr := dbGetMsgs(m, d.au, ch.Id, res.Seq, res.Seq)
+		isReplay := res.WasReplay ||
+			(lookupErr == nil && len(cached) == 1 &&
+				cached[0].Cm.Md.Md.MsgID == md.MsgID)
+		if !isReplay {
+			return nil, core.RTMsgOrderError(
+				fmt.Sprintf(
+					"sent message has sequence (%d) <= last seen (%d)",
+					res.Seq.Int(), prevSeq.Int(),
+				),
+			)
+		}
+		// The cached copy at that seq is the delivered original, already
+		// validated on ingest; keep it rather than overwriting with this
+		// attempt's re-seal.
+		return &res, nil
 	}
 
 	err = d.dbPutMsgs(m, []proto.RTMsgCachedWithSeq{msgCachedSeq})
@@ -2297,15 +2319,20 @@ func extractAllSeqIDPairsFromRTThreadPage(p *rem.RTThreadPage) []seqIDPair {
 // The device verify-key id namespaces this user's rows across their
 // devices. It is a hint only — the row is always scoped to the
 // authenticated uid, never to a caller-supplied identity.
-func (d *Minder) SetPushToken(m MetaContext, platform string, token []byte, enabled bool) error {
-	// UserContext.Devkey lazy-loads (passphrase-backed users may not have
-	// the key materialized yet) — the raw PrivKeys getter would return a
+func (d *Minder) SetPushToken(
+	m MetaContext,
+	platform proto.RTPushPlatform,
+	token proto.RTPushToken,
+	enabled bool,
+) error {
+	// UserContext.Devkey lazy-loads (a passphrase-backed user may not have
+	// the key materialized yet); the raw PrivKeys getter would return a
 	// spurious KeyNotFoundError in that state.
 	dk, err := d.au.Devkey(m.Ctx())
 	if err != nil {
 		return err
 	}
-	eid, err := dk.RollingEntityID()
+	eid, err := dk.EntityID()
 	if err != nil {
 		return err
 	}

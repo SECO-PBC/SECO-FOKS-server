@@ -176,6 +176,21 @@ var queryAllowlist = map[string]allowedQueries{
 	"findMissingChannels": {2, "SET-BASED (inventory row 9): excludes private channels outright (AND NOT c.private)"},
 
 	// --- writes that run after the chokepoint authorized the caller ---
+	"messageSender.run": {1, "send path; the msg_id EXISTS probe runs after lockChannel -> " +
+		"authorizeChannel(accessWrite), returns only a bool, and feeds two error " +
+		"paths (replay vs race). It is deliberately NOT channel-scoped -- msg_id is " +
+		"globally unique -- but a caller must already hold write access to the " +
+		"channel they named to reach it, and msg_ids are random 16-byte values, so " +
+		"it affords no enumeration of another channel's messages"},
+	"loadReplay": {2, "rtSend replay resolution (upstream #349); ONE query, joining " +
+		"messages_enc to channel_parties to resolve the sender. Reached ONLY after " +
+		"run() returned errMsgIDReplay, which is itself past lockChannel -> " +
+		"authorizeChannel(accessWrite) on the named channel. Reads by msg_id with no " +
+		"channel scoping, then refuses with a payload-free RTMsgReplayMismatchError " +
+		"unless the row's host, channel AND sender all match the caller's own request " +
+		"-- so the only data it ever returns is the caller's own message's seq and " +
+		"insert time, in a channel they are authorized to write to. A private " +
+		"channel's existence, location and contents stay hidden from a non-member"},
 	"messageSender.internSender":  {2, "send path; runs after lockChannel -> authorizeChannel(accessWrite)"},
 	"messageSender.insertMessage": {2, "send path; runs after lockChannel -> authorizeChannel(accessWrite)"},
 	"messageSender.fanoutInboxVersions": {3, "send path; recipients are the channel's user_channels rows, " +

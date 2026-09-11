@@ -518,11 +518,18 @@ func (k *Minder) uploadNode(
 	if err != nil {
 		return err
 	}
-	return cli.KvPutSmallFileOrSymlink(m.Ctx(), rem.KvPutSmallFileOrSymlinkArg{
+	// The replay flag in the result is what this call is FOR, and it is still
+	// correct to discard it: a drained outbox row carries the node ID minted
+	// when the write was first attempted, so a redelivery after an ambiguous
+	// failure replays that exact row and the server reports it as a replay
+	// rather than a conflict (upstream #358). Either answer means the write
+	// landed, which is all the drain needs before retiring the row.
+	_, err = cli.KvPutSmallFileOrSymlink(m.Ctx(), rem.KvPutSmallFileOrSymlinkArg{
 		Auth: *auth,
 		Id:   nid,
 		Sfb:  sfb,
 	})
+	return err
 }
 
 // KVOutboxRow is one outbox entry, opened for listing.

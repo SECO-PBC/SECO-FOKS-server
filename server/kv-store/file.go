@@ -83,27 +83,30 @@ func (s *SimpleLargeFileStream) Len() int {
 	return len(s.data)
 }
 
+// putSmallFileOrSymlink writes the small-file (or symlink) row. The returned
+// bool reports an idempotent replay: the node already existed with exactly
+// these bytes, and nothing was written or charged against usage.
 func putSmallFileOrSymlink(
 	m shared.MetaContext,
 	tx pgx.Tx,
 	pid proto.PartyID,
 	role proto.Role,
 	arg rem.KvPutSmallFileOrSymlinkArg,
-) error {
+) (bool, error) {
 	err := assertAtOrAbove(role, arg.Sfb.Rg.Role, proto.KVOp_Read, proto.KVNodeType_Symlink)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	rk, err := core.ImportRole(arg.Sfb.Rg.Role)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Max length of small file is 2k + size of Poly1305
 	lim := kv.SmallFileSize + secretbox.Overhead
 	if len(arg.Sfb.DataBox) > lim {
-		return core.TooBigError{
+		return false, core.TooBigError{
 			Actual: len(arg.Sfb.DataBox),
 			Limit:  lim,
 			Desc:   "small file",
@@ -132,7 +135,7 @@ func putSmallFileOrSymlink(
 		arg.Sfb.DataBox.ExportToDB(),
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if tag.RowsAffected() == 0 {
@@ -143,31 +146,38 @@ func putSmallFileOrSymlink(
 		// client carry on. Anything else reusing the ID is a bug or a stray
 		// collision in a 16-byte random space, and must not silently keep
 		// one copy or the other.
+		//
+		// FOR UPDATE anchors the replay decision until this transaction
+		// commits: the comparison runs in a later statement (and snapshot)
+		// than the conflicting insert, so without the lock a future GC could
+		// delete the row in between, leaving the reported success describing
+		// a row that no longer exists.
 		var box []byte
 		var gen, rt, vl int
 		err = tx.QueryRow(
 			m.Ctx(),
 			`SELECT box, ptk_gen, read_role_type, read_role_viz_level
 			 FROM small_file_or_symlink
-			 WHERE short_host_id=$1 AND short_party_id=$2 AND node_id=$3`,
+			 WHERE short_host_id=$1 AND short_party_id=$2 AND node_id=$3
+			 FOR UPDATE`,
 			int(m.HostID().Short),
 			pid.Shorten().ExportToDB(),
 			arg.Id.ExportToDB(),
 		).Scan(&box, &gen, &rt, &vl)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if bytes.Equal(box, arg.Sfb.DataBox) &&
 			gen == int(arg.Sfb.Rg.Gen) &&
 			rt == int(rk.Typ) &&
 			vl == int(rk.Lev) {
 			// An identical replay. No second usage charge.
-			return nil
+			return true, nil
 		}
-		return core.KVRaceError("small-file node id reused with different contents")
+		return false, core.KVRaceError("small-file node id reused with different contents")
 	}
 	if tag.RowsAffected() != 1 {
-		return core.InsertError("small_file_or_symlink")
+		return false, core.InsertError("small_file_or_symlink")
 	}
 
 	// Only a genuinely new row is charged against usage.
@@ -180,9 +190,9 @@ func putSmallFileOrSymlink(
 		true,
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return nil
+	return false, nil
 }
 
 type LargeFileStatus int

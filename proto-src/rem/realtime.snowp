@@ -27,6 +27,10 @@ struct RTSendArg {
 struct RTSendRes {
     seq @0 : lib.RTMsgSeq;
     insertTime @1 : lib.Time;
+    // True when this send was an idempotent replay: the msgID had already
+    // been delivered, and seq/insertTime are the original delivery's, not a
+    // new row's. Old servers omit the field, which decodes as false.
+    wasReplay @2 : Bool;
 }
 
 // Inbox sync. Client sends its highest known inbox_version; server returns
@@ -248,15 +252,14 @@ protocol RealTime
 
     // Register/refresh this device's push token
     // for the AUTHENTICATED user. deviceKey is the caller's device
-    // verify-key id, a namespacing hint only (rows are always scoped to
-    // the authenticated uid); enabled=false disables delivery (opt-out).
+    // verify-key EntityID, a namespacing hint only (rows are always scoped
+    // to the authenticated uid); enabled=false disables delivery (opt-out).
     rtSetPushToken @11 (
-        platform @0 : Text,
-        token @1 : Blob,
-        deviceKey @2 : Blob,
+        platform @0 : lib.RTPushPlatform,
+        token @1 : lib.RTPushToken,
+        deviceKey @2 : lib.EntityID,
         enabled @3 : Bool
     );
-
     // FORK-ONLY private-channel ACL management (docs/rt-private-channel-acl.md).
     // Numbered from @200 so upstream can keep appending after @11 without
     // colliding on merge; if any of this is ever proposed upstream the numbers
