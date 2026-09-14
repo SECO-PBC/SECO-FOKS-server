@@ -42,11 +42,20 @@ For a new patch `N` on database `D` (e.g. `foks_realtime`):
      ```
      Without this, a fresh install (which already has the end state) would
      re-apply pN via the patch engine and typically fail (duplicate
-     index/column). This registration has been forgotten before — verify the
-     bottom of the base file lists every incorporated patch id contiguously.
+     index/column). This registration has been forgotten before
+     (three times); `TestBaseSchemaRecordsEveryPatch` in `server/sql/` now
+     fails CI when the row is missing. The patch engine tracks a SET of
+     applied ids, not a high-water mark — every id needs its own row.
 
 ## Verify
 
+- `go test ./server/sql/ -run TestBaseSchemaRecordsEveryPatch` — the
+  deterministic guard for steps 2b and 3: every base schema must stamp
+  exactly the patch ids it folds in, and every `patches/<db>/pN.sql` on disk
+  must be registered in `Patches` (embed.go). It runs in CI's normal
+  `./server/...` sweep. It CANNOT see whether the base file's DDL actually
+  contains what pN adds — that half stays on the reviewer (Consistency rule
+  below).
 - `go build ./server/sql/` — a typo'd embed path fails the build.
 - Run an integration test that stands up the affected DB fresh from the base
   file (they create all tables at startup), plus tests exercising the
