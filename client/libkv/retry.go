@@ -248,12 +248,16 @@ func (k *Minder) cacheRaceLoop(
 		return true, err
 	}
 
+	// Errors that may only be an artifact of reading stale cache entries, so
+	// they stand only once the cache check confirms those entries. A
+	// KVNoentError belongs here because a cached tombstone produces one
+	// without any server call.
 	isCacheRetriableError := func(err error) bool {
 		if err == nil {
 			return false
 		}
 		switch err.(type) {
-		case core.KVNeedDirError, core.KVNeedFileError, core.KVPathTooDeepError:
+		case core.KVNeedDirError, core.KVNeedFileError, core.KVPathTooDeepError, core.KVNoentError:
 			return true
 		default:
 			return false
