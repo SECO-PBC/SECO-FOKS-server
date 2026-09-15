@@ -322,7 +322,20 @@ func (k *Minder) cacheRaceLoop(
 				// and that check failed either because of an error with the check,
 				// or beacuse the server returned "stale" (the way more likely error).
 				// In this case, we clobber the original error with the stale cache error.
+				//
+				// The read carve-out above applies to one failure as well: a
+				// "no such file" from a cached tombstone completed against the
+				// cache, so offline it is served rather than replaced by the
+				// transport error. That keeps offline reads answering as they
+				// did before KVNoentError became cache-retriable.
 			case err != nil && didFlush && ferr != nil:
+				if opts.serveStaleOnTransport && core.IsTransportError(ferr) && core.IsKVNoentError(err) {
+					m.Infow("cacheRaceLoop",
+						"stage", "serve-stale-noent",
+						"party", kvp.Id(),
+						"err", ferr)
+					return err
+				}
 				err = ferr
 
 			}
