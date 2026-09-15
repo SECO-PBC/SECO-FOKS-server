@@ -68,6 +68,13 @@ func (m MetaContext) catchStaleCacheError(e error) error {
 		return sce
 	}
 
+	// The server checks the precondition before the operation, so a
+	// KVNoentError from it also means the cache entries we sent were fresh.
+	// Clearing them saves cacheRaceLoop from checking them again.
+	if core.IsKVNoentError(e) {
+		m.cacheAccess.clear()
+	}
+
 	return nil
 }
 
@@ -248,12 +255,16 @@ func (k *Minder) cacheRaceLoop(
 		return true, err
 	}
 
+	// Errors that may only be an artifact of reading stale cache entries, so
+	// they stand only once the cache check confirms those entries. A
+	// KVNoentError belongs here because a cached tombstone produces one
+	// without any server call.
 	isCacheRetriableError := func(err error) bool {
 		if err == nil {
 			return false
 		}
 		switch err.(type) {
-		case core.KVNeedDirError, core.KVNeedFileError, core.KVPathTooDeepError:
+		case core.KVNeedDirError, core.KVNeedFileError, core.KVPathTooDeepError, core.KVNoentError:
 			return true
 		default:
 			return false
@@ -318,7 +329,20 @@ func (k *Minder) cacheRaceLoop(
 				// and that check failed either because of an error with the check,
 				// or beacuse the server returned "stale" (the way more likely error).
 				// In this case, we clobber the original error with the stale cache error.
+				//
+				// The read carve-out above applies to one failure as well: a
+				// "no such file" from a cached tombstone completed against the
+				// cache, so offline it is served rather than replaced by the
+				// transport error. That keeps offline reads answering as they
+				// did before KVNoentError became cache-retriable.
 			case err != nil && didFlush && ferr != nil:
+				if opts.serveStaleOnTransport && core.IsTransportError(ferr) && core.IsKVNoentError(err) {
+					m.Infow("cacheRaceLoop",
+						"stage", "serve-stale-noent",
+						"party", kvp.Id(),
+						"err", ferr)
+					return err
+				}
 				err = ferr
 
 			}

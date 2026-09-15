@@ -103,6 +103,41 @@ func TestKVOfflineReads(t *testing.T) {
 	require.False(t, gfr.Stale)
 }
 
+// TestKVOfflineCachedTombstone: a "no such file" answered from a cached
+// tombstone is a read that completed against the cache, so offline it is
+// served like any other (D1) rather than turned into the outage. Online, the
+// cache race loop checks that answer with the server before believing it;
+// only the check is allowed to fail on transport.
+func TestKVOfflineCachedTombstone(t *testing.T) {
+	tew := testEnvBeta(t)
+	bluey := tew.NewTestUser(t)
+	tew.DirectMerklePokeInTest(t)
+	mc := libkv.NewMetaContext(tew.NewClientMetaContext(t, bluey))
+
+	cs := libclient.CacheSettings{UseMem: true, UseDisk: true}
+	kvm := libkv.NewMinderWithCacheSettings(mc.G().ActiveUser(), cs)
+
+	nm, err := core.RandomDomain()
+	require.NoError(t, err)
+	file := proto.KVPath("/" + nm + "/docs/gone.txt")
+
+	_, err = kvm.PutFileFirst(mc, lcl.KVConfig{MkdirP: true}, file, []byte("x"), true)
+	require.NoError(t, err)
+	err = kvm.Unlink(mc, lcl.KVConfig{}, file)
+	require.NoError(t, err)
+	_, err = kvm.Stat(mc, lcl.KVConfig{}, file)
+	require.True(t, core.IsKVNoentError(err), "expected noent, got %v", err)
+
+	offline := libkv.NewMinderWithCacheSettings(mc.G().ActiveUser(), cs)
+	mc.G().SetNetworkConditioner(core.CatastrophicNetworkConditions{On: true})
+	defer mc.G().SetNetworkConditioner(nil)
+
+	_, err = offline.Stat(mc, lcl.KVConfig{}, file)
+	require.True(t, core.IsKVNoentError(err), "expected noent, got %v", err)
+	_, err = offline.GetFile(mc, lcl.KVConfig{}, file)
+	require.True(t, core.IsKVNoentError(err), "expected noent, got %v", err)
+}
+
 // TestKVOfflineOutbox pins kv_offline.md Phase 2 (D3-D6, D8-D11): an offline
 // write queues as sealed intent and returns KVWriteQueuedError; the drain
 // re-runs it through the normal online machinery with the queue-time version
