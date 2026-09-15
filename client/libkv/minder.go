@@ -1063,6 +1063,19 @@ func (k *Minder) lookupDirent(
 		return nil, core.VerifyError("dirent binding mac")
 	}
 
+	// The binding MAC holds for any dirent in this directory, so also check
+	// that the server returned the name we asked for.
+	askedFor := false
+	for _, c := range comps {
+		if c.DirVers == res.De.DirVersion && c.Mac.Eq(res.De.NameMac) {
+			askedFor = true
+			break
+		}
+	}
+	if !askedFor || res.De.ParentDir != wd.Id() {
+		return nil, core.VerifyError("dirent name mac")
+	}
+
 	tmpComp := comp
 
 	de := Dirent{
@@ -1082,7 +1095,11 @@ func (k *Minder) lookupDirent(
 	}
 	switch typ {
 	case proto.KVNodeType_None:
-		return nil, core.KVNoentError{}
+		// A tombstone: absent to a read, but a put overwrites it, as it does when
+		// the dirent-cache hit above returns one.
+		if !opts.forPut {
+			return nil, core.KVNoentError{}
+		}
 	case proto.KVNodeType_Dir:
 		raw := res.Data.Dir()
 		dir := NewDirPair(kvp.Id(), raw, nil)
