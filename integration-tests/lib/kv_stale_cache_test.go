@@ -92,7 +92,7 @@ func (s *kvStaleCacheTeamTest) get(mc libkv.MetaContext, kvm *libkv.Minder, p st
 // race loop has to notice A's cached dirent is stale and serve B's write.
 func TestKVStaleCacheOverwriteByOtherMember(t *testing.T) {
 	s := setupKVStaleCacheTeamTest(t)
-	p := "/channels/c1/members/a"
+	p := "/docs/note.txt"
 
 	s.put(t, s.aMc, s.aKvm, p, "v1")
 	got, err := s.get(s.aMc, s.aKvm, p)
@@ -140,7 +140,7 @@ func TestKVStaleCacheAfterFreshServerLookup(t *testing.T) {
 // with the server like any other cache-derived result.
 func TestKVStaleCacheTombstoneThenRecreate(t *testing.T) {
 	s := setupKVStaleCacheTeamTest(t)
-	p := "/channels/c1/members/a"
+	p := "/docs/note.txt"
 
 	s.put(t, s.aMc, s.aKvm, p, "v1")
 	got, err := s.get(s.aMc, s.aKvm, p)
