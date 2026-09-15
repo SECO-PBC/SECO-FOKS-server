@@ -255,10 +255,9 @@ func (k *Minder) cacheRaceLoop(
 		return true, err
 	}
 
-	// Errors that may only be an artifact of reading stale cache entries, so
-	// they stand only once the cache check confirms those entries. A
-	// KVNoentError belongs here because a cached tombstone produces one
-	// without any server call.
+	// Errors that might come from stale cache entries. They are returned only
+	// after the cache check confirms those entries. KVNoentError is included
+	// because a cached tombstone produces one without asking the server.
 	isCacheRetriableError := func(err error) bool {
 		if err == nil {
 			return false
