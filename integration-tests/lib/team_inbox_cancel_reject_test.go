@@ -281,6 +281,14 @@ func TestTeamLeaveSelf(t *testing.T) {
 	require.NoError(t, err)
 	f.tew.DirectDoubleMerklePokeInTest(t)
 
+	// Admission changes the team, not the joiner's membership chain. The
+	// joiner's client writes the Approved link when it next explores and finds
+	// the team on the server's list (serverTrustListForUser). The app gets
+	// there through TeamListMemberships; here we explore directly.
+	err = f.tmj.ExploreAndIndex(f.mj, nil)
+	require.NoError(t, err)
+	f.tew.DirectDoubleMerklePokeInTest(t)
+
 	state, found := f.membershipState(t)
 	require.True(t, found)
 	require.Equal(t, proto.TeamMembershipLinkState_Approved, state,
