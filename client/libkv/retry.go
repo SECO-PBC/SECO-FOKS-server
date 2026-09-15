@@ -68,6 +68,13 @@ func (m MetaContext) catchStaleCacheError(e error) error {
 		return sce
 	}
 
+	// The server checks the precondition before the operation, so a
+	// KVNoentError from it also means the cache entries we sent were fresh.
+	// Clearing them saves cacheRaceLoop from checking them again.
+	if core.IsKVNoentError(e) {
+		m.cacheAccess.clear()
+	}
+
 	return nil
 }
 
