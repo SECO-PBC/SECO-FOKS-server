@@ -998,6 +998,35 @@ func TestPrivateRevokeDropsFromRevokedListing(t *testing.T) {
 	require.False(t, inList(sc.bob), "revoked, bob's fresh listing must drop it")
 }
 
+// The same with the client's channel-set cache ON, as every real client runs.
+// The server's delta after a revoke simply omits the channel (a non-member
+// may not learn it exists), so a cache that merged deltas kept listing the
+// revoked channel forever -- the member never saw it disappear.
+func TestPrivateRevokeDropsFromCachedListing(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	sc.grant(t, sc.alice, sc.bob, false)
+	cached := librt.NewMinderWithCacheSettings(
+		sc.bob.m.G().ActiveUser(),
+		libclient.CacheSettings{UseMem: true},
+	)
+
+	inList := func() bool {
+		lst, err := cached.ListAllChannelsForTeam(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat)
+		require.NoError(t, err)
+		for _, ch := range lst.Channels {
+			if ch.Id.Eq(sc.chid) {
+				return true
+			}
+		}
+		return false
+	}
+	require.True(t, inList(), "granted, bob lists the channel (and caches the set)")
+	sc.revoke(t, sc.alice, sc.bob)
+	require.False(t, inList(), "revoked, bob's cached listing must drop it")
+	sc.grant(t, sc.alice, sc.bob, false)
+	require.True(t, inList(), "re-granted, it comes back")
+}
+
 // The decrypted (lcl) channel metadata carries the private flag, so callers
 // above librt -- the app's lock, the daemon's open/private split -- can tell
 // a private channel apart. Fork PR #26 dropped it at this seam.

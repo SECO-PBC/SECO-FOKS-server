@@ -683,6 +683,23 @@ func (k *Minder) listAllChannelsForTeam(
 		return nil, err
 	}
 
+	// The server's delta carries only the rows the caller may still see. A
+	// private channel the caller lost access to (revoked, or left) is simply
+	// absent from it, never tombstoned, so merging would keep it cached
+	// forever. When the set moved, re-list from scratch instead.
+	if cached != nil && encList.Vers != lastKnownVersion {
+		encList, err = cli.RtListAllChannelsForTeam(m.Ctx(),
+			rem.RtListAllChannelsForTeamArg{
+				Team:  fqt.Team,
+				AppID: appID,
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		d = make(map[proto.RTChannelID]rem.RTChannelMetadata)
+	}
+
 	// Stomp the cached version with the new versions, in case
 	// we changed metadata.
 	for _, chmdenc := range encList.Lst {
