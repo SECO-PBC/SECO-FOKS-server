@@ -1,12 +1,14 @@
 # Private channels via server-side ACL (fork-only)
 
-**Status:** DRAFT spec, 2026-08-28. Server side first (SECO-FOKS-server fork),
-client side in a follow-up spec.
+**Status:** SHIPPED (server side). Drafted 2026-08-28; implemented in fork
+PR #26 and first released in `v0.1.9-seco.14`. Corrected 2026-09-16 to what
+shipped, together with the agent (lcl) RPCs, self-revoke, and the
+revoke-time channel-set bump for the app-side `private-channels` change
+(SECO-FOKS OpenSpec). §§4–6 below describe the code as built; the original
+plan wording is kept only where it still matches.
 **Scope:** fork-only. Not proposed upstream (Max: "not on the roadmap").
-**Base:** fork `main` @ `0c076a0` (PR #22 typed sends + push outbox/token,
-PR #24 upstream-aligned naming — no wire change). Untagged as of 2026-08-28;
-the app pins `v0.1.9-seco.11`, latest tag is `seco.13` (= PR #22 head).
-The typed-message and push-token work is also proposed upstream as
+**Base (historical):** drafted against fork `main` @ `0c076a0`. The
+typed-message and push-token work is also proposed upstream as
 foks-proj/go-foks#341 and #342 — everything here must stay mergeable with
 those (append-only enum value, new RPC numbers after @11, no renames).
 **Decision record:** option (1) "server-enforced access control, no new teams
@@ -145,15 +147,20 @@ the channel. Both in one transaction.
 // metadata calls it. No path may query `channels` or `messages_enc` for a
 // caller without going through here.
 func authorizeChannel(m, rtdb, userdb, channelID, want accessKind) (teamRole *core.RoleKey, err error)
-//   1. load channel (team, tier, read/write roles)          -- RowNotFound if absent
-//   2. role := AuthorizeUserForTeam(team)                    -- outer gate: must be a current team member
-//   3. tier gate: admin tier requires IsAdminOrAbove
-//   4. role gate: read requires role >= readRole; write requires role >= writeRole
-//   5. if channel.private: require channel_acl row for (channel, m.UID())
-//      -- for want == manage: require acl_role == owner OR role.IsAdminOrAbove()
-//      -- for want == create (private): require role.IsAdminOrAbove()  [Q2b]
+//   As built (server/realtime/acl.go): the private check runs FIRST, before
+//   the tier and role gates, and management is its own access kind:
+//   1. load channel (team, tier, read/write roles, private) -- RowNotFound if absent
+//   2. role := AuthorizeUserForTeam(team)                   -- outer gate: must be a current team member
+//   3. if channel.private: require a channel_acl row for (channel, m.UID()),
+//      OR admin standing for the management kinds:
+//      -- accessManage (grant/revoke another): acl owner OR role.IsAdminOrAbove()
+//      -- accessRoster (read the ACL; self-revoke): any ACL member, or an admin
+//   4. tier gate: admin tier requires IsAdminOrAbove (management kinds skip
+//      the read-role gate, so an admin can moderate above their own role)
+//   5. role gate: read requires role >= readRole; write requires role >= writeRole
 //   6. errors: a private channel the caller is not in returns the SAME error
 //      as a non-existent channel (RowNotFound) -- existence is not disclosed
+//   Private CREATE (admins only, Q2b) is enforced in the creation path, not here.
 ```
 
 Set-based paths (listing, changed-threads) cannot call a per-row function; they
@@ -195,14 +202,26 @@ list on create — rejected for v1; two RPCs beat a new arg struct, and
 `RTChannelMetadata` (`proto-src/rem/realtime.snowp:62-74`) gains
 `private @20 : Bool`, alongside the existing `tier @11` / `unreadable @12`.
 
-### 4.5 librt (`client/librt/minder.go`)
+### 4.5 librt (`client/librt/minder.go`) — as built
 
-- `MakeChannel`: accept a `private` bool. Tier/name-key selection is
-  **unchanged** (4.1) — a private channel is an ordinary bottom-tier channel.
-  Skip the team-wide name-collision map when `private` (`minder.go:243-289`):
-  the server cannot dedupe names it hides, and two private channels sharing a
+- `MakeChannelWithOpts(..., MakeChannelOpts{Private, NoPush}, ...)` — a
+  separate opts struct, not a bool on `MakeChannel`. Tier/name-key selection
+  is **unchanged** (4.1) — a private channel is an ordinary bottom-tier
+  channel. The team-wide name-collision map is skipped when `private`: the
+  server cannot dedupe names it hides, and two private channels sharing a
   name is legitimate.
-- New `Grant`, `Revoke`, `Members` wrappers.
+- Wrappers `GrantChannelMember`, `RevokeChannelMember`, `ChannelMembers`
+  (by channel id), plus `...In` variants addressing the channel by
+  specifier for the agent RPCs (2026-09-16).
+- `ListAllChannelsForTeam` drops rows the server marked `unreadable`
+  (an admin outside the ACL), so above librt those channels do not appear
+  at all; `decryptChannelMetadata` copies `private` into the plaintext
+  (2026-09-16 — PR #26 had dropped it at this seam).
+- **Agent (lcl) RPCs (2026-09-16):** `clientRTMakeChannel` carries
+  `private @3`; `clientRTChannelGrant @5` / `clientRTChannelRevoke @6` /
+  `clientRTChannelMembers @7` take `fqUser` strings, resolved via the team
+  roster (team-mediated, closed-viewership-safe); members come back with
+  usernames resolved and empty names for users who left the roster.
 
 **Open, found while building (needs a product call, not a code fix).** Skipping
 collision detection cuts both ways, and only one direction was considered here.
@@ -340,11 +359,16 @@ ACL row pruned by §6.3. If no owner remains, team admins retain management
 (§6.1); a channel with no owner and no admin action is simply read-only-frozen
 for its members until an admin acts. No automatic ownership transfer.
 
-### 6.5 Revoke semantics for the revoked user's client
+### 6.5 Revoke semantics for the revoked user's client — as built
 Revoke bumps the user's `user_inbox` version with the channel absent from
-their next changed-threads page. Client rule (follow-up spec): a channel that
-was present and is now absent from a full sync is removed locally; cached
-plaintext is deleted. The server cannot enforce client-side deletion — this is
+their next changed-threads page, and (2026-09-16) also bumps the team's
+channel-set version, so the revoked member's next version-checked listing
+drops the channel — `SyncInbox` never deletes local rows, so without the
+set bump their device would keep listing it. A member may also revoke
+THEMSELVES (Leave; accessRoster, not accessManage). Client rule
+(SECO-FOKS `private-channels`): a private channel absent from a fresh
+listing, or answering RowNotFound, is forgotten locally; cached plaintext
+is deleted. The server cannot enforce client-side deletion — this is
 documented as part of the guarantee statement.
 
 ## 7. Decisions — RESOLVED 2026-08-28 (Stefan)
@@ -356,7 +380,7 @@ documented as part of the guarantee statement.
 | Q2b | **New rule:** who may *create* a private channel? | **Admins/leaders only** — enforced server-side (§7.1), not just in the UI. |
 | Q3 | Is the daemon ever a member? | Not by default; an owner may grant it like any member. Its summaries/corpus then include the channel — surface that in the grant UI. |
 | Q4 | Rekey the team on revoke? | **No** for v1; the consequence is stated in §1 and in the product copy. |
-| Q5 | Tag/pin plan | Tag today's `main` (`0c076a0`) `v0.1.9-seco.14`, bump the three go.mod pins off `seco.11`; this work lands as `seco.15`. |
+| Q5 | Tag/pin plan | As happened: `0c076a0` was tagged `seco.14` WITH this work already in it (PR #26); the app reached it at `seco.17`. The agent RPCs + self-revoke + revoke set-bump land as `seco.18`. |
 
 **Rationale for Q1/Q2 (Stefan's, and it is the better one).** The earlier
 argument was "admins need moderation and recovery powers". The stronger
@@ -435,30 +459,29 @@ numbering verified against real codegen (§4.4), PG enum constraint dodged by
 design (§4.1), test harness confirmed sufficient (§8), fork base and tag state
 established (§Base, Q5).
 
-Blocking, and all of them are Stefan's calls rather than research:
+All resolved as of 2026-09-16:
 
-- [ ] **Q1–Q4** (§7). Q1/Q2 in particular gate the chokepoint's step 5 — the
-      code cannot be written without them.
-- [ ] **S0**: tag fork `main` (`0c076a0`) `v0.1.9-seco.14`, bump the three
-      go.mod pins from `seco.11`, re-run gates. Independent of this spec and
-      unblocks the RT flip on its own.
-- [ ] **Product copy** for the guarantee statement (§1): what a private channel
-      claims, in user-facing words. This is the thing that makes option (1)
-      honest rather than misleading, so it ships *with* the feature, not after.
+- [x] **Q1–Q4** (§7) — decided 2026-08-28, implemented in PR #26.
+- [x] **S0** — `seco.14` tagged; the app pins `seco.17`.
+- [x] **Product copy** — the privacy banner is specced in SECO-FOKS
+      OpenSpec `private-channels` (blueprint Channels 4.2), including a
+      daemon-free variant.
+- [x] Client follow-up — SECO-FOKS OpenSpec `private-channels` (2026-09-16):
+      bridge surface, channels UI, membership seam, daemon channel scoping.
 
-Not blocking the server build, needed before the feature is usable:
+Still open (unchanged):
 
-- [ ] Client follow-up spec: per-channel transport keys (the app transport is
-      hardcoded to the default channel today — `rtGetThread(team, "", …)`,
-      store keyed by team, wake loop per team), bridge surface across the nine
-      places a method must land, channels UI, daemon channel kind.
+- [ ] §4.5's private/public name collision (a product call, deferred with a
+      note in the client spec).
+- [ ] Whether to hint to an admin that an unnamed private channel exists
+      (§6.2); today they see its name box, and librt hides the row.
 
 ## 9. Implementation plan (server)
 
 | Phase | Work | Est. |
 |---|---|---|
 | S0 | Tag fork `main` as `seco.14`, bump app pins, confirm parity/gates green on it (unblocks the flip independently of this spec) | ½ day |
-| S1 | Patch `p2.sql` (tier value + `channel_acl`), proto enum + 3 RPCs, codegen | ½ day |
+| S1 | Patch (shipped as `p5.sql`: `channels.private` boolean + `channel_acl` — a boolean, not a tier value; see §4.1) , proto + 3 RPCs, codegen | ½ day |
 | S2 | `authorizeChannel` chokepoint; migrate paths 1, 2, 3, 6, 12 to it | 1 day |
 | S3 | Set-based gates: listing (5), changed-threads (7), fan-in exclusion (9); creation fan-out to creator only (11) | 1 day |
 | S4 | Send-time recipient re-validation + prune (4, §6.3); grant/revoke transactions with inbox bumps | 1 day |

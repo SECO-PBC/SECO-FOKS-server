@@ -116,7 +116,9 @@ var rpcAccessClass = map[string]rpcClassification{
 	},
 	"rtChannelRevoke": {
 		channelWrite,
-		"TestPrivateChangedThreadsAfterRevoke, TestPrivateReadThroughAfterRevoke (row 12)",
+		"TestPrivateChangedThreadsAfterRevoke, TestPrivateReadThroughAfterRevoke, " +
+			"TestPrivateSelfRevokeLeaves, TestPrivateNonOwnerCannotRevokeOthers, " +
+			"TestPrivateRevokeDropsFromRevokedListing (row 12)",
 	},
 	"rtChannelMembers": {
 		channelData,

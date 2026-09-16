@@ -943,3 +943,111 @@ func TestPrivateAdminManagesAboveOwnReadRole(t *testing.T) {
 		rem.RtGetThreadRecentsArg{Ch: highID, Lim: 10})
 	require.Error(t, err, "managing a channel is not reading it")
 }
+
+// --- private-channels client follow-up (app-side change; §6.5) --------------
+
+// Leave: any ACL member may revoke THEMSELVES; management standing is only
+// for revoking someone else. A member outside the ACL gets the same
+// RowNotFound a missing channel would give.
+func TestPrivateSelfRevokeLeaves(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	sc.grant(t, sc.alice, sc.bob, false)
+	require.True(t, sc.aclUIDs(t)[sc.bob.u.uid.EncodeHex()])
+
+	// bob, a plain member with no management standing, leaves.
+	require.NoError(t, sc.bob.minder.RevokeChannelMember(sc.bob.m, sc.chid, sc.bob.u.uid))
+	require.False(t, sc.aclUIDs(t)[sc.bob.u.uid.EncodeHex()])
+	require.False(t, sc.deliveryUIDs(t)[sc.bob.u.uid.EncodeHex()])
+
+	// cleo was never in the channel; her "leave" reads as a missing channel.
+	err := sc.cleo.minder.RevokeChannelMember(sc.cleo.m, sc.chid, sc.cleo.u.uid)
+	requireHidden(t, err, "self-revoke by a non-member")
+}
+
+// A plain member may not revoke anyone but themselves; that stays an
+// owner-or-admin action.
+func TestPrivateNonOwnerCannotRevokeOthers(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	sc.grant(t, sc.alice, sc.bob, false)
+	err := sc.bob.minder.RevokeChannelMember(sc.bob.m, sc.chid, sc.alice.u.uid)
+	require.Error(t, err)
+	require.IsType(t, core.PermissionError(""), err,
+		"a non-owner member revoking another member must be denied, not hidden")
+	require.True(t, sc.aclUIDs(t)[sc.alice.u.uid.EncodeHex()])
+}
+
+// A revoke bumps the team's channel-set version exactly as a grant does, so
+// the revoked member's next (version-checked) listing drops the channel
+// rather than serving it from cache indefinitely.
+func TestPrivateRevokeDropsFromRevokedListing(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	sc.grant(t, sc.alice, sc.bob, false)
+
+	inList := func(a *privActor) bool {
+		lst, err := a.minder.ListAllChannelsForTeam(a.m, sc.teamCfg(), proto.RTAppID_Chat)
+		require.NoError(t, err)
+		for _, ch := range lst.Channels {
+			if ch.Id.Eq(sc.chid) {
+				return true
+			}
+		}
+		return false
+	}
+	require.True(t, inList(sc.bob), "granted, bob lists the channel")
+	sc.revoke(t, sc.alice, sc.bob)
+	require.False(t, inList(sc.bob), "revoked, bob's fresh listing must drop it")
+}
+
+// The decrypted (lcl) channel metadata carries the private flag, so callers
+// above librt -- the app's lock, the daemon's open/private split -- can tell
+// a private channel apart. Fork PR #26 dropped it at this seam.
+func TestPrivatePlaintextCarriesPrivate(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	sc.grant(t, sc.alice, sc.bob, false)
+	lst, err := sc.bob.minder.ListAllChannelsForTeam(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat)
+	require.NoError(t, err)
+	var found bool
+	for _, ch := range lst.Channels {
+		if !ch.Id.Eq(sc.chid) {
+			continue
+		}
+		found = true
+		require.True(t, ch.Private, "the plaintext metadata must carry private=true")
+	}
+	require.True(t, found)
+}
+
+// The spec-addressed wrappers (the agent RPCs' other half): resolve the
+// channel by NAME through the caller's own listing, then grant, list the
+// ACL, and revoke. Also pins the ACL's audit fields (owner, grantedBy).
+func TestPrivateAclOpsBySpec(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	nameSpec := lcl.NewRTChannelSpecifierWithName(lcl.RTChannelNameAndTier{Name: sc.name})
+
+	err := sc.alice.minder.GrantChannelMemberIn(
+		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, nameSpec, sc.bob.u.uid, false)
+	require.NoError(t, err)
+
+	entries, err := sc.bob.minder.ChannelMembersIn(
+		sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat, nameSpec)
+	require.NoError(t, err)
+	byUID := map[string]rem.RTChannelAclEntry{}
+	for _, e := range entries {
+		byUID[e.Uid.EncodeHex()] = e
+	}
+	require.Len(t, byUID, 2)
+	require.True(t, byUID[sc.alice.u.uid.EncodeHex()].Owner, "the creator is the owner")
+	require.False(t, byUID[sc.bob.u.uid.EncodeHex()].Owner)
+	require.True(t, byUID[sc.bob.u.uid.EncodeHex()].GrantedBy.Eq(sc.alice.u.uid))
+
+	// cleo cannot resolve the channel at all: her listing hides it, so the
+	// wrapper fails client-side before any RPC.
+	_, err = sc.cleo.minder.ChannelMembersIn(
+		sc.cleo.m, sc.teamCfg(), proto.RTAppID_Chat, nameSpec)
+	require.Error(t, err)
+
+	err = sc.bob.minder.RevokeChannelMemberIn(
+		sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat, nameSpec, sc.bob.u.uid)
+	require.NoError(t, err)
+	require.False(t, sc.aclUIDs(t)[sc.bob.u.uid.EncodeHex()])
+}
