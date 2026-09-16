@@ -56,6 +56,12 @@ struct RTChannelMetadataPlaintext {
     // older build looks identical to a correctly-flagged one, and every
     // control message posted there fans out a push to the whole team.
     noPush @9 : Bool;
+    // FORK-ONLY (private channels). Mirrors rem.RTChannelMetadata.private.
+    // The server only lists a private channel to holders of an ACL row (and,
+    // unreadable, to team admins), but a caller above the agent still needs
+    // the flag: the app draws the lock and switches its membership model on
+    // it, and the daemon must never treat a private channel as open.
+    private @10 : Bool;
 }
 
 struct RTChannelSetForTeam {
@@ -140,7 +146,13 @@ protocol RealTime
          * the push fan-out. The app reaches channel creation through this
          * agent RPC rather than librt directly, so the knob has to cross the
          * local protocol too; librt.MakeChannelOpts is the other half. */
-        noPush @2 : Bool
+        noPush @2 : Bool,
+        /* FORK-ONLY (private channels). Create the channel with a
+         * server-enforced access list: only granted members can read, send
+         * or even see it. The creator is seeded as the list's owner.
+         * librt.MakeChannelOpts.Private is the other half; see
+         * docs/rt-private-channel-acl.md. */
+        private @3 : Bool
     ) -> lib.RTChannelID;
 
     clientRTListChannelsForTeam @1 (
@@ -163,6 +175,40 @@ protocol RealTime
         localOnly @1 : Bool     /* skip the network sync; render from disk only */
     ) -> RTInboxView;
 
+    /* FORK-ONLY (private channels). The access-list operations, resolved by
+     * username agent-side via the team roster -- the team-mediated read the
+     * member list already uses, so it works under closed viewership where a
+     * direct user load would not. The server enforces who may call what:
+     * grant and revoke need a channel owner or team admin, except that any
+     * member may revoke THEMSELVES (Leave); the roster is readable by every
+     * channel member. See docs/rt-private-channel-acl.md. */
+
+    clientRTChannelGrant @5 (
+        cfg @0 : RTConfig,           /* team + channel (by name) */
+        fqUser @1 : lib.FQUserString /* the team member to grant */
+    );
+
+    clientRTChannelRevoke @6 (
+        cfg @0 : RTConfig,
+        fqUser @1 : lib.FQUserString /* the caller's own user = Leave */
+    );
+
+    clientRTChannelMembers @7 (
+        cfg @0 : RTConfig
+    ) -> List(RTChannelMember);
+
+}
+
+/* FORK-ONLY (private channels). One entry of a private channel's access
+ * list, with uids resolved to usernames via the team roster. A name is
+ * empty when its user is no longer on the roster (left the team; the
+ * server prunes their row lazily) -- callers should drop those entries. */
+struct RTChannelMember {
+    uid @0 : lib.UID;
+    name @1 : lib.NameUtf8;          /* "" = no longer on the roster */
+    owner @2 : Bool;                 /* may grant and revoke */
+    grantedByName @3 : lib.NameUtf8; /* who granted them; "" as above */
+    ctime @4 : lib.Time;
 }
 
 struct RTChannelSetHashInput @0xc6985a2917572061 {

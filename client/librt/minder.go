@@ -591,6 +591,7 @@ func (k *Minder) decryptChannelMetadata(
 	ret.UpdatedAt = chmdenc.UpdatedAt
 	ret.Unreadable = chmdenc.Unreadable
 	ret.NoPush = chmdenc.NoPush
+	ret.Private = chmdenc.Private
 
 	return &ret, nil
 }
@@ -2384,6 +2385,87 @@ func (d *Minder) RevokeChannelMember(
 		ChannelID: chid,
 		Uid:       uid,
 	})
+}
+
+// resolveChannelID resolves a channel specifier to its id, for the ACL
+// operations below: they address the channel by id on the wire, but agent
+// callers hold only a name. Resolution goes through the caller's own channel
+// listing, so a private channel resolves only for its members (and never
+// for a team admin outside it -- librt hides unreadable rows).
+func (d *Minder) resolveChannelID(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+) (
+	proto.RTChannelID,
+	error,
+) {
+	var zed proto.RTChannelID
+	err := assertTeam(team)
+	if err != nil {
+		return zed, err
+	}
+	rtp, err := d.base.GetParty(m.Base(), team)
+	if err != nil {
+		return zed, err
+	}
+	ch, err := d.resolveChannel(m, rtp, appID, channel)
+	if err != nil {
+		return zed, err
+	}
+	return ch.Id, nil
+}
+
+// GrantChannelMemberIn is GrantChannelMember addressing the channel by
+// specifier rather than id.
+func (d *Minder) GrantChannelMemberIn(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	uid proto.UID,
+	owner bool,
+) error {
+	chid, err := d.resolveChannelID(m, team, appID, channel)
+	if err != nil {
+		return err
+	}
+	return d.GrantChannelMember(m, chid, uid, owner)
+}
+
+// RevokeChannelMemberIn is RevokeChannelMember addressing the channel by
+// specifier rather than id.
+func (d *Minder) RevokeChannelMemberIn(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	uid proto.UID,
+) error {
+	chid, err := d.resolveChannelID(m, team, appID, channel)
+	if err != nil {
+		return err
+	}
+	return d.RevokeChannelMember(m, chid, uid)
+}
+
+// ChannelMembersIn is ChannelMembers addressing the channel by specifier
+// rather than id.
+func (d *Minder) ChannelMembersIn(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+) (
+	[]rem.RTChannelAclEntry,
+	error,
+) {
+	chid, err := d.resolveChannelID(m, team, appID, channel)
+	if err != nil {
+		return nil, err
+	}
+	return d.ChannelMembers(m, chid)
 }
 
 // ChannelMembers lists a private channel's ACL, including who granted each

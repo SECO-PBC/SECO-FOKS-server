@@ -715,7 +715,13 @@ func GrantChannelMember(
 }
 
 // RevokeChannelMember removes a user from a private channel: ACL row, delivery
-// row, and an inbox bump so their client drops the channel on its next sync.
+// row, an inbox bump, and a channel-set version bump so the revoked member's
+// next channel listing drops the channel (SyncInbox never deletes local rows,
+// so without the set bump their device would keep listing it indefinitely).
+//
+// A member may revoke THEMSELVES -- that is Leave, and it needs only their own
+// membership (accessRoster), not management standing. Everyone else's removal
+// still needs a channel owner or a team admin (accessManage).
 //
 // It does NOT rekey the team, so a revoked member who kept their keys can still
 // decrypt any ciphertext they already hold, and could decrypt future messages
@@ -743,7 +749,14 @@ func RevokeChannelMember(
 		rtdb,
 		"realtime.RevokeChannelMember",
 		func(m shared.MetaContext, tx pgx.Tx) (func(shared.MetaContext), error) {
-			ca, err := authorizeChannel(m, tx, userdb, chid, accessManage, false)
+			want := accessManage
+			if arg.Uid.Eq(m.UID()) {
+				// Self-revoke (Leave). accessRoster still requires the
+				// caller to hold an ACL row or admin standing, and an admin
+				// with no row falls out below as RowNotFound.
+				want = accessRoster
+			}
+			ca, err := authorizeChannel(m, tx, userdb, chid, want, false)
 			if err != nil {
 				return nil, err
 			}
@@ -757,6 +770,13 @@ func RevokeChannelMember(
 			}
 			if !removed {
 				return nil, core.RowNotFoundError{}
+			}
+			// Make the disappearance visible to the revoked member's
+			// incremental channel listing, exactly as a grant makes the
+			// appearance visible; see touchChannelSet.
+			err = touchChannelSet(m, tx, ca.team, appDB, chid)
+			if err != nil {
+				return nil, err
 			}
 			app := ca.appID
 			uid := arg.Uid
