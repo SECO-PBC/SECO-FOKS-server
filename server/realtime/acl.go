@@ -771,6 +771,17 @@ func RevokeChannelMember(
 			if !removed {
 				return nil, core.RowNotFoundError{}
 			}
+			// A push hold's coverage follows its holder's access (fork-only,
+			// pushhold.go): revoking the holder releases what it held here.
+			holder, err := readPushHolder(m, tx, ca.team, appDB)
+			if err != nil {
+				return nil, err
+			}
+			if holder != nil && holder.Eq(arg.Uid) {
+				if err = releaseChannelHeld(m, tx, chid); err != nil {
+					return nil, err
+				}
+			}
 			// Make the disappearance visible to the revoked member's
 			// incremental channel listing, exactly as a grant makes the
 			// appearance visible; see touchChannelSet.

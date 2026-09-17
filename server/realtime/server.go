@@ -166,6 +166,24 @@ func (c *ClientConn) RtChannelMembers(
 	return ListChannelMembers(m, arg)
 }
 
+// Fork-only delegated push release; see pushhold.go.
+
+func (c *ClientConn) RtSetPushHold(ctx context.Context, arg rem.RtSetPushHoldArg) error {
+	return SetPushHold(shared.NewMetaContextConn(ctx, c), arg)
+}
+
+func (c *ClientConn) RtClearPushHold(ctx context.Context, arg rem.RtClearPushHoldArg) error {
+	return ClearPushHold(shared.NewMetaContextConn(ctx, c), arg)
+}
+
+func (c *ClientConn) RtReleasePushes(ctx context.Context, arg rem.RtReleasePushesArg) error {
+	return ReleasePushes(shared.NewMetaContextConn(ctx, c), arg)
+}
+
+func (c *ClientConn) RtNotifyMembers(ctx context.Context, arg rem.RtNotifyMembersArg) error {
+	return NotifyMembers(shared.NewMetaContextConn(ctx, c), arg)
+}
+
 var _ shared.RPCServer = (*Server)(nil)
 
 var _ rem.RealTimeInterface = (*ClientConn)(nil)
