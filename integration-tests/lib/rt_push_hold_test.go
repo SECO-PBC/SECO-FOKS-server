@@ -264,3 +264,43 @@ func TestPushHoldHolderLeftTeamEndsOnSend(t *testing.T) {
 		"the earlier held row is released and the new one queued")
 	require.Equal(t, 0, sc.holdCount(t))
 }
+
+func TestPushNotifyOnePushPerMemberPerCall(t *testing.T) {
+	sc := setupPrivScene(t, true)
+	ch := sc.makeChannelWithOpts(t, sc.bob, librt.MakeChannelOpts{})
+	sc.setHold(t, sc.dara)
+	require.NoError(t, sc.dara.minder.NotifyMembers(sc.dara.m, ch, []rem.RTPushNotify{
+		{Uid: sc.bob.u.uid}, {Uid: sc.bob.u.uid, Handle: []byte("x")},
+	}))
+	require.Equal(t, queued(1), sc.pushRowsByStatus(t, ch, sc.bob))
+}
+
+// The contract with the daemon's planner (SECO-FOKS apps/daemon/internal/
+// pushrelease, TestPlan "a member undecided on an earlier seq stays kept when
+// a later one is decided"): it sends calls NEWEST FIRST, keeping a member in
+// every call above the seq they are decided through, and sends that member's
+// drops in the call at their own seq. Replayed here against the real server,
+// each member must end with exactly one push and nothing wrongly sent.
+func TestPushReleaseDaemonCallOrder(t *testing.T) {
+	sc := setupPrivScene(t, true)
+	ch := sc.makeChannelWithOpts(t, sc.bob, librt.MakeChannelOpts{})
+	sc.setHold(t, sc.dara)
+	s9 := sc.sendSeq(t, sc.bob, ch, "in dan's muted thread")
+	s10 := sc.sendSeq(t, sc.bob, ch, "in a thread dan follows")
+	s11 := sc.sendSeq(t, sc.bob, ch, "not judged yet")
+	s12 := sc.sendSeq(t, sc.bob, ch, "not judged yet either")
+
+	dan := sc.eddie // dan in the planner's table
+	require.NoError(t, sc.dara.minder.ReleasePushes(sc.dara.m, ch, s12,
+		[]proto.UID{dan.u.uid}, nil))
+	require.NoError(t, sc.dara.minder.ReleasePushes(sc.dara.m, ch, s10,
+		nil, []rem.RTPushDrop{{Uid: dan.u.uid, Seq: s9}}))
+
+	// Everyone else: one push, the newest.
+	require.Equal(t, []int64{s12.Int64()}, sc.queuedSeqs(t, ch, sc.alice))
+	require.Equal(t, queued(1), sc.pushRowsByStatus(t, ch, sc.alice))
+	// Dan: 9 dropped, 10 sent, 11 and 12 still held for the next step.
+	require.Equal(t, []int64{s10.Int64()}, sc.queuedSeqs(t, ch, dan))
+	require.Equal(t, map[string]int{"queued": 1, "held": 2}, sc.pushRowsByStatus(t, ch, dan))
+	_ = s11
+}

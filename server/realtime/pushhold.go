@@ -27,6 +27,9 @@ const (
 	// maxPushHandleLen bounds the opaque handle a notify row may carry. It
 	// travels to the push provider as-is, so it stays small.
 	maxPushHandleLen = 32
+	// maxPushNotifyEntries bounds one notify call: a channel's worth of
+	// members.
+	maxPushNotifyEntries = 10000
 )
 
 // readPushHolder returns the (team, app) hold's holder, or nil for no hold.
@@ -113,7 +116,7 @@ func (s *messageSender) pushStatusForSend(m shared.MetaContext) (string, error) 
 		}
 		return pushStatusQueued, nil
 	}
-	readable, err := holderCanRead(m, s.tx, s.channelID(), *holder, role, s.readRole, s.private)
+	readable, err := canReadChannel(m, s.tx, s.channelID(), *holder, role, s.readRole, s.private)
 	if err != nil {
 		return "", err
 	}
@@ -137,13 +140,13 @@ func (s *messageSender) endHold(m shared.MetaContext, appDB string) error {
 	return releaseTeamHeld(m, s.tx, s.parentTeam, appDB)
 }
 
-// holderCanRead: the holder's team role clears the channel's read role, and
-// for a private channel the holder has an ACL row.
-func holderCanRead(
+// canReadChannel: a member's team role clears the channel's read role, and
+// for a private channel they hold an ACL row.
+func canReadChannel(
 	m shared.MetaContext,
 	tx shared.Querier,
 	channelID int64,
-	holder proto.UID,
+	uid proto.UID,
 	role core.RoleKey,
 	readRole proto.Role,
 	private bool,
@@ -158,7 +161,7 @@ func holderCanRead(
 	if !private {
 		return true, nil
 	}
-	_, found, err := readChannelAclRole(m, tx, channelID, holder)
+	_, found, err := readChannelAclRole(m, tx, channelID, uid)
 	return found, err
 }
 
@@ -333,11 +336,23 @@ func ReleasePushes(m shared.MetaContext, arg rem.RtReleasePushesArg) error {
 // NotifyMembers queues one content-free 'system' push per entry whose member
 // can read the channel. Others are skipped without error.
 func NotifyMembers(m shared.MetaContext, arg rem.RtNotifyMembersArg) error {
+	if len(arg.Entries) > maxPushNotifyEntries {
+		return core.BadArgsError("too many push notify entries")
+	}
+	seen := make(map[proto.UID]bool, len(arg.Entries))
+	var entries []rem.RTPushNotify
 	for _, e := range arg.Entries {
 		if len(e.Handle) > maxPushHandleLen {
 			return core.BadArgsError("push handle too long")
 		}
+		// One push per member per call, however often they are listed.
+		if seen[e.Uid] {
+			continue
+		}
+		seen[e.Uid] = true
+		entries = append(entries, e)
 	}
+	arg.Entries = entries
 	return holderTx(m, arg.ChannelID, "realtime.NotifyMembers",
 		func(m shared.MetaContext, tx pgx.Tx, ca *channelAuth, userdb shared.Querier) error {
 			if len(arg.Entries) == 0 {
@@ -357,7 +372,7 @@ func NotifyMembers(m shared.MetaContext, arg rem.RtNotifyMembersArg) error {
 				if !ok {
 					continue
 				}
-				readable, err := holderCanRead(m, tx, chid, e.Uid, role, ca.readRole, ca.private)
+				readable, err := canReadChannel(m, tx, chid, e.Uid, role, ca.readRole, ca.private)
 				if err != nil {
 					return err
 				}

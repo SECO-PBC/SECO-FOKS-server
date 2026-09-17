@@ -202,7 +202,7 @@ var queryAllowlist = map[string]allowedQueries{
 	"NotifyMembers": {1, "push notify (pushhold.go): inside holderTx, after " +
 		"authorizeChannel(accessRead) on the channel and the holder check; inserts a push row " +
 		"only for a uid that holds a delivery row AND clears the read role AND, for a private " +
-		"channel, holds an ACL row (holderCanRead). Returns nothing"},
+		"channel, holds an ACL row (canReadChannel). Returns nothing"},
 	"messageSender.run": {1, "send path; the msg_id EXISTS probe runs after lockChannel -> " +
 		"authorizeChannel(accessWrite), returns only a bool, and feeds two error " +
 		"paths (replay vs race). It is deliberately NOT channel-scoped -- msg_id is " +
