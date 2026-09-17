@@ -112,6 +112,20 @@ struct RTChannelAclEntry {
     ctime @3 : lib.Time;
 }
 
+// FORK-ONLY delegated push release (push holds). One (uid, seq) push row
+// the holder drops instead of releasing.
+struct RTPushDrop {
+    uid @0 : lib.UID;
+    seq @1 : lib.RTMsgSeq;
+}
+
+// One content-free push the holder queues for a member. handle is opaque
+// (at most 32 bytes) and travels to the push provider as-is; empty = none.
+struct RTPushNotify {
+    uid @0 : lib.UID;
+    handle @1 : Blob;
+}
+
 struct RTChannelSet {
     vers @0 : lib.RTChannelSetVersion;
     lst @1 : List(RTChannelMetadata);
@@ -287,4 +301,36 @@ protocol RealTime
     rtChannelMembers @202 (
         channelID @0 : lib.RTChannelID
     ) -> List(RTChannelAclEntry);
+
+    // FORK-ONLY delegated push release. A team admin may place a push hold
+    // on a (team, app), becoming its holder: while the holder is an active
+    // team member, every send into a channel the holder can read writes its
+    // push_outbox rows as 'held' instead of 'queued', and only the holder
+    // decides them. Clearing the hold (any team admin) releases every held
+    // row of the team.
+    rtSetPushHold @203 (
+        team @0 : lib.TeamID,
+        appID @1 : lib.RTAppID
+    );
+    rtClearPushHold @204 (
+        team @0 : lib.TeamID,
+        appID @1 : lib.RTAppID
+    );
+
+    // Holder only. For the channel's held rows with seq <= throughSeq: rows of
+    // `keep` members stay held, `drop` pairs are deleted, and of the rest each
+    // member's highest seq is queued and their lower seqs deleted. Idempotent.
+    rtReleasePushes @205 (
+        channelID @0 : lib.RTChannelID,
+        throughSeq @1 : lib.RTMsgSeq,
+        keep @2 : List(lib.UID),
+        drop @3 : List(RTPushDrop)
+    );
+
+    // Holder only. Queue one content-free 'system' push per entry whose member
+    // can read the channel; others are skipped.
+    rtNotifyMembers @206 (
+        channelID @0 : lib.RTChannelID,
+        entries @1 : List(RTPushNotify)
+    );
 }

@@ -124,6 +124,24 @@ var rpcAccessClass = map[string]rpcClassification{
 		channelData,
 		"TestPrivateGrantRequiresOwnerOrAdmin (row 12)",
 	},
+	"rtSetPushHold": {
+		noChannelData,
+		"team-scoped hold row only; admin-gated (TestPushHoldSetNeedsAdmin)",
+	},
+	"rtClearPushHold": {
+		noChannelData,
+		"team-scoped; releases push rows, returns nothing (TestPushHoldClearReleases)",
+	},
+	"rtReleasePushes": {
+		channelWrite,
+		"authorizeChannel(accessRead) + holder check; returns nothing " +
+			"(TestPushReleaseKeepDropCoalesce, TestPushReleaseNonHolderDenied)",
+	},
+	"rtNotifyMembers": {
+		channelWrite,
+		"authorizeChannel(accessRead) + holder check; skips members who cannot read " +
+			"the channel (TestPushNotifySkipsNonReaders)",
+	},
 }
 
 // protectedTables are the tables that hold channel data, message data, or
@@ -178,6 +196,13 @@ var queryAllowlist = map[string]allowedQueries{
 	"findMissingChannels": {2, "SET-BASED (inventory row 9): excludes private channels outright (AND NOT c.private)"},
 
 	// --- writes that run after the chokepoint authorized the caller ---
+	"releaseTeamHeld": {1, "push hold end (pushhold.go): selects only channel ids of the " +
+		"hold's own team to re-queue content-free push rows; returns nothing to any caller. " +
+		"Reached from ClearPushHold (team admin) or a send whose authorizeChannel passed"},
+	"NotifyMembers": {1, "push notify (pushhold.go): inside holderTx, after " +
+		"authorizeChannel(accessRead) on the channel and the holder check; inserts a push row " +
+		"only for a uid that holds a delivery row AND clears the read role AND, for a private " +
+		"channel, holds an ACL row (canReadChannel). Returns nothing"},
 	"messageSender.run": {1, "send path; the msg_id EXISTS probe runs after lockChannel -> " +
 		"authorizeChannel(accessWrite), returns only a bool, and feeds two error " +
 		"paths (replay vs race). It is deliberately NOT channel-scoped -- msg_id is " +

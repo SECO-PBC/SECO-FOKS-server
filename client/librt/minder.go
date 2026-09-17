@@ -2501,3 +2501,87 @@ func (d *Minder) ChannelMembers(
 	}
 	return cli.RtChannelMembers(m.Ctx(), chid)
 }
+
+// Fork-only delegated push release (server/realtime/pushhold.go).
+
+// pushHoldTeam resolves a team config to the TeamID the hold RPCs take.
+func (d *Minder) pushHoldTeam(m MetaContext, team lcl.ConfigTeam) (proto.TeamID, error) {
+	var zed proto.TeamID
+	if err := assertTeam(team); err != nil {
+		return zed, err
+	}
+	rtp, err := d.base.GetParty(m.Base(), team)
+	if err != nil {
+		return zed, err
+	}
+	fqt := rtp.plcn.FQParty().FQTeam()
+	if fqt == nil {
+		return zed, core.InternalError("teamID of chat party was unexpectedly nil")
+	}
+	return fqt.Team, nil
+}
+
+// SetPushHold places (or takes over) the team's push hold with the caller as
+// holder. Team admin only.
+func (d *Minder) SetPushHold(m MetaContext, team lcl.ConfigTeam, appID proto.RTAppID) error {
+	tid, err := d.pushHoldTeam(m, team)
+	if err != nil {
+		return err
+	}
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return err
+	}
+	return cli.RtSetPushHold(m.Ctx(), rem.RtSetPushHoldArg{Team: tid, AppID: appID})
+}
+
+// ClearPushHold removes the team's push hold, releasing every push it held.
+// Team admin only.
+func (d *Minder) ClearPushHold(m MetaContext, team lcl.ConfigTeam, appID proto.RTAppID) error {
+	tid, err := d.pushHoldTeam(m, team)
+	if err != nil {
+		return err
+	}
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return err
+	}
+	return cli.RtClearPushHold(m.Ctx(), rem.RtClearPushHoldArg{Team: tid, AppID: appID})
+}
+
+// ReleasePushes decides a channel's held pushes up to throughSeq. Holder only.
+func (d *Minder) ReleasePushes(
+	m MetaContext,
+	chid proto.RTChannelID,
+	throughSeq proto.RTMsgSeq,
+	keep []proto.UID,
+	drop []rem.RTPushDrop,
+) error {
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return err
+	}
+	return cli.RtReleasePushes(m.Ctx(), rem.RtReleasePushesArg{
+		ChannelID:  chid,
+		ThroughSeq: throughSeq,
+		Keep:       keep,
+		Drop:       drop,
+	})
+}
+
+// NotifyMembers queues one content-free push per entry whose member can read
+// the channel. Holder only.
+func (d *Minder) NotifyMembers(
+	m MetaContext,
+	chid proto.RTChannelID,
+	entries []rem.RTPushNotify,
+) error {
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return err
+	}
+	return cli.RtNotifyMembers(m.Ctx(), rem.RtNotifyMembersArg{
+		ChannelID: chid,
+		Entries:   entries,
+	})
+}

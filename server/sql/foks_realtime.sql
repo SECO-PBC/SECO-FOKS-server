@@ -22,7 +22,8 @@ CREATE TYPE msg_type AS ENUM(
 /* kind of push notification queued for APNs/FCM */
 CREATE TYPE notif_kind AS ENUM('msg', 'mention', 'read', 'system');
 
-CREATE TYPE push_status AS ENUM('queued', 'sending', 'done', 'failed');
+/* 'held' (fork-only, p7): written under a push hold; decided by the holder */
+CREATE TYPE push_status AS ENUM('queued', 'sending', 'done', 'failed', 'held');
 
 CREATE TYPE push_platform AS ENUM('apns', 'fcm');
 
@@ -301,6 +302,23 @@ CREATE TABLE push_outbox (
 );
 CREATE INDEX push_outbox_queue_idx ON push_outbox(status, ctime) WHERE status IN ('queued', 'sending');
 CREATE INDEX push_outbox_user_idx ON push_outbox(short_host_id, uid, ctime);
+/* fork-only (p8): the holder's release and hold-end scans */
+CREATE INDEX push_outbox_held_idx ON push_outbox(short_host_id, channel_id, uid, seq) WHERE status = 'held';
+
+/*
+ * push_holds (fork-only, p8): delegated push release. At most one per
+ * (team, app). While the holder is an active team member, a send into any
+ * channel of the team the holder can read writes 'held' push rows, which only
+ * the holder decides. Placing/clearing needs team admin.
+ */
+CREATE TABLE push_holds (
+    short_host_id SMALLINT NOT NULL,
+    team_id BYTEA NOT NULL,
+    app_id app_id NOT NULL,
+    holder_uid BYTEA NOT NULL,
+    ctime TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY(short_host_id, team_id, app_id)
+);
 
 /*
  * push_tokens: APNs/FCM tokens registered per device. enabled honors the
@@ -329,3 +347,5 @@ INSERT INTO schema_patches (id, ctime) VALUES (3, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (4, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (5, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (6, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (7, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (8, NOW());
