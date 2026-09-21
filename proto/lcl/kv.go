@@ -316,6 +316,7 @@ type KVConfig struct {
 	MtimeLower     *lib.TimeMicro
 	Recursive      bool
 	ActingAs       ConfigTeam
+	ChannelID      *lib.RTChannelID
 }
 type KVConfigInternal__ struct {
 	_struct        struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -330,6 +331,7 @@ type KVConfigInternal__ struct {
 	MtimeLower     *lib.TimeMicroInternal__
 	Recursive      *bool
 	ActingAs       *ConfigTeamInternal__
+	ChannelID      *lib.RTChannelIDInternal__
 }
 
 func (k KVConfigInternal__) Import() KVConfig {
@@ -406,6 +408,18 @@ func (k KVConfigInternal__) Import() KVConfig {
 			}
 			return x.Import()
 		})(k.ActingAs),
+		ChannelID: (func(x *lib.RTChannelIDInternal__) *lib.RTChannelID {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *lib.RTChannelIDInternal__) (ret lib.RTChannelID) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(k.ChannelID),
 	}
 }
 func (k KVConfig) Export() *KVConfigInternal__ {
@@ -430,6 +444,12 @@ func (k KVConfig) Export() *KVConfigInternal__ {
 		})(k.MtimeLower),
 		Recursive: &k.Recursive,
 		ActingAs:  k.ActingAs.Export(),
+		ChannelID: (func(x *lib.RTChannelID) *lib.RTChannelIDInternal__ {
+			if x == nil {
+				return nil
+			}
+			return (*x).Export()
+		})(k.ChannelID),
 	}
 }
 func (k *KVConfig) Encode(enc rpc.Encoder) error {

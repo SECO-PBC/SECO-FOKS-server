@@ -140,6 +140,7 @@ subsystem unrelated to anything we are proposing. Not worth the review cost.
 
 | Change | Why |
 |---|---|
+| KV channel-scoped storage (server + client) | Fork-only, and it always will be: it is built on `channel_acl`, which is the fork's private-channel ACL, and Max has said private channels are not on the upstream roadmap. `feat/kv-channel-acl` — p1 schema patch, `channelID` on three creation RPCs plus `kvChannelMkRoot @200`, the `authorizeKVNode*` chokepoint, creation tagging and containment, an inventory guard, and `lcl.KVConfig.channelID` through libkv. Design and decisions in `docs/kv-channel-acl.md`. Four defects found while building it went upstream on their own branches and are NOT fork-local: #371, #374, and the two in the jitter/CLKR rows. |
 | `.github/workflows/deploy.yml`, `scripts/deploy/*` | Our Hetzner deploy. Means nothing upstream. |
 | `.github/workflows/ci.yml` `GO_PKGS` scoping | We exclude `integration-tests/` because this workflow provisions no postgres. Upstream runs plain `./...`. |
 

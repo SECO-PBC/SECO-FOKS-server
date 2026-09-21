@@ -206,6 +206,7 @@ func (k *Minder) putFile(
 			mkdirP:         cfg.MkdirP,
 			writePerms:     writePerms,
 			writePermsRoot: kvp.DefaultRootPerms(),
+			channelID:      cfg.ChannelID,
 		}
 		dp, err := k.walkFromRoot(m, kvp, parentDir, wos)
 		if err != nil {
@@ -246,10 +247,10 @@ func (k *Minder) putFile(
 					WriteRole:   rp.Write,
 					DirentVers:  newDirent.Version - 1,
 					OverwriteOk: cfg.OverwriteOk,
-				})
+				}, cfg.ChannelID)
 		}
 		if !sn.uploaded {
-			err = k.uploadNode(m, kvp, sn.nid, sn.sfb)
+			err = k.uploadNode(m, kvp, sn.nid, sn.sfb, cfg.ChannelID)
 			if err != nil {
 				if qerr := queueOnTransport(err); qerr != nil {
 					return qerr
@@ -419,10 +420,11 @@ func (k *Minder) PutFileFirst(
 		}
 
 		arg := rem.KvFileUploadInitArg{
-			Auth:   *auth,
-			FileID: *fid,
-			Md:     md,
-			Chunk:  *ulc,
+			Auth:      *auth,
+			FileID:    *fid,
+			Md:        md,
+			Chunk:     *ulc,
+			ChannelID: cfg.ChannelID,
 		}
 		err = cli.KvFileUploadInit(m.Ctx(), arg)
 		if err != nil {

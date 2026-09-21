@@ -748,6 +748,7 @@ func (k *Minder) uploadDir(
 	m MetaContext,
 	kvp *KVParty,
 	kvd *proto.KVDir,
+	channelID *proto.RTChannelID,
 ) error {
 	if err := k.preRPCHook("uploadDir"); err != nil {
 		return err
@@ -759,8 +760,9 @@ func (k *Minder) uploadDir(
 	// The replay flag in the result is uninteresting here: a fresh directory
 	// ID is minted per call, so this client never replays a mkdir.
 	_, err = cli.KvMkdir(m.Ctx(), rem.KvMkdirArg{
-		Hdr: *hdr,
-		Dir: *kvd,
+		Hdr:       *hdr,
+		Dir:       *kvd,
+		ChannelID: channelID,
 	})
 	if sce := m.catchStaleCacheError(err); sce != nil {
 		return sce
@@ -772,6 +774,7 @@ func (k *Minder) makeEmptyDir(
 	m MetaContext,
 	kvp *KVParty,
 	rp proto.RolePair,
+	channelID *proto.RTChannelID,
 ) (
 	*DirPair,
 	*keyBundle,
@@ -781,7 +784,7 @@ func (k *Minder) makeEmptyDir(
 	if err != nil {
 		return nil, nil, err
 	}
-	err = k.uploadDir(m, kvp, kvd)
+	err = k.uploadDir(m, kvp, kvd, channelID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -801,7 +804,9 @@ func (k *Minder) mkRoot(
 	*DirPair,
 	error,
 ) {
-	ret, kb, err := k.makeEmptyDir(m, kvp, rp)
+	// The party root is never channel storage: it is the community's own
+	// tree, and a channel's subtree hangs beneath it (§7 H3).
+	ret, kb, err := k.makeEmptyDir(m, kvp, rp, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1442,6 +1447,7 @@ func (k *Minder) Mkdir(
 				needCreate:     true,
 				writePermsRoot: kvp.DefaultRootPerms(),
 				mkdirQ:         &qctx,
+				channelID:      cfg.ChannelID,
 			},
 		)
 		if err != nil {
@@ -1476,7 +1482,7 @@ func (k *Minder) Mkdir(
 					WriteRole:  rp.Write,
 					DirentVers: qctx.direntVers,
 					Dir:        qctx.dir,
-				}); qerr != nil {
+				}, cfg.ChannelID); qerr != nil {
 				return nil, qerr
 			}
 		}
@@ -1657,7 +1663,9 @@ func (k *Minder) unlinkInner(
 				ReadRole:   rp.Read,
 				WriteRole:  rp.Write,
 				DirentVers: tmp.Version - 1,
-			}); qerr != nil {
+				// An unlink creates nothing, so it carries no tag and queues
+				// like any other write, whatever it is unlinking.
+			}, nil); qerr != nil {
 			return qerr
 		}
 		return err
@@ -2151,4 +2159,97 @@ func (l *Lock) Release(m MetaContext) error {
 			Lock: l.KVLock,
 		})
 	})
+}
+
+// ChannelMkRoot creates a private channel's storage root and links it at
+// path (fork-only; docs/kv-channel-acl.md §7 H3).
+//
+// A channel's storage is one subtree of its community's KV store, and the
+// root is the single tagged directory the server allows beneath the
+// community's untagged tree. The three steps have to happen in this order,
+// which is why this is not just Mkdir with a tag:
+//
+//  1. create the directory, tagged, and unlinked. Creation is gated on
+//     channel membership, and the directory is already invisible to
+//     non-members from the moment it exists.
+//  2. register it, which needs ACL-owner or team-admin standing.
+//  3. link it into the community tree. Containment refuses a tagged
+//     directory under an untagged parent UNLESS it is the registered root --
+//     so linking before registering is refused, and Mkdir, which creates and
+//     links in one walk, cannot be used for the root at all.
+//
+// Registering the same root twice is a no-op, but this call creates a fresh
+// directory each time, so it is not itself idempotent: a second call for a
+// channel that already has a root fails at step 2, leaving an unlinked
+// directory behind that nothing can reach.
+//
+// Afterwards, ordinary Mkdir and PutFile calls carrying the same ChannelID
+// write inside the subtree.
+func (k *Minder) ChannelMkRoot(
+	m MetaContext,
+	cfg lcl.KVConfig,
+	channelID proto.RTChannelID,
+	path proto.KVPath,
+) (*proto.DirID, error) {
+	kvp, rp, err := k.initReqWrite(m, cfg)
+	if err != nil {
+		return nil, err
+	}
+	pap, err := kv.ParseAbsPath(path)
+	if err != nil {
+		return nil, err
+	}
+	parentPath, comp, err := pap.Split()
+	if err != nil {
+		return nil, err
+	}
+
+	var ret *proto.DirID
+	err = k.retryCacheLoop(m, kvp, func(m MetaContext) error {
+		// (1) create, tagged and unlinked.
+		dp, _, err := k.makeEmptyDir(m, kvp, *rp, &channelID)
+		if err != nil {
+			return err
+		}
+		dirID := dp.Id()
+
+		// (2) register, before anything can link it.
+		auth, cli, err := k.client(m, kvp)
+		if err != nil {
+			return err
+		}
+		err = cli.KvChannelMkRoot(m.Ctx(), rem.KvChannelMkRootArg{
+			Auth:      *auth,
+			ChannelID: channelID,
+			DirID:     dirID,
+		})
+		if err != nil {
+			return err
+		}
+
+		// (3) link it where the caller asked. The parent is ordinary
+		// community storage, so this walk carries no tag.
+		parent, err := k.walkFromRoot(m, kvp, parentPath, walkOpts{
+			mkdirP:         cfg.MkdirP,
+			writePerms:     rp,
+			writePermsRoot: kvp.DefaultRootPerms(),
+		})
+		if err != nil {
+			return err
+		}
+		if parent.dir == nil {
+			return core.InternalError("unexpected nil directory")
+		}
+		_, err = k.linkNode(m, kvp, parent.dir, comp, *dirID.KVNodeID(),
+			linkNodeOpts{perms: *rp, overwriteOk: cfg.OverwriteOk})
+		if err != nil {
+			return err
+		}
+		ret = &dirID
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ret, nil
 }

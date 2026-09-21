@@ -36,6 +36,12 @@ struct KVConfig {
     mtimeLower @8 : Option(lib.TimeMicro);
     recursive @9 : Bool;
     actingAs @10 : ConfigTeam;
+    // Fork-only (docs/kv-channel-acl.md): when set, nodes created by this
+    // operation -- including any intermediate directories mkdirP makes --
+    // are tagged as that private channel's storage. The server requires the
+    // caller to hold a channel_acl row, and the tag is immutable afterward.
+    // None is ordinary party storage, which is upstream's only behaviour.
+    channelID @11 : Option(lib.RTChannelID);
 }
 
 struct GetFileChunkRes {

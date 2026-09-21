@@ -264,6 +264,46 @@ file is ~256 chunks and ~256 extra lookups across a full download, each a
 single-row indexed read on an already-open pooled connection. The ACL check
 adds a second, to a different database (§2.6).
 
+### 4.4 Creating a channel's storage root has a forced ordering
+
+Discovered building K6, and worth stating because it is not obvious and it
+shapes the client API.
+
+`Mkdir` creates a directory **and links it** in one walk. The channel root
+cannot be made that way: containment refuses a tagged directory under an
+untagged parent unless it is the *registered* root, and registration needs the
+directory to already exist. Create-then-link therefore fails at the link, and
+there is no ordering of those two steps alone that works.
+
+`Minder.ChannelMkRoot` does the three in the only order that does:
+
+1. create the directory, tagged and **unlinked** — membership-gated, and
+   already invisible to non-members from the moment it exists (§7 H3);
+2. register it — ACL-owner or team-admin standing;
+3. link it into the community tree, which containment now permits.
+
+It is deliberately not idempotent: step 1 mints a fresh directory each call, so
+a second call for a channel that already has a root fails at step 2 and leaves
+an unreachable directory behind. Callers should create a root once.
+
+### 4.5 Channel storage cannot be created offline
+
+The client declines to queue a channel-tagged creation, and the caller gets the
+transport error rather than a "queued" success.
+
+Two reasons, either sufficient. The server tags a node only after checking the
+caller holds a `channel_acl` row, which is a membership question a client that
+cannot reach the server cannot answer — it may have been revoked since it last
+synced. And `lcl.KVOutboxPayload` carries no tag, so a queued tagged creation
+could only drain *untagged*, putting a private channel's data in the
+community's tree where every member can read it: the exact failure this
+document exists to prevent, arriving silently.
+
+Declining is also the honest answer to the user, who is told the write did not
+happen instead of being told it was saved. Adding a tag to the outbox payload
+later is additive and would let this be revisited — but it would still need the
+membership question answered at drain time, not at queue time.
+
 ### 4.3 The fork dependency — settle this before K1
 
 `main` of this fork does not have #371. Building §§5–9 on it ships an ACL with
@@ -571,7 +611,7 @@ Q2, Q3 and Q5 do not block anything and can be settled while K2 is written.
 | ~~K3~~ | **Done.** Creation tagging on all three creation RPCs, gated by `authorizeKVNodeCreate` (membership, so H3 holds: a node is tagged at the instant it exists and a non-member cannot mint one). Containment enforced in `direntUpdater.checkContainment` on every link, both directions, with the registered root as the single crossing. `channel_kv_root` written by `kvChannelMkRoot` (shipped in K2). **H1 came out simpler than planned**: there is no rotation path in `server/kv-store` at all — `putDir` rejects any version but 1, and `channel_id` is written by exactly three INSERTs and never by an UPDATE — so the tag is immutable by construction rather than by copy-forward logic. `TestChannelTagIsWriteOnce` (no DB, runs in CI) fails the build if that stops being true, which is the message to whoever implements rotation. Both replay comparisons weigh the tag, so resending a creation cannot relabel a node. Eight-mutation matrix, each caught. | — |
 | ~~K4~~ | **Done**, alongside K2/K3 rather than after. `kv_channel_acl_test.go` (read gate, mkroot standing) and `kv_channel_create_test.go` (creation membership, orphan protection, containment both ways + root crossing, hardlink refusal, tag immutability on replay for both small files and directories). The K3 tests drive the raw RPCs: libkv does not carry a channel tag yet, and the wire is what the guarantee actually rests on. | — |
 | ~~K5~~ | **Done** (`server/kv-store/kv_inventory_test.go`), modelled on the realtime guard. Two halves: every KVStore RPC must be classified with a covering test, and every query against a protected table must sit in an allowlisted function **at a signed-off reference count** — the count is what catches a second query slipped into a function that is already full of this SQL. Protected tables include `channel_acl` and `channels`, because acl.go reads them across databases and a second path doing that on its own is as dangerous as an ungated node read. Four mutations checked: a new unguarded function, an extra query inside an allowlisted one, a new unclassified RPC, and a stale entry. Both halves have anti-vacuity floors, so a parser drift fails rather than passing silently. **Found while writing it:** `kvFileUploadChunk` reached the file by ID with no ACL check at all — fixed in `assertUploading`, the one place that path loads the row. | — |
-| K6 | libkv/librt wrappers so clients can pass a channel tag (the server takes one today, no client does); fork PR; tag; app pins | 1 day |
+| ~~K6~~ | **Client plumbing done.** `lcl.KVConfig.channelID @11` carries the tag through the ordinary libkv API; it reaches the three creation RPCs and, via `walkOpts.channelID` **through `forLast`**, every intermediate directory `mkdirP` makes — without that, the intermediates are created untagged and the server refuses to link them under a tagged parent, so the whole flow fails for a reason no server-side test would show. `Minder.ChannelMkRoot` sets a channel's subtree up; see §4.4 for the ordering it exists to solve. Channel-tagged writes are **never queued offline** (§4.5). `TestKvChannelClientEndToEnd` drives the whole thing through the client API and mutation-checks each of the three plumbing points. **Not done:** fork PR, tag, app pins — those wait on a human. | — |
 
 **`SECO-UPSTREAM.md` is not optional (AGENTS.md, "the one rule").** Two rows,
 each written in the change that makes it true, not afterwards:

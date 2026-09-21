@@ -33,6 +33,14 @@ type walkOpts struct {
 	// failed on transport, so Mkdir can queue it (docs/kv_offline.md D3).
 	// Only the walk's dir-create step fills it.
 	mkdirQ *mkdirQueueCtx
+
+	// channelID tags every directory this walk creates as a private
+	// channel's storage (docs/kv-channel-acl.md). It has to survive into
+	// forLast: mkdirP makes the intermediate directories of a path too, and
+	// the server refuses to link an untagged directory under a tagged
+	// parent, so a tag that applied only to the leaf would fail the walk it
+	// was meant to serve.
+	channelID *proto.RTChannelID
 }
 
 // mkdirQueueCtx is what an interrupted dir-create leaves behind for the
@@ -59,6 +67,7 @@ func (wo walkOpts) forLast(last bool) walkOpts {
 		ret.writePerms = wo.writePerms
 	}
 	ret.mkdirQ = wo.mkdirQ
+	ret.channelID = wo.channelID
 	return ret
 }
 
@@ -387,7 +396,7 @@ func (k *Minder) walkOne(
 			opts.mkdirQ.leaf = len(rest) == 0
 		}
 	}
-	err = k.uploadDir(m, kvp, kvd)
+	err = k.uploadDir(m, kvp, kvd, opts.channelID)
 	if err != nil {
 		fillQ(err)
 		return nil, err
