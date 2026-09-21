@@ -146,6 +146,13 @@ func TestKvChannelAclReadGate(t *testing.T) {
 	require.Error(t, errReal)
 	require.Equal(t, errGhost, errReal, "kvGetNode: masked exactly as absent")
 
+	// A tombstone node ID is a legal value that names no node; it must
+	// answer rather than crash the server (upstream #374).
+	var tombstone proto.KVNodeID
+	require.NoError(t, core.RandomFill(tombstone[1:]))
+	_, err = cliC.KvGetNode(mCr.Ctx(), rem.KvGetNodeArg{Auth: authC, Id: tombstone})
+	require.Error(t, err, "a tombstone node ID must answer, not crash")
+
 	_, errReal = cliC.KvGetEncryptedChunk(mCr.Ctx(), rem.KvGetEncryptedChunkArg{
 		Auth: authC, Id: k.fileID, Offset: proto.Offset(testChunkSize)})
 	_, errGhost = cliC.KvGetEncryptedChunk(mCr.Ctx(), rem.KvGetEncryptedChunkArg{

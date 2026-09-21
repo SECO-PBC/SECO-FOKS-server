@@ -797,6 +797,14 @@ func loadNode(
 		}
 		tmp := rem.NewKVGetNodeResWithDir(*dir)
 		ret = &tmp
+	default:
+		// KVNodeType_None is a tombstone, which is a legal value of the type
+		// -- Type() returns it without error -- but not a node anyone can
+		// load. Without this arm ret stays nil and the caller dereferences
+		// it. A default rather than a None case so that a node type added to
+		// the enum later fails loudly here instead of panicking in the
+		// handler. Also upstream as #374.
+		return nil, core.BadArgsError("cannot load a node of this type")
 	}
 	return ret, nil
 }
