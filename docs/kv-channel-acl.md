@@ -277,9 +277,9 @@ file's bytes, and the team PTK opens them. Pick one, and say which in the
   later, which is how `Upstreamed` rows already behave. Unblocks immediately;
   costs one temporary duplicate row in the tracker.
 
-Recommendation: **cherry-pick**. The checks are small, already tested, and the
-ACL is unsound without them — waiting couples our schedule to a review queue
-for no benefit.
+**DECIDED 2026-09-21 (Stefan): cherry-pick.** Done — `git cherry-pick -x
+9ae9458` on `feat/kv-channel-acl`, all four large-file tests green against the
+fork tree, and the #371 tracker row says the fork now carries the commit.
 
 ## 5. One chokepoint
 
@@ -537,20 +537,16 @@ source-greps `server/kv-store/*.go` for queries against `dir`, `dirent`,
 `large_file`, `large_file_chunk`, `small_file_or_symlink` outside an allowlist
 of classified call sites.
 
-## 10. Open questions — need a product call, not a code fix
+## 10. Decisions — Q1 and Q4 RESOLVED 2026-09-21 (Stefan)
 
-**Two of these block K1, and one blocks §4.3.** Q1 decides what
-`authorizeKVNode` does for an admin non-member, which is the chokepoint's
-signature; Q4 decides whether channel deletion cascades, which decides whether
-`channel_kv_root` needs an owning-side delete. Q2, Q3 and Q5 do not block
-anything and can be settled while K2 is being written.
+Q2, Q3 and Q5 do not block anything and can be settled while K2 is written.
 
 | # | Question | Recommendation |
 |---|---|---|
-| Q1 | May team admins read a private channel's storage without joining? | **No** — match §6.1 of the messages doc: an admin self-grants, visibly, via `granted_by`. Storage must not be a quieter back door than messages. |
+| Q1 | May team admins read a private channel's storage without joining? | **DECIDED: No.** An admin self-grants, visibly via `granted_by`, exactly as for messages (§6.1 of the messages doc). Storage is not a quieter back door. Consequence for §5: `authorizeKVNode` has no admin bypass for reads — admin standing matters only to the management kind (`kvChannelMkRoot`, and revocation via the existing realtime RPCs). |
 | Q2 | Does `kvUsage @17` leak a channel's aggregate size to non-members? (§6 row 15) | **Answered by code: no new leak. Accept, change nothing.** `getUsage` (`usage.go:277`) returns five party-wide totals with no per-node breakdown, so it cannot attribute bytes to a channel. A member polling it can infer *that* the community stored something — already true today for admin-tier content they cannot read. Subtracting tagged nodes would cost a scan and buy nothing. |
 | Q3 | Is the daemon granted channel storage when it is granted the channel? | Follows Q3 of the messages doc — not by default; surface it in the grant UI, because storage widens what its corpus ingests. |
-| Q4 | Quota and garbage collection | **Mostly answered by code; one real gap.** GC is refcount-driven and channel-agnostic (`dir_refcount`, `large_file.refcount`, `small_file_or_symlink.refcount`, with the `*_mtime_gc_idx` partial indexes on `refcount = 0`), so a tagged node that is unlinked is collected exactly as an untagged one is — tagging does not interfere. The gap is **who unlinks it**: storage is charged to the community, and if a channel's last ACL member is revoked, nobody holds access to unlink the subtree and it lingers against the community's quota forever. The path already exists — a team admin self-grants (§6.1 of the messages doc, visibly via `granted_by`) and then deletes — but it must be an explicit step in channel deletion, not an assumption. **Decide: does deleting a private channel cascade to its storage?** Recommendation: yes, in the same transaction that deletes the channel. |
+| Q4 | Quota and garbage collection | **Mostly answered by code; one real gap.** GC is refcount-driven and channel-agnostic (`dir_refcount`, `large_file.refcount`, `small_file_or_symlink.refcount`, with the `*_mtime_gc_idx` partial indexes on `refcount = 0`), so a tagged node that is unlinked is collected exactly as an untagged one is — tagging does not interfere. The gap is **who unlinks it**: storage is charged to the community, and if a channel's last ACL member is revoked, nobody holds access to unlink the subtree and it lingers against the community's quota forever. The path already exists — a team admin self-grants (§6.1 of the messages doc, visibly via `granted_by`) and then deletes — but it must be an explicit step in channel deletion, not an assumption. **DECIDED: yes, deletion cascades to storage** — with the caveat, verified 2026-09-21, that FOKS has no channel deletion today (no delete/archive RPC in `proto-src/rem/realtime.snowp`, no `DELETE FROM channels` anywhere in `server/`). So this is a standing rule binding whichever change introduces deletion, not work in this plan: v1 ships no storage-delete path and `channel_kv_root` rows are written once and never removed. Whoever builds channel deletion owns the cascade, and this row is the reminder. |
 | Q5 | Merkle sub-trees (§2.5) | When they land they must cover tagged nodes without disclosing their existence to non-members. Raise it with Max as a *design* input now, while it is still on paper and cheap to shape. |
 
 ## 11. Implementation plan
@@ -558,8 +554,8 @@ anything and can be settled while K2 is being written.
 | Phase | Work | Est. |
 |---|---|---|
 | ~~K0~~ | ~~§4 — the two missing large-file read checks~~ **Done**, as [#371](https://github.com/foks-proj/go-foks/pull/371), from `upstream/main`. | — |
-| **K0b** | **Carry #371 into this fork** (§4.3), by cherry-pick or by waiting for the upstream merge. **Blocks everything below** — the ACL is unsound without it. | ½ day |
-| K1 | Decide Q1 and Q4 (§10); patch `p1.sql` with its three-file registration; proto + `kvChannelMkRoot @200`; codegen | 1 day |
+| ~~K0b~~ | ~~Carry #371 into this fork~~ **Done** — cherry-picked (§4.3) on `feat/kv-channel-acl`, tests green. | — |
+| K1 | ~~Decide Q1 and Q4~~ (decided, §10); patch `p1.sql` with its three-file registration; proto + `kvChannelMkRoot @200`; codegen. `KvChannelMkRoot` lands as a `NotImplementedError` stub so the tree compiles; its authorization is K2's chokepoint. | 1 day |
 | K2 | `authorizeKVNode` chokepoint; migrate read paths 1–6, 11–12 | 1–1½ days |
 | K3 | Creation tagging + containment at link (paths 7–10); `channel_kv_root` | 1 day |
 | K4 | Tests §9.1–9.3, written alongside K2–K3, not after | 1½–2 days |

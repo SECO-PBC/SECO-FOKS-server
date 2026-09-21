@@ -419,6 +419,14 @@ func (c *ClientConn) KvLockRelease(
 		})
 }
 
+// KvChannelMkRoot registers a directory as a private channel's storage root
+// (fork-only; docs/kv-channel-acl.md). Wired here so the K1 schema+proto
+// change compiles; the authorization (ACL owner or team admin, through the
+// authorizeKVNode chokepoint) and the channel_kv_root write land with K2/K3.
+func (c *ClientConn) KvChannelMkRoot(ctx context.Context, arg rem.KvChannelMkRootArg) error {
+	return core.NotImplementedError{}
+}
+
 func (c *ClientConn) KvUsage(
 	ctx context.Context,
 	arg rem.KVAuth,
