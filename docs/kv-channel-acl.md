@@ -112,7 +112,12 @@ everyone at viz 20. Mutually-isolated siblings are not expressible. Privacy must
 therefore be a **second, orthogonal axis** — exactly the conclusion
 `rt-private-channel-acl.md` §4.1 reached for `tier`, for a different reason.
 
-### 2.4 The read gate is NOT uniform today: large files have no server check
+### 2.4 The read gate was NOT uniform: large files had no server check
+
+**Status (2026-09-21): fixed upstream in [#371](https://github.com/foks-proj/go-foks/pull/371), NOT yet in this fork.** The
+table below is what the code looked like when this was written and is still
+what `main` of this fork does — see §4, which is now a dependency rather than a
+plan.
 
 | Path | Server-side role check |
 |---|---|
@@ -138,7 +143,8 @@ it leaks existence, size and chunk count to anyone who knows an id.
 
 **Under this design it becomes a real hole**, because the key is the *team's*
 PTK at a role every community member holds. Ciphertext served to a
-non-channel-member is plaintext to them. §4 closes it.
+non-channel-member is plaintext to them. §4 is the fix, and §4.3 is what
+stands between this fork and having it.
 
 **There are two routes in, not one.** `kvGetNode @10` reaches
 `loadLargeFileMetadata` directly, and `kvGet @9` reaches it through
@@ -161,6 +167,16 @@ callers.
 `DbTypeUsers` for `CheckTeamVOBearerToken` and then switches to
 `m.KVShard(pid)`. Reading `channel_acl` from `DbTypeRealTime` is a third
 connection in an existing pattern, not a new architecture.
+
+**Verified, because the build depends on it.** `GlobalContext.dbPool`
+(`server/shared/db.go:30`) creates pools lazily from `cfg.DbConfig(which)`, and
+the config is one `db` block shared by every server process —
+`conf/srv/foks.jsonnet:103` lists `foks_realtime` alongside the rest. So the
+kv-store process can open it with no config change. Note the asymmetry: the KV
+store is **sharded** (`db_kv_shards`, two shards in our config) while realtime
+is a single database, so every tagged-node check crosses from a sharded pool to
+an unsharded one. That is fine, and it is the reason the next paragraph's
+caveat is not avoidable by tidier plumbing.
 
 The real cost is the one `rt-private-channel-acl.md` §6.3 already names: **there
 is no cross-database transaction.** A revoke committing between the ACL read and
@@ -206,49 +222,64 @@ table, one row per file, and `large_file_chunk` already carries a foreign key to
 it. `large_file_key` is per *version*, so a rotation would have to carry the tag
 forward — a second place to lose it. **Tag identity, not versions.**
 
-## 4. Closing the large-file hole (§2.4)
+## 4. The large-file read checks — done upstream, NOT yet in this fork
 
-Two fixes. **Ship them first, on their own merits, before any of this design.**
-They are a pre-existing gap, they stand alone, and the ACL is unsound without
-them.
+**This is a dependency, not a plan.** It shipped as
+[foks-proj/go-foks#371](https://github.com/foks-proj/go-foks/pull/371), opened
+2026-09-21 from `upstream-pr/kv-large-file-read-checks`, cut from
+`upstream/main`. That branch is **not** this fork's `main`: `getChunk` on our
+`main` is still the unchecked version. See §4.3 — nothing in §§5–9 is sound
+until the fork carries these checks.
 
-**4.1 `loadLargeFileMetadata` (`file.go:548`).** The role is already loaded into
-`ret.Rg.Role`. Add the check that every sibling loader already makes:
+**4.1 `loadLargeFileMetadata`.** It reads `read_role_type` /
+`read_role_viz_level` out of `large_file_key`, copies them into the response
+and returns the key box; the check every sibling loader makes was missing.
 
-```go
-err = assertAtOrAbove(role, ret.Rg.Role, proto.KVOp_Read, proto.KVNodeType_File)
-if err != nil {
-    return nil, err
-}
-```
+**The check must run BEFORE the status switch, and that is not cosmetic.** A
+review pass found the obvious placement — at the end, where the role has been
+imported — still leaks: `KVUploadInProgressError` and `KVNoentError` are
+returned from the switch above it, so a caller under the read role learns
+whether a file it may not read is mid-upload, deleted or live, and can tell an
+existing file from a missing one. As shipped, the role is imported into a local
+immediately after the row loads and checked there; the key box is not decoded
+for a caller that is about to be refused.
 
-**4.2 `getChunk` (`file.go:635`).** Today it takes `role` and discards it. It
-must resolve the file before serving bytes:
+**4.2 `getChunk`.** It took a `role` and discarded it, and
+`BlobSQLStorage.Get` selects a chunk by file ID with no permission predicate.
+As shipped it resolves the file's read role through a new
+`loadLargeFileReadRole` helper — one indexed read of the current
+`large_file_key` row, without loading the key box — and checks it before
+serving bytes. **This design adds the ACL check at the same point**, reading
+`large_file.channel_id` (§3).
 
-```go
-func getChunk(m, lfe, db, pid, role, arg) (*rem.GetEncryptedChunkRes, error) {
-    // one PK lookup on large_file for channel_id, plus the current
-    // large_file_key row for the read role
-    gate, err := loadLargeFileGate(m, db, pid, arg.Id)   // new
-    if err != nil { return nil, err }
-    if err := assertAtOrAbove(role, gate.readRole, proto.KVOp_Read, proto.KVNodeType_File); err != nil {
-        return nil, err
-    }
-    if err := authorizeKVNode(m, rtdb, gate.channelID, accessRead); err != nil {
-        return nil, err
-    }
-    return lfe.Get(m, db, pid, arg.Id, arg.Offset)
-}
-```
+**Test both RPCs separately, and drive `kvGetEncryptedChunk` directly.**
+`libkv`'s `GetFileChunk` loads the file's metadata before asking for a chunk,
+so once 4.1 is in place the chunk RPC is unreachable through the client API: a
+test written that way passes with 4.2's check removed and pins nothing. The
+server must not depend on a client asking for metadata first. The same applies
+to the ACL checks this design adds on top.
 
-**Cost, measured against the real chunk size.** `MaxInputFileChunkSize` is 4 MB
-(`lib/kv/constants.go:11`), so a 1 GB file is ~256 chunks and therefore ~256
-extra lookups across a full download. Each is a single-row primary-key read on
-an already-open pooled connection. Negligible beside moving 1 GB, and it buys
-the only gate that exists on that path.
+**Cost.** `MaxInputFileChunkSize` is 4 MB (`lib/kv/constants.go:11`), so a 1 GB
+file is ~256 chunks and ~256 extra lookups across a full download, each a
+single-row indexed read on an already-open pooled connection. The ACL check
+adds a second, to a different database (§2.6).
 
-**Do not skip 4.1 as redundant once 4.2 lands.** They are different RPCs
-(`kvGetNode @10` and `kvGetEncryptedChunk @11`) reached by different callers.
+### 4.3 The fork dependency — settle this before K1
+
+`main` of this fork does not have #371. Building §§5–9 on it ships an ACL with
+a hole under it: a community member who knows a file ID reads any tagged large
+file's bytes, and the team PTK opens them. Pick one, and say which in the
+`SECO-UPSTREAM.md` row:
+
+- **Wait for #371 to merge** and arrive on the next upstream merge. Zero
+  divergence, but the ACL work is blocked on maxtaco's queue.
+- **Cherry-pick #371's commit onto the fork now** and let the merge drop it
+  later, which is how `Upstreamed` rows already behave. Unblocks immediately;
+  costs one temporary duplicate row in the tracker.
+
+Recommendation: **cherry-pick**. The checks are small, already tested, and the
+ACL is unsound without them — waiting couples our schedule to a review queue
+for no benefit.
 
 ## 5. One chokepoint
 
@@ -286,8 +317,8 @@ tables for a caller and is not in this table is a bug.
 | 2 | `listDir` (`dirent.go:452`) | dirents | read role on dir | + ACL on the dir |
 | 3 | `loadDirentByID` (`dirent.go:155`) | one dirent | read role on parent dir | + ACL on the parent dir |
 | 4 | small files / symlinks (`file.go:748`) | key box + data box | read role | + ACL on `small_file_or_symlink.channel_id` |
-| 5 | **`loadLargeFileMetadata` (`file.go:548`)** | key box | **none** | **read role (§4.1) + ACL** |
-| 6 | **`getChunk` (`file.go:635`)** | file bytes | **none** | **read role + ACL (§4.2)** |
+| 5 | `loadLargeFileMetadata` (`file.go:548`) | key box | read role, **ahead of the status switch** (#371; not yet in this fork, §4.3) | + ACL on `large_file.channel_id` |
+| 6 | `getChunk` (`file.go:635`) | file bytes | read role via `loadLargeFileReadRole` (#371; not yet in this fork, §4.3) | + ACL on `large_file.channel_id` |
 | 7 | `putDirent` (`dirent.go:197`) | writes | write + read role on parent | + ACL + containment (H3) |
 | 8 | `mkdir` (`dir.go:91`) | writes | write role | + ACL at creation (H3) |
 | 9 | `putSmallFileOrSymlink` (`file.go:96`) | writes | read role on the box | + ACL at creation (H3) |
@@ -508,6 +539,12 @@ of classified call sites.
 
 ## 10. Open questions — need a product call, not a code fix
 
+**Two of these block K1, and one blocks §4.3.** Q1 decides what
+`authorizeKVNode` does for an admin non-member, which is the chokepoint's
+signature; Q4 decides whether channel deletion cascades, which decides whether
+`channel_kv_root` needs an owning-side delete. Q2, Q3 and Q5 do not block
+anything and can be settled while K2 is being written.
+
 | # | Question | Recommendation |
 |---|---|---|
 | Q1 | May team admins read a private channel's storage without joining? | **No** — match §6.1 of the messages doc: an admin self-grants, visibly, via `granted_by`. Storage must not be a quieter back door than messages. |
@@ -520,8 +557,9 @@ of classified call sites.
 
 | Phase | Work | Est. |
 |---|---|---|
-| **K0** | **§4 alone** — the two missing large-file read checks, plus tests. Ships independently, no ACL, no schema change. | ½ day |
-| K1 | Resolve §6 rows 12/14 and Q4; patch `p1.sql` with its three-file registration; proto + `kvChannelMkRoot`; codegen | 1 day |
+| ~~K0~~ | ~~§4 — the two missing large-file read checks~~ **Done**, as [#371](https://github.com/foks-proj/go-foks/pull/371), from `upstream/main`. | — |
+| **K0b** | **Carry #371 into this fork** (§4.3), by cherry-pick or by waiting for the upstream merge. **Blocks everything below** — the ACL is unsound without it. | ½ day |
+| K1 | Decide Q1 and Q4 (§10); patch `p1.sql` with its three-file registration; proto + `kvChannelMkRoot @200`; codegen | 1 day |
 | K2 | `authorizeKVNode` chokepoint; migrate read paths 1–6, 11–12 | 1–1½ days |
 | K3 | Creation tagging + containment at link (paths 7–10); `channel_kv_root` | 1 day |
 | K4 | Tests §9.1–9.3, written alongside K2–K3, not after | 1½–2 days |
@@ -531,8 +569,10 @@ of classified call sites.
 **`SECO-UPSTREAM.md` is not optional (AGENTS.md, "the one rule").** Two rows,
 each written in the change that makes it true, not afterwards:
 
-- **K0** → a `Proposed` row the day its upstream PR opens, with the number and
-  the one-line why. It is a defect fix in upstream code and is not fork-specific.
+- **K0** → done: the `Proposed` row for [#371](https://github.com/foks-proj/go-foks/pull/371) is in the tracker (on
+  `docs/kv-channel-acl`). If K0b is taken by cherry-pick rather than by waiting,
+  the row must say so, because the fork will then carry a commit that is also
+  in flight upstream.
 - **This design** → a `Local` row **with the reason**: it depends on
   `channel_acl`, which is fork-only and which Max has said is not on the
   roadmap. That keeps it decided instead of re-litigated.
@@ -549,11 +589,12 @@ what it is actually used for — is a follow-up spec and not on this critical pa
 - *Is a fork-only column on a shared table safe?* — our call; nullable with no
   backfill, same shape as `channels.private`.
 
-**Worth sending as a report, not a question:** §2.4. `loadLargeFileMetadata` and
-`getChunk` have no server-side read check while every sibling loader does. The
-asymmetry reads as an oversight rather than a decision, and §4 is a small,
-self-contained fix that stands on its own merits upstream — **independently of
-this fork-only design**, which is why K0 ships first.
+**Sent, 2026-09-21:** §2.4 went upstream as
+[#371](https://github.com/foks-proj/go-foks/pull/371) rather than as a question
+— a fix with tests reads better than a bug report, and it stands on its own
+merits independently of this fork-only design. Framed there as a missing check
+rather than a data leak, since confidentiality does hold while the key is
+per-role. Open; §4.3 says what to do while it is.
 
 **Genuinely only-Max:** Q5 (merkle sub-trees over tagged nodes), and the
 standing per-channel-key question that would turn §1's policy row into a
