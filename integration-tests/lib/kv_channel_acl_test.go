@@ -289,27 +289,17 @@ func TestKvChannelMkRootAuthorization(t *testing.T) {
 	// root is a replay for her too.
 	require.NoError(t, mkroot(sc.dara.u, sc.chid, k.rootID))
 
-	// A different directory for a channel that has a root is refused.
-	mA, kvA := k.kvFor(t, sc.alice.u)
-	other, err := core.RandomDomain()
+	// A different directory for a channel that has a root is refused. It is
+	// created through the tagging path rather than planted, and left
+	// unlinked: registration is about the directory, not about where it
+	// hangs.
+	otherID, err := mkdirRaw(t, k, sc.alice.u, &sc.chid)
 	require.NoError(t, err)
-	otherID, err := kvA.Mkdir(mA, k.cfg, proto.KVPath("/"+other))
-	require.NoError(t, err)
-	m := sc.tew.MetaContext()
-	kvdb, err := m.KVShard(k.pid)
-	require.NoError(t, err)
-	defer kvdb.Release()
-	_, err = kvdb.Exec(m.Ctx(),
-		`UPDATE dir SET channel_id=$1 WHERE short_host_id=$2 AND short_party_id=$3 AND dir_id=$4`,
-		k.chid, int(m.ShortHostID()), k.pid.Shorten().ExportToDB(), otherID.ExportToDB())
-	require.NoError(t, err)
-	require.Error(t, mkroot(sc.alice.u, sc.chid, *otherID))
+	require.Error(t, mkroot(sc.alice.u, sc.chid, otherID))
 
 	// An untagged directory is refused even for the owner: creation is the
 	// membership-gated act, registration only blesses what members made.
-	untagged, err := core.RandomDomain()
+	untaggedID, err := mkdirRaw(t, k, sc.alice.u, nil)
 	require.NoError(t, err)
-	untaggedID, err := kvA.Mkdir(mA, k.cfg, proto.KVPath("/"+untagged))
-	require.NoError(t, err)
-	require.Error(t, mkroot(sc.alice.u, sc.chid, *untaggedID))
+	require.Error(t, mkroot(sc.alice.u, sc.chid, untaggedID))
 }

@@ -238,9 +238,13 @@ func (c *ClientConn) KvMkdir(ctx context.Context, arg rem.KvMkdirArg) (rem.KVMkd
 	var res rem.KVMkdirRes
 	err := c.preamble(ctx, arg.Hdr,
 		func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, role proto.Role) error {
+			chid, err := authorizeKVNodeCreate(m, pid, arg.ChannelID)
+			if err != nil {
+				return err
+			}
 			return shared.RetryTx(m, db, "kvMkdir",
 				func(m shared.MetaContext, tx pgx.Tx) error {
-					wasReplay, err := putDir(m, tx, pid, role, &arg.Dir)
+					wasReplay, err := putDir(m, tx, pid, role, &arg.Dir, chid)
 					if err != nil {
 						return err
 					}
@@ -278,9 +282,13 @@ func (c *ClientConn) KvPutSmallFileOrSymlink(ctx context.Context, arg rem.KvPutS
 	var res rem.KVPutSmallFileOrSymlinkRes
 	err := c.auth(ctx, arg.Auth,
 		func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, role proto.Role) error {
+			chid, err := authorizeKVNodeCreate(m, pid, arg.ChannelID)
+			if err != nil {
+				return err
+			}
 			return shared.RetryTx(m, db, "kvPutFile",
 				func(m shared.MetaContext, tx pgx.Tx) error {
-					wasReplay, err := putSmallFileOrSymlink(m, tx, pid, role, arg)
+					wasReplay, err := putSmallFileOrSymlink(m, tx, pid, role, arg, chid)
 					if err != nil {
 						return err
 					}
@@ -324,9 +332,13 @@ func (c *ClientConn) KvGet(ctx context.Context, arg rem.KvGetArg) (rem.KVGetRes,
 func (c *ClientConn) KvFileUploadInit(ctx context.Context, arg rem.KvFileUploadInitArg) error {
 	return c.auth(ctx, arg.Auth,
 		func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, role proto.Role) error {
+			chid, err := authorizeKVNodeCreate(m, pid, arg.ChannelID)
+			if err != nil {
+				return err
+			}
 			return shared.RetryTx(m, db, "kvFileUploadInit",
 				func(m shared.MetaContext, tx pgx.Tx) error {
-					return fileUploadInit(m, c.srv.lfe, tx, pid, role, arg)
+					return fileUploadInit(m, c.srv.lfe, tx, pid, role, arg, chid)
 				})
 		})
 }

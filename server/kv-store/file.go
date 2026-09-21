@@ -93,6 +93,7 @@ func putSmallFileOrSymlink(
 	pid proto.PartyID,
 	role proto.Role,
 	arg rem.KvPutSmallFileOrSymlinkArg,
+	chid *int64,
 ) (bool, error) {
 	err := assertAtOrAbove(role, arg.Sfb.Rg.Role, proto.KVOp_Read, proto.KVNodeType_Symlink)
 	if err != nil {
@@ -123,8 +124,8 @@ func putSmallFileOrSymlink(
 		m.Ctx(),
 		`INSERT INTO small_file_or_symlink(short_host_id, short_party_id, node_id, 
 			ptk_gen, read_role_type, read_role_viz_level,
-			size, box, ctime, mtime, refcount 
-		) VALUES($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), 0)
+			size, box, channel_id, ctime, mtime, refcount 
+		) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW(), 0)
 		 ON CONFLICT DO NOTHING`,
 		int(m.HostID().Short),
 		pid.Shorten().ExportToDB(),
@@ -134,6 +135,7 @@ func putSmallFileOrSymlink(
 		int(rk.Lev),
 		len(arg.Sfb.DataBox),
 		arg.Sfb.DataBox.ExportToDB(),
+		chid,
 	)
 	if err != nil {
 		return false, err
@@ -155,23 +157,27 @@ func putSmallFileOrSymlink(
 		// a row that no longer exists.
 		var box []byte
 		var gen, rt, vl int
+		var storedChid *int64
 		err = tx.QueryRow(
 			m.Ctx(),
-			`SELECT box, ptk_gen, read_role_type, read_role_viz_level
+			`SELECT box, ptk_gen, read_role_type, read_role_viz_level, channel_id
 			 FROM small_file_or_symlink
 			 WHERE short_host_id=$1 AND short_party_id=$2 AND node_id=$3
 			 FOR UPDATE`,
 			int(m.HostID().Short),
 			pid.Shorten().ExportToDB(),
 			arg.Id.ExportToDB(),
-		).Scan(&box, &gen, &rt, &vl)
+		).Scan(&box, &gen, &rt, &vl, &storedChid)
 		if err != nil {
 			return false, err
 		}
+		// The tag joins the comparison for the same reason the rest of it is
+		// here, and it is what keeps the tag immutable on this path.
 		if bytes.Equal(box, arg.Sfb.DataBox) &&
 			gen == int(arg.Sfb.Rg.Gen) &&
 			rt == int(rk.Typ) &&
-			vl == int(rk.Lev) {
+			vl == int(rk.Lev) &&
+			eqChannelTag(storedChid, chid) {
 			// An identical replay. No second usage charge.
 			return true, nil
 		}
@@ -239,6 +245,7 @@ type fileUploader struct {
 	fid  proto.FileID
 	chnk proto.UploadChunk
 	md   proto.LargeFileMetadata
+	chid *int64
 }
 
 func (f *fileUploader) assertUploading(m shared.MetaContext) error {
@@ -305,8 +312,12 @@ func fileUploadInit(
 	pid proto.PartyID,
 	role proto.Role,
 	arg rem.KvFileUploadInitArg,
+	chid *int64,
 ) error {
-	ful := fileUploader{tx: tx, pid: pid, role: role, fid: arg.FileID, md: arg.Md, chnk: arg.Chunk, lfe: lfe}
+	ful := fileUploader{
+		tx: tx, pid: pid, role: role, fid: arg.FileID,
+		md: arg.Md, chnk: arg.Chunk, lfe: lfe, chid: chid,
+	}
 	return ful.run(m)
 }
 
@@ -335,14 +346,15 @@ func (f *fileUploader) insLargeFile(m shared.MetaContext) error {
 		m.Ctx(),
 		`INSERT INTO large_file(
 			short_host_id, short_party_id, file_id, size, 
-			ctime, mtime, refcount, status, storage_type
-		) VALUES($1, $2, $3, $4, NOW(), NOW(), 0, $5, $6)`,
+			ctime, mtime, refcount, status, storage_type, channel_id
+		) VALUES($1, $2, $3, $4, NOW(), NOW(), 0, $5, $6, $7)`,
 		int(m.HostID().Short),
 		f.pid.Shorten().ExportToDB(),
 		f.fid.ExportToDB(),
 		0, // will update later
 		LargeFileStatusUploading.ExportToDB(),
 		f.lfe.Strategy().ExportToDB(),
+		f.chid,
 	)
 	if err != nil {
 		return err

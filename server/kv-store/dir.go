@@ -19,7 +19,7 @@ func loadDir(
 	pid proto.PartyID,
 	dirid proto.DirID,
 	vers proto.KVVersion, // if none specified (==0), will pick the latest
-) (*proto.KVDir, error) {
+) (*proto.KVDir, *int64, error) {
 
 	var dv, ptkgen, rrt, rvl, wrt, wvl int
 	var seedBox []byte
@@ -42,10 +42,10 @@ func loadDir(
 		q, args...,
 	).Scan(&dv, &ptkgen, &rrt, &rvl, &wrt, &wvl, &seedBox, &status, &chid)
 	if err != nil && err == pgx.ErrNoRows {
-		return nil, core.NotFoundError("dir")
+		return nil, nil, core.NotFoundError("dir")
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Channel-ACL chokepoint (acl.go): before the role gates the callers
 	// apply, and masked as the row not existing. Every dir-based read --
@@ -53,19 +53,19 @@ func loadDir(
 	// loads its parent dir funnels through here.
 	err = authorizeKVNodeRead(m, pid, chid)
 	if errors.Is(err, errKVNodeMasked) {
-		return nil, core.NotFoundError("dir")
+		return nil, nil, core.NotFoundError("dir")
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var readRole, writeRole proto.Role
 	err = readRole.ImportFromDB(rrt, rvl)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	err = writeRole.ImportFromDB(wrt, wvl)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	box := proto.SeedBoxExternalNonce{
 		Rg: proto.RoleAndGen{
@@ -75,7 +75,7 @@ func loadDir(
 	}
 	err = core.DecodeFromBytes(&box.Ctext, seedBox)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ret := proto.KVDir{
 		Id:        dirid,
@@ -85,10 +85,10 @@ func loadDir(
 	}
 	err = ret.Status.ImportFromDB(status)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return &ret, nil
+	return &ret, chid, nil
 }
 
 // putDir creates the directory row and its refcount row. The returned bool
@@ -100,6 +100,7 @@ func putDir(
 	pid proto.PartyID,
 	role proto.Role,
 	dir *proto.KVDir,
+	chid *int64,
 ) (bool, error) {
 	err := assertAtOrAbove(role, dir.Box.Rg.Role, proto.KVOp_Write, proto.KVNodeType_Dir)
 	if err != nil {
@@ -131,8 +132,8 @@ func putDir(
 			short_host_id, short_party_id, dir_id, version, ptk_gen,
 			read_role_type, read_role_viz_level,
 			write_role_type, write_role_viz_level,
-			seed_box, status, ctime, mtime
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
+			seed_box, status, channel_id, ctime, mtime
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW())
 		 ON CONFLICT DO NOTHING`,
 		int(m.HostID().Short),
 		spid.ExportToDB(),
@@ -143,6 +144,7 @@ func putDir(
 		wtyp, wlev,
 		box,
 		string(proto.KVDirStatusStringActive),
+		chid,
 	)
 	if err != nil {
 		return false, err
@@ -172,10 +174,11 @@ func putDir(
 		var seed []byte
 		var gen, rt, rl, wt, wl int
 		var status string
+		var storedChid *int64
 		err = tx.QueryRow(m.Ctx(),
 			`SELECT seed_box, ptk_gen,
 			        read_role_type, read_role_viz_level,
-			        write_role_type, write_role_viz_level, status
+			        write_role_type, write_role_viz_level, status, channel_id
 			 FROM dir
 			 WHERE short_host_id=$1 AND short_party_id=$2 AND dir_id=$3 AND version=$4
 			 FOR UPDATE`,
@@ -183,15 +186,21 @@ func putDir(
 			spid.ExportToDB(),
 			dir.Id.ExportToDB(),
 			int(dir.Version),
-		).Scan(&seed, &gen, &rt, &rl, &wt, &wl, &status)
+		).Scan(&seed, &gen, &rt, &rl, &wt, &wl, &status, &storedChid)
 		if err != nil {
 			return false, err
 		}
+		// channel_id joins the comparison for the reason the rest of it
+		// exists: the same directory ID arriving with a different tag is not
+		// the same directory, and treating it as a replay would silently
+		// keep whichever tag landed first -- which is also what makes the
+		// tag immutable on this path.
 		if status == string(proto.KVDirStatusStringActive) &&
 			bytes.Equal(seed, box) &&
 			gen == int(dir.Box.Rg.Gen) &&
 			rt == rtyp && rl == rlev &&
-			wt == wtyp && wl == wlev {
+			wt == wtyp && wl == wlev &&
+			eqChannelTag(storedChid, chid) {
 			// An identical replay; the refcount row is already there too.
 			return true, nil
 		}
@@ -263,7 +272,7 @@ func getDir(
 	role proto.Role,
 	dir proto.DirID,
 ) (*proto.KVDirPair, error) {
-	curr, err := loadDir(m, rq, pid, dir, proto.KVVersion(0))
+	curr, _, err := loadDir(m, rq, pid, dir, proto.KVVersion(0))
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +292,7 @@ func getDir(
 		if curr.Version.IsFirst() {
 			return nil, core.NotFoundError("live dir >= 0")
 		}
-		prev, err := loadDir(m, rq, pid, dir, curr.Version-1)
+		prev, _, err := loadDir(m, rq, pid, dir, curr.Version-1)
 		if err != nil {
 			return nil, err
 		}

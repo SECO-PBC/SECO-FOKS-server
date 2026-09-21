@@ -344,6 +344,17 @@ row here is a bug, which §9.4 makes a build failure.
 
 ### H1 — Re-tagging
 
+**As built, 2026-09-21.** The plan below assumed rotation existed and would
+need to copy the tag forward. It does not: `server/kv-store` has no code that
+writes a second `dir` version — `putDir` rejects any version but 1 — and
+`channel_id` is written by exactly three INSERTs and never by an UPDATE. So
+immutability is a property of the code's shape, not of a rule it follows.
+`TestChannelTagIsWriteOnce` pins that shape, and is the thing that will tell
+whoever implements rotation that it must carry the tag from the superseded
+row rather than from the request. The replay comparisons in `putDir` and
+`putSmallFileOrSymlink` weigh the tag alongside every other persisted field,
+so resending a creation with a different tag is a conflict, not a replay.
+
 **Threat.** A community member with write access relabels a node's `channel_id`,
 moving data into a channel they are in, or out of one they are not.
 
@@ -557,8 +568,8 @@ Q2, Q3 and Q5 do not block anything and can be settled while K2 is written.
 | ~~K0b~~ | ~~Carry #371 into this fork~~ **Done** — cherry-picked (§4.3) on `feat/kv-channel-acl`, tests green. | — |
 | K1 | ~~Decide Q1 and Q4~~ (decided, §10); patch `p1.sql` with its three-file registration; proto + `kvChannelMkRoot @200`; codegen. `KvChannelMkRoot` lands as a `NotImplementedError` stub so the tree compiles; its authorization is K2's chokepoint. | 1 day |
 | ~~K2~~ | **Done** (`server/kv-store/acl.go`). Read gate = `authorizeKVNodeRead` inside the five loaders every read funnels through (`loadDir`, `loadDirent`, `mLoadSmallFilesOrSymlinks`, `loadLargeFileMetadata`/`loadLargeFileReadRole`, `getCurrentDirVersion`), each masking a denial as its own missing-row answer, ahead of its role gate. Denials return `errKVNodeMasked`, a package sentinel, so infrastructure errors are never swallowed into "not found". The actor is the bearer token's signed member, carried by context from `auth()` — connections can be anonymous — and a team-as-member or remote member fails closed. `kvChannelMkRoot` landed here too (pulled from K3: its authorization IS the chokepoint's manage kind — ACL owner or team admin, channel private and of this team, dir already tagged; replays succeed, second roots refused). Read-gate tests exist now (`kv_channel_acl_test.go`), with tagged rows planted by SQL so the gate is pinned independently of K3; an 8-mutation matrix (each loader, the actor plumbing, the manage gate) fails exactly one probe each. Found and fixed in passing: `KvGetNode` on any absent small-file/symlink ID was a remotely triggered server panic (`loadSmallFileOrSymlink` returned a nil entry that `loadNode` dereferences) — upstream bug, see the tracker. | — |
-| K3 | Creation tagging + containment at link (paths 7–10); `channel_kv_root` | 1 day |
-| K4 | Tests §9.1–9.3. The read-gate and mkroot halves shipped with K2 (see above); what remains is the K3 half — creation tagging, containment, hardlink refusal, orphan protection, tag immutability across rotation — built over the wire once creation exists, replacing the SQL-planted fixture. | 1 day |
+| ~~K3~~ | **Done.** Creation tagging on all three creation RPCs, gated by `authorizeKVNodeCreate` (membership, so H3 holds: a node is tagged at the instant it exists and a non-member cannot mint one). Containment enforced in `direntUpdater.checkContainment` on every link, both directions, with the registered root as the single crossing. `channel_kv_root` written by `kvChannelMkRoot` (shipped in K2). **H1 came out simpler than planned**: there is no rotation path in `server/kv-store` at all — `putDir` rejects any version but 1, and `channel_id` is written by exactly three INSERTs and never by an UPDATE — so the tag is immutable by construction rather than by copy-forward logic. `TestChannelTagIsWriteOnce` (no DB, runs in CI) fails the build if that stops being true, which is the message to whoever implements rotation. Both replay comparisons weigh the tag, so resending a creation cannot relabel a node. Eight-mutation matrix, each caught. | — |
+| ~~K4~~ | **Done**, alongside K2/K3 rather than after. `kv_channel_acl_test.go` (read gate, mkroot standing) and `kv_channel_create_test.go` (creation membership, orphan protection, containment both ways + root crossing, hardlink refusal, tag immutability on replay for both small files and directories). The K3 tests drive the raw RPCs: libkv does not carry a channel tag yet, and the wire is what the guarantee actually rests on. | — |
 | K5 | `TestKvStoreRpcInventory` (§9.4) | ½ day |
 | K6 | libkv/librt wrappers; fork PR; tag; app pins | 1 day |
 

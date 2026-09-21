@@ -27,6 +27,7 @@ type direntUpdater struct {
 
 	// internal state
 	dir      *proto.KVDir
+	dirChid  *int64
 	existing *proto.KVDirent
 }
 
@@ -219,12 +220,20 @@ func putDirent(m shared.MetaContext, tx pgx.Tx, pid proto.PartyID, role proto.Ro
 }
 
 func (p *direntUpdater) loadParentDir(m shared.MetaContext) error {
-	dir, err := loadDir(m, p.tx, p.pid, p.de.ParentDir, p.de.DirVersion)
+	dir, chid, err := loadDir(m, p.tx, p.pid, p.de.ParentDir, p.de.DirVersion)
 	if err != nil {
 		return err
 	}
 	p.dir = dir
+	p.dirChid = chid
 	return nil
+}
+
+// checkContainment holds a channel's storage to a single subtree: the value
+// being linked must carry the parent's tag, or be the channel's registered
+// root arriving under the untagged community tree. See acl.go.
+func (p *direntUpdater) checkContainment(m shared.MetaContext) error {
+	return checkChannelContainment(m, p.tx, p.pid, p.dirChid, p.de.Value)
 }
 
 func (p *direntUpdater) loadExistingDirent(m shared.MetaContext, role proto.Role) error {
@@ -371,6 +380,10 @@ func (p *direntUpdater) run(m shared.MetaContext) error {
 	if err != nil {
 		return err
 	}
+	err = p.checkContainment(m)
+	if err != nil {
+		return err
+	}
 	err = p.updateRefcounts(m)
 	if err != nil {
 		return err
@@ -472,7 +485,7 @@ func listDir(
 	*rem.KVListRes,
 	error,
 ) {
-	dir, err := loadDir(m, db, pid, arg.Dir, 0)
+	dir, _, err := loadDir(m, db, pid, arg.Dir, 0)
 	if err != nil {
 		return nil, err
 	}

@@ -20,7 +20,7 @@ func lockCheckPerms(
 	role proto.Role,
 	lock rem.KVLock,
 ) error {
-	dir, err := loadDir(m, tx, pid, lock.Idp.ParentDirID, proto.KVVersion(0))
+	dir, _, err := loadDir(m, tx, pid, lock.Idp.ParentDirID, proto.KVVersion(0))
 	if err != nil {
 		return err
 	}
