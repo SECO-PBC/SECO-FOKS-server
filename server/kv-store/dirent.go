@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"errors"
+
 	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-foks/proto/rem"
@@ -116,6 +118,7 @@ func loadDirent(
 	var dv, wrt, wvl, ptkg, v, rrt, rvl int
 	var val, nb, nmac, bmac, id []byte
 	var status string
+	var chid *int64
 
 	args := []any{
 		int(m.ShortHostID()),
@@ -125,7 +128,7 @@ func loadDirent(
 
 	q := `SELECT E.dir_version, E.name_box, E.value, E.write_role_type,
 	        E.write_role_viz_level, E.name_mac, E.binding_mac, E.dirent_id, E.version, D.ptk_gen, D.status,
-			D.read_role_type, D.read_role_viz_level
+			D.read_role_type, D.read_role_viz_level, D.channel_id
 		FROM dirent AS E
 	    JOIN dir AS D ON (
 			E.short_host_id=D.short_host_id AND 
@@ -138,10 +141,20 @@ func loadDirent(
 	q, args = f(q, "E", args)
 
 	err := rq.QueryRow(m.Ctx(), q, args...).Scan(
-		&dv, &nb, &val, &wrt, &wvl, &nmac, &bmac, &id, &v, &ptkg, &status, &rrt, &rvl,
+		&dv, &nb, &val, &wrt, &wvl, &nmac, &bmac, &id, &v, &ptkg, &status, &rrt, &rvl, &chid,
 	)
 
 	if err != nil && err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Channel-ACL chokepoint (acl.go): a dirent in a channel directory
+	// answers a non-member exactly as an absent dirent does -- nil, nil is
+	// this loader's missing-row result -- and ahead of the role gate below.
+	err = authorizeKVNodeRead(m, pid, chid)
+	if errors.Is(err, errKVNodeMasked) {
 		return nil, nil
 	}
 	if err != nil {

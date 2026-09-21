@@ -5,6 +5,7 @@ package kvStore
 
 import (
 	"bytes"
+	"errors"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
@@ -23,8 +24,9 @@ func loadDir(
 	var dv, ptkgen, rrt, rvl, wrt, wvl int
 	var seedBox []byte
 	var status string
+	var chid *int64
 	q := `SELECT version, ptk_gen, read_role_type, read_role_viz_level, 
-	          write_role_type, write_role_viz_level, seed_box, status
+	          write_role_type, write_role_viz_level, seed_box, status, channel_id
 		  FROM dir
 	      WHERE short_host_id=$1 AND short_party_id=$2 AND dir_id=$3`
 	args := []any{int(m.ShortHostID()), pid.Shorten().ExportToDB(), dirid.ExportToDB()}
@@ -38,8 +40,19 @@ func loadDir(
 	err := rq.QueryRow(
 		m.Ctx(),
 		q, args...,
-	).Scan(&dv, &ptkgen, &rrt, &rvl, &wrt, &wvl, &seedBox, &status)
+	).Scan(&dv, &ptkgen, &rrt, &rvl, &wrt, &wvl, &seedBox, &status, &chid)
 	if err != nil && err == pgx.ErrNoRows {
+		return nil, core.NotFoundError("dir")
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Channel-ACL chokepoint (acl.go): before the role gates the callers
+	// apply, and masked as the row not existing. Every dir-based read --
+	// getDir, listDir, loadDirent's join, locks -- and every write that
+	// loads its parent dir funnels through here.
+	err = authorizeKVNodeRead(m, pid, chid)
+	if errors.Is(err, errKVNodeMasked) {
 		return nil, core.NotFoundError("dir")
 	}
 	if err != nil {

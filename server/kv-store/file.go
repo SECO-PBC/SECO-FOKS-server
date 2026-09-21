@@ -5,6 +5,7 @@ package kvStore
 
 import (
 	"bytes"
+	"errors"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/lib/kv"
@@ -558,6 +559,7 @@ func loadLargeFileMetadata(
 	var v, ptkg, rt, vl int
 	var keyBox []byte
 	var status string
+	var chid *int64
 	fid, err := val.ToFileID()
 	if err != nil {
 		return nil, err
@@ -566,15 +568,25 @@ func loadLargeFileMetadata(
 	err = db.QueryRow(
 		m.Ctx(),
 		`SELECT version, read_role_type, read_role_viz_level, ptk_gen, key_box,
-		    status
+		    status, large_file.channel_id
 		FROM large_file
 		JOIN large_file_key USING(short_host_id, short_party_id, file_id)
 		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3
 		ORDER BY version DESC
 		LIMIT 1`,
 		int(m.ShortHostID()), pid.Shorten().ExportToDB(), fid.ExportToDB(),
-	).Scan(&v, &rt, &vl, &ptkg, &keyBox, &status)
+	).Scan(&v, &rt, &vl, &ptkg, &keyBox, &status, &chid)
 	if err != nil && err == pgx.ErrNoRows {
+		return nil, core.NotFoundError("large file metadata")
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Channel-ACL chokepoint (acl.go): ahead of the role gate, so a
+	// non-member below the read role learns nothing a non-member above it
+	// would not, and masked as the same not-found a missing file answers.
+	err = authorizeKVNodeRead(m, pid, chid)
+	if errors.Is(err, errKVNodeMasked) {
 		return nil, core.NotFoundError("large file metadata")
 	}
 	if err != nil {
@@ -643,16 +655,29 @@ func loadLargeFileReadRole(
 ) {
 	var ret proto.Role
 	var rt, vl int
+	var chid *int64
 	err := db.QueryRow(
 		m.Ctx(),
-		`SELECT read_role_type, read_role_viz_level
+		`SELECT read_role_type, read_role_viz_level, large_file.channel_id
 		FROM large_file_key
+		JOIN large_file USING(short_host_id, short_party_id, file_id)
 		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3
 		ORDER BY version DESC
 		LIMIT 1`,
 		int(m.ShortHostID()), pid.Shorten().ExportToDB(), fid.ExportToDB(),
-	).Scan(&rt, &vl)
+	).Scan(&rt, &vl, &chid)
 	if err != nil && err == pgx.ErrNoRows {
+		return ret, core.NotFoundError("large file key")
+	}
+	if err != nil {
+		return ret, err
+	}
+	// Channel-ACL chokepoint (acl.go): getChunk serves raw ciphertext by
+	// file ID with no directory context, so the tag rides the file's own
+	// identity row. Masked as the not-found a missing file answers, ahead
+	// of the caller's role check.
+	err = authorizeKVNodeRead(m, pid, chid)
+	if errors.Is(err, errKVNodeMasked) {
 		return ret, core.NotFoundError("large file key")
 	}
 	if err != nil {
@@ -780,7 +805,8 @@ func mLoadSmallFilesOrSymlinks(
 
 	rows, err := db.Query(
 		m.Ctx(),
-		`SELECT ptk_gen, box, read_role_type, read_role_viz_level, node_id
+		`SELECT ptk_gen, box, read_role_type, read_role_viz_level, node_id,
+		    channel_id
 		FROM small_file_or_symlink
 		WHERE short_host_id=$1 AND short_party_id=$2 AND node_id = ANY($3)`,
 		int(m.ShortHostID()), pid.Shorten().ExportToDB(), nodeIDs,
@@ -798,11 +824,25 @@ func mLoadSmallFilesOrSymlinks(
 		var box []byte
 		var rt, vl int
 		var nodeIdRaw []byte
+		var chid *int64
 
-		err := rows.Scan(&g, &box, &rt, &vl, &nodeIdRaw)
+		err := rows.Scan(&g, &box, &rt, &vl, &nodeIdRaw, &chid)
 		if err != nil {
 			return nil, err
 		}
+
+		// Channel-ACL chokepoint (acl.go): a denied row is simply not
+		// added to the table, which is byte-for-byte how a row that does
+		// not exist behaves on both the direct-load and the listing path,
+		// and it happens ahead of the role check below.
+		err = authorizeKVNodeRead(m, pid, chid)
+		if errors.Is(err, errKVNodeMasked) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+
 		var fileRole proto.Role
 		err = fileRole.ImportFromDB(rt, vl)
 		if err != nil {
@@ -855,7 +895,13 @@ func loadSmallFileOrSymlink(
 	if err != nil {
 		return nil, err
 	}
-	if len(ret) != 1 {
+	// A row that is not in the table comes back as a nil entry, not as a
+	// short slice -- mLoadSmallFilesOrSymlinks appends its map lookup
+	// unconditionally -- and loadNode dereferences this result. Without the
+	// nil check, a KvGetNode for any absent small-file or symlink ID was a
+	// remotely triggered panic. The listing path already guards (listDir
+	// checks f != nil); this was the one caller that did not.
+	if len(ret) != 1 || ret[0] == nil {
 		return nil, core.NotFoundError("small file")
 	}
 	return ret[0], nil

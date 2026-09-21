@@ -5,6 +5,7 @@ package kvStore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -142,6 +143,10 @@ func (c *ClientConn) auth(
 		}
 		pid = m.UID().ToPartyID()
 		role = m.Role()
+		// Fork-only (docs/kv-channel-acl.md): the acting user for channel-ACL
+		// checks. A user store never carries channel storage, but set it
+		// uniformly so the chokepoint has one source of identity.
+		m = withActor(m, &uid)
 	case rem.KVAuthType_Team:
 		db, err := m.Db(shared.DbTypeUsers)
 		if err != nil {
@@ -168,6 +173,16 @@ func (c *ClientConn) auth(
 		role = tmp.Role
 		if !tmp.Req.Team.Host.Eq(m.HostID().Id) {
 			return core.HostMismatchError{Which: "team host in kv-store auth"}
+		}
+		// Fork-only (docs/kv-channel-acl.md): the acting user for channel-ACL
+		// checks. The connection may be anonymous (RequireAuth is
+		// AuthTypeNone), so the verified identity is the member the bearer
+		// token's signed challenge named. A remote member or a team acting as
+		// member yields no actor, and tagged nodes then fail closed.
+		if tmp.Req.Member.Host.Eq(m.HostID().Id) {
+			if mu, uerr := tmp.Req.Member.Party.UID(); uerr == nil {
+				m = withActor(m, &mu)
+			}
 		}
 	default:
 		return core.BadArgsError("invalid auth type")
@@ -420,11 +435,44 @@ func (c *ClientConn) KvLockRelease(
 }
 
 // KvChannelMkRoot registers a directory as a private channel's storage root
-// (fork-only; docs/kv-channel-acl.md). Wired here so the K1 schema+proto
-// change compiles; the authorization (ACL owner or team admin, through the
-// authorizeKVNode chokepoint) and the channel_kv_root write land with K2/K3.
+// (fork-only; docs/kv-channel-acl.md §7 H3). The root is the one place a
+// tagged directory may hang beneath an untagged parent. Registration demands
+// an ACL owner or a team admin -- the standing rtChannelGrant demands -- and
+// the directory must already exist carrying this channel's tag, which only a
+// member could have created. Registering the same root twice is a replay and
+// succeeds; a different root for a channel that has one is refused.
 func (c *ClientConn) KvChannelMkRoot(ctx context.Context, arg rem.KvChannelMkRootArg) error {
-	return core.NotImplementedError{}
+	return c.auth(ctx, arg.Auth,
+		func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, role proto.Role) error {
+			chid := arg.ChannelID.Short().Int64()
+			err := authorizeKVNodeManage(m, pid, chid, role)
+			if errors.Is(err, errKVNodeMasked) {
+				// Same answer as a channel that does not exist.
+				return core.NotFoundError("channel")
+			}
+			if err != nil {
+				return err
+			}
+			var dirChid *int64
+			err = db.QueryRow(
+				m.Ctx(),
+				`SELECT channel_id FROM dir
+				 WHERE short_host_id=$1 AND short_party_id=$2 AND dir_id=$3
+				 ORDER BY version DESC LIMIT 1`,
+				int(m.ShortHostID()), pid.Shorten().ExportToDB(),
+				arg.DirID.ExportToDB(),
+			).Scan(&dirChid)
+			if err != nil && errors.Is(err, pgx.ErrNoRows) {
+				return core.NotFoundError("dir")
+			}
+			if err != nil {
+				return err
+			}
+			if dirChid == nil || *dirChid != chid {
+				return core.BadArgsError("directory does not carry this channel's tag")
+			}
+			return registerChannelRoot(m, db, pid, chid, arg.DirID)
+		})
 }
 
 func (c *ClientConn) KvUsage(
