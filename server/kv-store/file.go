@@ -250,12 +250,27 @@ type fileUploader struct {
 
 func (f *fileUploader) assertUploading(m shared.MetaContext) error {
 	var status string
+	var chid *int64
 	err := f.tx.QueryRow(
 		m.Ctx(),
-		`SELECT status FROM large_file
+		`SELECT status, channel_id FROM large_file
 		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3`,
 		int(m.HostID().Short), f.pid.Shorten().ExportToDB(), f.fid.ExportToDB(),
-	).Scan(&status)
+	).Scan(&status, &chid)
+	if err != nil {
+		return err
+	}
+	// Channel-ACL chokepoint (acl.go). kvFileUploadChunk names a file by ID
+	// alone, with no directory in front of it, and this is the only place
+	// that loads the file's row -- so without this check a caller outside the
+	// channel could append to a tagged file mid-upload if they learned its
+	// ID. The design does not rest on IDs being secret, so it is checked
+	// rather than assumed. Masked as the status error a caller who cannot
+	// see the file would otherwise get, so the tag discloses nothing.
+	err = authorizeKVNodeRead(m, f.pid, chid)
+	if errors.Is(err, errKVNodeMasked) {
+		return core.UploadError("file not in uploading state")
+	}
 	if err != nil {
 		return err
 	}
