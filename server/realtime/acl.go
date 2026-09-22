@@ -53,6 +53,16 @@ const (
 	// too, and must: an admin's authority to revoke is useless if they cannot
 	// first see who is in the channel.
 	accessRoster
+	// accessMutate: change the channel's own metadata -- rename, edit
+	// description, archive, unarchive. Requires team admin-or-above, and is
+	// the one kind that passes the archived gate, since unarchiving would
+	// otherwise be unreachable.
+	//
+	// Deliberately NOT accessManage: that kind rejects a non-private channel
+	// outright ("channel is not private; it has no ACL"), and metadata
+	// mutation applies to every channel. Reusing it would silently make
+	// rename and archive private-only.
+	accessMutate
 )
 
 // managementKind reports whether this access is about the ACL rather than the
@@ -60,6 +70,16 @@ const (
 // able to moderate a private channel whose read role sits above their own.
 func (a accessKind) managementKind() bool {
 	return a == accessManage || a == accessRoster
+}
+
+// adminBypassesAcl reports whether a team admin may exercise this access on a
+// private channel they hold no ACL row for. It covers the ACL kinds (an admin
+// must be able to see and change who is in a channel they moderate) and
+// accessMutate (an admin archives or renames a channel without first joining
+// it). It deliberately does NOT cover reads or writes: an admin who wants to
+// read a private channel grants themselves a row, which its members can see.
+func (a accessKind) adminBypassesAcl() bool {
+	return a.managementKind() || a == accessMutate
 }
 
 // Values stored in channel_acl.acl_role.
@@ -80,6 +100,11 @@ type channelAuth struct {
 	// noPush excludes the channel from push_outbox fan-out on send
 	// (fork-only, dm-handshake-over-rt); inbox-version wakes unaffected.
 	noPush bool
+	// archivedAt is non-nil when the channel has been archived: closed to new
+	// activity, absent from the inbox, still present in the team's channel
+	// listing (which is what reserves its name). Fork-only; see
+	// docs/rt-channel-mutation.md.
+	archivedAt *time.Time
 
 	// lastMsgSeq is the channel's denormalized last message seq; NULL (nil)
 	// when the channel has no messages yet.
@@ -97,7 +122,7 @@ type channelAuth struct {
 
 // channelAuthCols is the column list authorizeChannel scans. Kept together so
 // the locking and non-locking variants can never drift.
-const channelAuthCols = `parent_team_id, app_id, tier, private, no_push,
+const channelAuthCols = `parent_team_id, app_id, tier, private, no_push, archived_at,
 	 read_role_type, read_role_viz_level,
 	 write_role_type, write_role_viz_level,
 	 last_msg_seq`
@@ -136,7 +161,7 @@ func authorizeChannel(
 		q += ` FOR UPDATE`
 	}
 	err := rtdb.QueryRow(m.Ctx(), q, m.ShortHostID(), channelID).Scan(
-		&teamBytes, &appRaw, &tierRaw, &ca.private, &ca.noPush,
+		&teamBytes, &appRaw, &tierRaw, &ca.private, &ca.noPush, &ca.archivedAt,
 		&rrt, &rvl, &wrt, &wvl, &ca.lastMsgSeq,
 	)
 	if err == pgx.ErrNoRows {
@@ -186,8 +211,26 @@ func authorizeChannel(
 		// not in -- Q1/Q2: leaders are transparently peers rather than
 		// invisible ones. Everyone else needs an ACL row, and gets the
 		// missing-channel error without one.
-		if !found && !(want.managementKind() && role.IsAdminOrAbove()) {
+		if !found && !(want.adminBypassesAcl() && role.IsAdminOrAbove()) {
 			return nil, core.RowNotFoundError{}
+		}
+	}
+
+	// 3b. Archived gate. An archived channel is closed to new activity: no
+	// sends, and no ACL changes, since both are activity in a room that has
+	// been closed. Reads by explicit channel id still work -- the channel is
+	// hidden, not destroyed, and in practice no client reaches one because the
+	// inbox drops it. accessMutate passes, or unarchive could never run, and
+	// rename must stay reachable because renaming an archived channel is how
+	// its reserved name is released.
+	//
+	// After the private gate, never before it: an archived-channel error for a
+	// private channel the caller is not in would disclose that the channel
+	// exists.
+	switch want {
+	case accessWrite, accessManage:
+		if err := archivedBlocks(ca.archivedAt); err != nil {
+			return nil, err
 		}
 	}
 
@@ -198,6 +241,14 @@ func authorizeChannel(
 	// row (or is an admin managing), so it cannot disclose a private channel.
 	if ca.tier == proto.RTChannelTier_Admin && !role.IsAdminOrAbove() {
 		return nil, core.PermissionError("user role too low for an admin-tier channel")
+	}
+
+	// 4b. Metadata mutation is admins only, matching the product rule that
+	// renaming, editing and archiving a channel are Leader/Steward actions
+	// (blueprints/channels/CHANNELS.md 5.1). Enforced here rather than only in
+	// the UI: a UI-only rule is not a rule.
+	if want == accessMutate && !role.IsAdminOrAbove() {
+		return nil, core.PermissionError("must be a team admin to change channel metadata")
 	}
 
 	// 5. Role gate, for reads and writes only.
@@ -227,8 +278,9 @@ func authorizeChannel(
 		if role.LessThan(*readRole) {
 			return nil, core.PermissionError("user role too low to read channel")
 		}
-	case accessManage, accessRoster:
-		// see above
+	case accessManage, accessRoster, accessMutate:
+		// see above -- and accessMutate for the same reason: an admin must be
+		// able to archive or rename a channel whose read role is above theirs.
 	}
 
 	// 6. ACL authority.

@@ -934,3 +934,34 @@ func touchChannelSet(
 	)
 	return err
 }
+
+// notArchived is the set-based archived predicate, for the paths that read many
+// channels at once and so cannot inspect a loaded row: the inbox
+// changed-threads query and the late-join fan-in's anti-join. It must stay in
+// lock-step with archivedBlocks below; the archive tests run the same scenarios
+// through both.
+//
+// The team channel LISTING deliberately does not use it. The channel set
+// doubles as the team's name registry, and because names are PTK-encrypted only
+// a client can compare them -- so a client can only refuse a duplicate name it
+// can still see. Dropping archived rows from the listing would free the name and
+// make every unarchive a collision the server has no way to detect.
+//
+// chAlias is the `channels` alias in the caller's query.
+func notArchived(chAlias string) string {
+	return chAlias + `.archived_at IS NULL`
+}
+
+// archivedBlocks is the per-row archived gate: an archived channel is closed to
+// new activity, so the callers that represent activity refuse it.
+//
+// Takes the loaded timestamp rather than an accessKind so it stays independent
+// of the fork-only authorization vocabulary in acl.go -- each call site decides
+// whether the access it represents counts as activity. Reads are not blocked:
+// the channel is hidden, not destroyed.
+func archivedBlocks(archivedAt *time.Time) error {
+	if archivedAt != nil {
+		return core.RTChannelArchivedError{}
+	}
+	return nil
+}
