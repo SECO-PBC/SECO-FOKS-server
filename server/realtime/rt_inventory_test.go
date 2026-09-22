@@ -58,6 +58,17 @@ type rpcClassification struct {
 // rpcAccessClass classifies every method of the RealTime protocol. Adding an
 // RPC without adding an entry here fails this test -- which is the point.
 var rpcAccessClass = map[string]rpcClassification{
+	"rtUpdateChannel": {
+		channelWrite,
+		"TestRenameRequiresAdmin, TestRenameCasRace, TestRenameResealsAtTierRole, " +
+			"TestRenamedArchivedFreesTheName (row 16). Chokepoint at accessMutate, " +
+			"which requires team admin-or-above",
+	},
+	"rtSetChannelArchived": {
+		channelWrite,
+		"TestArchiveRequiresAdmin, TestUnarchiveRestoresToInbox, " +
+			"TestCannotArchiveGeneral (row 17). Chokepoint at accessMutate",
+	},
 	"rtNewChannel": {
 		channelWrite,
 		"TestPrivateCreateRequiresAdmin, TestPrivateCreateFansOutToCreatorOnly (row 11)",
@@ -224,7 +235,10 @@ var queryAllowlist = map[string]allowedQueries{
 		"which for a private channel equal its ACL (invariant asserted by " +
 		"TestPrivateAclEqualsUserChannels) and are re-validated against the team " +
 		"roster by pruneStaleChannelMembers immediately before this runs"},
-	"touchChannelSet":                     {2, "grant path; runs after authorizeChannel(accessManage) and touches only version bookkeeping"},
+	"touchChannelSet":                     {2, "grant and metadata-mutation paths; runs after authorizeChannel(accessManage or accessMutate) and touches only version bookkeeping"},
+	"channelMutator.casSeqno":             {1, "metadata mutation; runs after authorizeChannel(accessMutate), and writes only the row that call already authorized"},
+	"channelMutator.stampMembers":         {2, "metadata mutation; re-stamps the delivery rows of the already-authorized channel so the change reaches members' inboxes. Reads no channel identity a member does not already hold"},
+	"isDefaultChannel":                    {1, "metadata mutation; returns one boolean about a channel the caller already passed authorizeChannel(accessMutate) for, and no identity of any other channel"},
 	"channelMaker.insertChannel":          {1, "creation; runs after channelMaker.checkPerms -> authorizeChannelCreate"},
 	"fanUserIntoChannel":                  {1, "delivery-row write, reached from creation fan-out, grant, or the (private-excluding) fan-in"},
 	"channelMaker.fanoutToUser":           {1, "thin wrapper over fanUserIntoChannel, inside the creation transaction"},

@@ -100,6 +100,17 @@ struct RTChannelMetadata @0xddf6b26b2ace1535 {
     // flip path -- a channel is born silent or not. @21 keeps the positional
     // encoding dense (see the note above @20).
     noPush @21 : Bool;
+    // FORK-ONLY (see docs/rt-channel-mutation.md). An archived channel is
+    // closed to new activity and gone from the inbox, but it deliberately
+    // STAYS in this listing: the channel set doubles as the team's name
+    // registry, names are PTK-encrypted so only a client can compare them,
+    // and a client can only refuse a duplicate name it can still see.
+    // Dropping archived rows here would free the name and make every
+    // unarchive a collision the server has no way to detect. The client is
+    // therefore what hides an archived channel from the channel list while
+    // keeping it in its collision map. @22 keeps the positional encoding
+    // dense (see the note above @20).
+    archived @22 : Bool;
 }
 
 // FORK-ONLY. One member of a private channel's ACL. grantedBy is the audit
@@ -329,6 +340,31 @@ protocol RealTime
 
     // Holder only. Queue one content-free 'system' push per entry whose member
     // can read the channel; others are skipped.
+    // Change a channel's own metadata: rename, and edit or clear the
+    // description. CAS on md.seqno -- the caller passes the seqno it last
+    // saw, and a mismatch is RTRaceError, which librt retries. Team admins
+    // only. Permitted on an archived channel, because renaming one is how its
+    // reserved name is released.
+    //
+    // nameBox must be sealed at the channel's TIER name role (MinRTRole for
+    // bottom, AdminRole for admin), not at the caller's own role; descBox at
+    // the channel's read role. Absent descBox clears the description.
+    rtUpdateChannel @207 (
+        chid @0 : lib.RTChannelID,
+        seqno @1 : lib.RTChannelSeqno,
+        nameBox @2 : lib.RTBoxRG,
+        descBox @3 : Option(lib.RTBoxRG)
+    );
+
+    // Archive or unarchive a channel. Takes a target state rather than being
+    // one-way, so unarchive needs no second RPC and no later wire change.
+    // Team admins only; CAS on seqno as above.
+    rtSetChannelArchived @208 (
+        chid @0 : lib.RTChannelID,
+        seqno @1 : lib.RTChannelSeqno,
+        archived @2 : Bool
+    );
+
     rtNotifyMembers @206 (
         channelID @0 : lib.RTChannelID,
         entries @1 : List(RTPushNotify)
