@@ -881,3 +881,56 @@ func MakeChannel(
 		},
 	)
 }
+
+// touchChannelSet bumps the parent team's channel-set version and stamps the
+// channel at the new version, so the channel surfaces in the INCREMENTAL
+// channel listing.
+//
+// Needed because a grant is otherwise invisible to rtListAllChannelsForTeam: a
+// client sends its cached set version as `last`, ListAllChannels short-circuits
+// to an empty list when that equals the current version, and readAllChannels
+// filters on `updated_at_set_vers > last` -- a value written only at channel
+// creation. A freshly granted member would therefore never see the channel in
+// the list, and librt resolves channel names against exactly that list, so they
+// could not send to or read the channel by name at all. Bumping here is what
+// makes "the channel appears on their next sync" true for the listing as well
+// as for the inbox sync.
+//
+// A concurrent rtNewChannel loses its optimistic-concurrency check against this
+// bump and retries -- the same RTRaceError path two concurrent creates already
+// take.
+func touchChannelSet(
+	m shared.MetaContext,
+	tx pgx.Tx,
+	team proto.TeamID,
+	appDB string,
+	channelID int64,
+) error {
+	var vers int
+	err := tx.QueryRow(
+		m.Ctx(),
+		`UPDATE channel_sets SET vers = vers + 1, mtime = NOW()
+		 WHERE short_host_id=$1 AND parent_team_id=$2 AND app_id=$3
+		 RETURNING vers`,
+		m.ShortHostID(),
+		team.ExportToDB(),
+		appDB,
+	).Scan(&vers)
+	if err == pgx.ErrNoRows {
+		// No channel-set row means no channel was ever created under this
+		// (team, app), which contradicts the channel we just authorized.
+		return core.InternalError("no channel_sets row for a team that has channels")
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(
+		m.Ctx(),
+		`UPDATE channels SET updated_at_set_vers=$3, mtime=NOW()
+		 WHERE short_host_id=$1 AND channel_id=$2`,
+		m.ShortHostID(),
+		channelID,
+		vers,
+	)
+	return err
+}
