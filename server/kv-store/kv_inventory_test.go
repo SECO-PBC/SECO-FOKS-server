@@ -287,6 +287,14 @@ var (
 	// Top-level const/var/type: shared SQL fragments live in consts and must
 	// be attributed to themselves, not to whichever function precedes them.
 	declLine = regexp.MustCompile(`^(?:const|var|type)\s+([A-Za-z0-9_]+)`)
+	// A PARENTHESISED group (`const (`) declares no identifier on its own
+	// line, so declLine cannot match it and everything inside would be
+	// attributed to whichever function happened to precede it -- counted
+	// against that function's signed-off total. file.go and server.go
+	// already use such groups, so a SQL fragment added to one would inflate
+	// an unrelated entry rather than failing the guard. Give the group its
+	// own scope instead.
+	declGroup = regexp.MustCompile(`^(const|var|type)\s*\($`)
 	// \s+ (not [ \t]+) so a table name on the line after its keyword still
 	// matches; the scan runs over a whole declaration's text, not one line.
 	fromLine = regexp.MustCompile(`(?i)\b(?:FROM|INTO|UPDATE|JOIN)\s+([a-z_]+)\b`)
@@ -365,6 +373,8 @@ func TestKvStoreProtectedTableQueries(t *testing.T) {
 				if mm[1] != "" {
 					next = mm[1] + "." + mm[2]
 				}
+			} else if mm := declGroup.FindStringSubmatch(line); mm != nil {
+				next = mm[1] + "(...)"
 			} else if mm := declLine.FindStringSubmatch(line); mm != nil {
 				next = mm[1]
 			}

@@ -2204,16 +2204,36 @@ func (k *Minder) ChannelMkRoot(
 		return nil, err
 	}
 
-	var ret *proto.DirID
+	// The directory is sealed ONCE, here, outside the retry loop. Everything
+	// below can run more than once: retryCacheLoop re-invokes its callback
+	// when the cache went stale under it, and this sequence is not naturally
+	// idempotent -- a second pass that minted a fresh directory would fail
+	// registration (the channel already has a root), orphan the directory it
+	// just made, and report the whole operation as failed. Sealing once makes
+	// every step below a replay instead: putDir recognises a byte-identical
+	// row, and registering the same root twice is a no-op.
+	kvd, seed, _, err := k.sealEmptyDir(m, kvp, *rp)
+	if err != nil {
+		return nil, err
+	}
+	dirID := kvd.Id
+
 	err = k.retryCacheLoop(m, kvp, func(m MetaContext) error {
-		// (1) create, tagged and unlinked.
-		dp, _, err := k.makeEmptyDir(m, kvp, *rp, &channelID)
+		// (1) create, tagged and unlinked. A repeat is a server-side replay.
+		err := k.uploadDir(m, kvp, kvd, &channelID)
 		if err != nil {
 			return err
 		}
-		dirID := dp.Id()
+		dp := NewDirPairFromSingle(kvp.Id(), *kvd, *seed)
+		err = kvp.caches.dir.Put(m, dp)
+		if err != nil {
+			return err
+		}
 
-		// (2) register, before anything can link it.
+		// (2) register, before anything can link it. Idempotent for this
+		// same directory; a DIFFERENT one for a channel that already has a
+		// root is refused, which is what makes step (1) needing to be a
+		// replay load-bearing rather than merely tidy.
 		auth, cli, err := k.client(m, kvp)
 		if err != nil {
 			return err
@@ -2242,14 +2262,10 @@ func (k *Minder) ChannelMkRoot(
 		}
 		_, err = k.linkNode(m, kvp, parent.dir, comp, *dirID.KVNodeID(),
 			linkNodeOpts{perms: *rp, overwriteOk: cfg.OverwriteOk})
-		if err != nil {
-			return err
-		}
-		ret = &dirID
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	return ret, nil
+	return &dirID, nil
 }

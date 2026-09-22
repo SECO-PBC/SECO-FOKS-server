@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/foks-proj/go-foks/lib/core"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -46,14 +47,15 @@ func TestAclMemoCachesOnlySettledAnswers(t *testing.T) {
 	_, ok = memo.get(9)
 	require.False(t, ok)
 
-	// The classifier kvChannelMembership uses to decide what may be cached:
-	// only nil and errKVNodeMasked, never an infrastructure error.
-	settled := func(err error) bool {
-		return err == nil || errors.Is(err, errKVNodeMasked)
-	}
-	require.True(t, settled(nil))
-	require.True(t, settled(errKVNodeMasked))
-	require.False(t, settled(errors.New("connection refused")),
+	// kvAclSettled is the predicate kvChannelMembership itself consults, not
+	// a copy of it: a test with its own copy would stay green if the real one
+	// started caching infrastructure errors, which is the whole failure this
+	// is here to prevent.
+	require.True(t, kvAclSettled(nil))
+	require.True(t, kvAclSettled(errKVNodeMasked))
+	require.False(t, kvAclSettled(errors.New("connection refused")),
 		"a transport failure is not a membership decision")
-	require.False(t, settled(core.InternalError("boom")))
+	require.False(t, kvAclSettled(core.InternalError("boom")))
+	require.False(t, kvAclSettled(pgx.ErrNoRows),
+		"a bare no-rows is not a membership decision either")
 }

@@ -146,11 +146,23 @@ func kvChannelMembership(
 		}
 	}
 	err := kvChannelMembershipUncached(m, pid, channelID)
-	// Only settled answers are worth remembering; see kvAclMemo.
-	if memo != nil && (err == nil || errors.Is(err, errKVNodeMasked)) {
+	if memo != nil && kvAclSettled(err) {
 		memo.put(channelID, err)
 	}
 	return err
+}
+
+// kvAclSettled reports whether err is a decision about membership, and so
+// may be remembered for the rest of the request, rather than a failure to
+// reach the realtime database.
+//
+// Caching the latter would turn one blip into a denial for every remaining
+// node in the request -- a listing that silently returned half a directory,
+// which looks exactly like a correct ACL denial. This is the predicate
+// kvChannelMembership actually uses, and the one acl_memo_test.go exercises;
+// a test carrying its own copy would not pin it.
+func kvAclSettled(err error) bool {
+	return err == nil || errors.Is(err, errKVNodeMasked)
 }
 
 func kvChannelMembershipUncached(

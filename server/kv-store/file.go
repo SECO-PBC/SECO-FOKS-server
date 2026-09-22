@@ -257,6 +257,13 @@ func (f *fileUploader) assertUploading(m shared.MetaContext) error {
 		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3`,
 		int(m.HostID().Short), f.pid.Shorten().ExportToDB(), f.fid.ExportToDB(),
 	).Scan(&status, &chid)
+	// A file with no row answers exactly as one the caller may not see. Left
+	// as pgx.ErrNoRows it would differ from the masked answer below, and the
+	// pair would tell a caller holding a guessed ID whether a private
+	// channel's file exists.
+	if err != nil && errors.Is(err, pgx.ErrNoRows) {
+		return core.UploadError("file not in uploading state")
+	}
 	if err != nil {
 		return err
 	}

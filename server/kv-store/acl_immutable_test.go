@@ -40,9 +40,17 @@ func TestChannelTagIsWriteOnce(t *testing.T) {
 		"file.go": 2, // putSmallFileOrSymlink, insLargeFile
 	}
 
-	// An UPDATE touching channel_id is never allowed, anywhere.
-	updateRe := regexp.MustCompile(`(?is)UPDATE\s+(dir|large_file|small_file_or_symlink)\b[^` + "`" + `]*?\bSET\b[^` + "`" + `]*?\bchannel_id\s*=`)
-	insertRe := regexp.MustCompile(`(?is)INSERT\s+INTO\s+(dir|large_file|small_file_or_symlink)\s*\(`)
+	// An UPDATE touching channel_id is never allowed, anywhere. The span
+	// between UPDATE and channel_id is bounded by length rather than by a
+	// backtick, so SQL assembled from concatenated fragments or written in
+	// double quotes is still caught.
+	updateRe := regexp.MustCompile(`(?is)UPDATE\s+(?:"?)(dir|large_file|small_file_or_symlink)\b.{0,400}?\bSET\b.{0,400}?\bchannel_id\s*=`)
+	insertRe := regexp.MustCompile(`(?is)INSERT\s+INTO\s+(?:"?)(dir|large_file|small_file_or_symlink)\b`)
+	// Comments are stripped before any of this runs: the prose in this
+	// package discusses these tables and this column constantly, and a
+	// comment cannot write a row. Without stripping, the guard cries wolf on
+	// the very comments that explain it.
+	lineComment := regexp.MustCompile(`(?m)^\s*//.*$`)
 
 	ents, err := os.ReadDir(".")
 	if err != nil {
@@ -58,7 +66,7 @@ func TestChannelTagIsWriteOnce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		src := string(buf)
+		src := lineComment.ReplaceAllString(string(buf), "")
 
 		if loc := updateRe.FindString(src); loc != "" {
 			t.Errorf("%s: an UPDATE writes channel_id, which must never happen:\n\t%s\n"+
@@ -67,11 +75,17 @@ func TestChannelTagIsWriteOnce(t *testing.T) {
 				"read both, not a relabel.", name, strings.Join(strings.Fields(loc), " "))
 		}
 
-		// Count INSERTs that name channel_id in their column list.
+		// Count INSERTs that name channel_id in their column list. The window
+		// is bounded by length rather than by the next backtick, so a
+		// statement built from concatenated fragments is still counted.
 		for _, m := range insertRe.FindAllStringIndex(src, -1) {
-			stmt := src[m[0]:]
-			if end := strings.Index(stmt, "`"); end >= 0 {
-				stmt = stmt[:end]
+			end := m[0] + 600
+			if end > len(src) {
+				end = len(src)
+			}
+			stmt := src[m[0]:end]
+			if i := strings.Index(stmt, ";"); i >= 0 {
+				stmt = stmt[:i]
 			}
 			if strings.Contains(stmt, "channel_id") {
 				found[name]++

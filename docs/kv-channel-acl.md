@@ -1,6 +1,10 @@
 # Private-channel storage via a KV-store ACL (fork-only)
 
-**Status:** DESIGN — not built. Drafted 2026-09-21.
+**Status:** BUILT on `feat/kv-channel-acl` (fork PR #45); not yet on fork
+`main`. Drafted and implemented 2026-09-21. §§1–3 and §7 are the design and
+its rationale, and stay true of the code; §§4.3–4.5 record decisions and
+constraints found while building; §6 is the path inventory the guard in §9.4
+enforces; §11 tracks which slices landed.
 **Scope:** fork-only, same as `rt-private-channel-acl.md`. Not proposed upstream.
 **Base:** fork `main` @ `640c806`. Line numbers from the 2026-09-21 read.
 **Problem it solves:** a private channel today owns nothing but its message
@@ -114,10 +118,9 @@ therefore be a **second, orthogonal axis** — exactly the conclusion
 
 ### 2.4 The read gate was NOT uniform: large files had no server check
 
-**Status (2026-09-21): fixed upstream in [#371](https://github.com/foks-proj/go-foks/pull/371), NOT yet in this fork.** The
-table below is what the code looked like when this was written and is still
-what `main` of this fork does — see §4, which is now a dependency rather than a
-plan.
+**Status (2026-09-21): fixed upstream in [#371](https://github.com/foks-proj/go-foks/pull/371), and carried by this
+branch (§4.3). Fork `main` does not have it yet.** The table below is what the
+code looked like when this was written, and is still what fork `main` does.
 
 | Path | Server-side role check |
 |---|---|
@@ -222,14 +225,15 @@ table, one row per file, and `large_file_chunk` already carries a foreign key to
 it. `large_file_key` is per *version*, so a rotation would have to carry the tag
 forward — a second place to lose it. **Tag identity, not versions.**
 
-## 4. The large-file read checks — done upstream, NOT yet in this fork
+## 4. The large-file read checks — upstream, and carried by this branch
 
-**This is a dependency, not a plan.** It shipped as
+**This was a dependency, and it is settled.** It shipped as
 [foks-proj/go-foks#371](https://github.com/foks-proj/go-foks/pull/371), opened
 2026-09-21 from `upstream-pr/kv-large-file-read-checks`, cut from
-`upstream/main`. That branch is **not** this fork's `main`: `getChunk` on our
-`main` is still the unchecked version. See §4.3 — nothing in §§5–9 is sound
-until the fork carries these checks.
+`upstream/main`, and **this branch carries it** by cherry-pick (§4.3). Fork
+`main` does not yet: `getChunk` there is still the unchecked version, and will
+be until either this branch or the next upstream merge lands. Nothing in §§5–9
+is sound without these checks, which is why they travel with it.
 
 **4.1 `loadLargeFileMetadata`.** It reads `read_role_type` /
 `read_role_viz_level` out of `large_file_key`, copies them into the response
@@ -263,6 +267,23 @@ to the ACL checks this design adds on top.
 file is ~256 chunks and ~256 extra lookups across a full download, each a
 single-row indexed read on an already-open pooled connection. The ACL check
 adds a second, to a different database (§2.6).
+
+### 4.3 The fork dependency — SETTLED 2026-09-21
+
+`main` of this fork does not have #371. Building §§5–9 on it ships an ACL with
+a hole under it: a community member who knows a file ID reads any tagged large
+file's bytes, and the team PTK opens them. Pick one, and say which in the
+`SECO-UPSTREAM.md` row:
+
+- **Wait for #371 to merge** and arrive on the next upstream merge. Zero
+  divergence, but the ACL work is blocked on maxtaco's queue.
+- **Cherry-pick #371's commit onto the fork now** and let the merge drop it
+  later, which is how `Upstreamed` rows already behave. Unblocks immediately;
+  costs one temporary duplicate row in the tracker.
+
+**DECIDED 2026-09-21 (Stefan): cherry-pick.** Done — `git cherry-pick -x
+9ae9458` on `feat/kv-channel-acl`, all four large-file tests green against the
+fork tree, and the #371 tracker row says the fork now carries the commit.
 
 ### 4.4 Creating a channel's storage root has a forced ordering
 
@@ -304,23 +325,6 @@ happen instead of being told it was saved. Adding a tag to the outbox payload
 later is additive and would let this be revisited — but it would still need the
 membership question answered at drain time, not at queue time.
 
-### 4.3 The fork dependency — settle this before K1
-
-`main` of this fork does not have #371. Building §§5–9 on it ships an ACL with
-a hole under it: a community member who knows a file ID reads any tagged large
-file's bytes, and the team PTK opens them. Pick one, and say which in the
-`SECO-UPSTREAM.md` row:
-
-- **Wait for #371 to merge** and arrive on the next upstream merge. Zero
-  divergence, but the ACL work is blocked on maxtaco's queue.
-- **Cherry-pick #371's commit onto the fork now** and let the merge drop it
-  later, which is how `Upstreamed` rows already behave. Unblocks immediately;
-  costs one temporary duplicate row in the tracker.
-
-**DECIDED 2026-09-21 (Stefan): cherry-pick.** Done — `git cherry-pick -x
-9ae9458` on `feat/kv-channel-acl`, all four large-file tests green against the
-fork tree, and the #371 tracker row says the fork now carries the commit.
-
 ## 5. One chokepoint
 
 ```go
@@ -357,8 +361,8 @@ tables for a caller and is not in this table is a bug.
 | 2 | `listDir` (`dirent.go:452`) | dirents | read role on dir | + ACL on the dir |
 | 3 | `loadDirentByID` (`dirent.go:155`) | one dirent | read role on parent dir | + ACL on the parent dir |
 | 4 | small files / symlinks (`file.go:748`) | key box + data box | read role | + ACL on `small_file_or_symlink.channel_id` |
-| 5 | `loadLargeFileMetadata` (`file.go:548`) | key box | read role, **ahead of the status switch** (#371; not yet in this fork, §4.3) | + ACL on `large_file.channel_id` |
-| 6 | `getChunk` (`file.go:635`) | file bytes | read role via `loadLargeFileReadRole` (#371; not yet in this fork, §4.3) | + ACL on `large_file.channel_id` |
+| 5 | `loadLargeFileMetadata` (`file.go:548`) | key box | read role, **ahead of the status switch** (#371, carried by this branch; §4.3) | + ACL on `large_file.channel_id` |
+| 6 | `getChunk` (`file.go:635`) | file bytes | read role via `loadLargeFileReadRole` (#371, carried by this branch; §4.3) | + ACL on `large_file.channel_id` |
 | 7 | `putDirent` (`dirent.go:197`) | writes | write + read role on parent | + ACL + containment (H3) |
 | 8 | `mkdir` (`dir.go:91`) | writes | write role | + ACL at creation (H3) |
 | 9 | `putSmallFileOrSymlink` (`file.go:96`) | writes | read role on the box | + ACL at creation (H3) |
