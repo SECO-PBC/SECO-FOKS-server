@@ -941,13 +941,15 @@ func touchChannelSet(
 	return err
 }
 
-// notArchived is the set-based archived predicate, for the paths that read many
-// channels at once and so cannot inspect a loaded row: the inbox
-// changed-threads query and the late-join fan-in's anti-join. It must stay in
-// lock-step with archivedBlocks below; the archive tests run the same scenarios
-// through both.
+// notArchived is the set-based archived predicate. Exactly one path uses it:
+// the late-join fan-in's anti-join, which must never create a delivery row for
+// an archived channel.
 //
-// The team channel LISTING deliberately does not use it. The channel set
+// Neither of the two paths that RETURN channel metadata filters on it, and
+// both omissions are deliberate. The inbox changed-threads query does not,
+// because an archived channel has to be delivered once, carrying the flag, or
+// the client has no way to learn it should drop its stored row -- a delta of
+// rows cannot express a removal. The team channel LISTING does not, The channel set
 // doubles as the team's name registry, and because names are PTK-encrypted only
 // a client can compare them -- so a client can only refuse a duplicate name it
 // can still see. Dropping archived rows from the listing would free the name and
@@ -1112,12 +1114,23 @@ func (c *channelMutator) stampMembers(m shared.MetaContext) error {
 }
 
 // finish does the bookkeeping both mutations share: surface the change in the
-// incremental channel listing, and in the members' inboxes.
+// members' inboxes, and in the incremental channel listing.
+//
+// ORDER IS A LOCK ORDER, not a preference. Every writer in this package takes
+// its row locks in the sequence channels -> user_inbox -> push_outbox ->
+// channel_sets: channel creation locks user_inbox in fanoutUsers and only then
+// channel_sets in commit, and a send locks user_inbox and then push_outbox in
+// fanoutInboxVersions. Touching channel_sets first here would invert that
+// against a concurrent create in the same team -- the create holding a
+// member's user_inbox row and waiting for channel_sets, this transaction
+// holding channel_sets and waiting for the same member -- which Postgres
+// resolves by killing one of them with a deadlock error the retry loop is not
+// built to absorb.
 func (c *channelMutator) finish(m shared.MetaContext) error {
-	if err := touchChannelSet(m, c.tx, c.ca.team, c.appDB, c.chid); err != nil {
+	if err := c.stampMembers(m); err != nil {
 		return err
 	}
-	return c.stampMembers(m)
+	return touchChannelSet(m, c.tx, c.ca.team, c.appDB, c.chid)
 }
 
 // dropChannelPushes discards a closing channel's undelivered push rows.
@@ -1273,12 +1286,18 @@ func SetChannelArchived(m shared.MetaContext, arg rem.RtSetChannelArchivedArg) e
 			if err := mu.casSeqno(m, set); err != nil {
 				return nil, err
 			}
+			// stampMembers takes the user_inbox locks; dropping the channel's
+			// push rows must come after it, because a send takes those two in
+			// that order too (see finish's note on lock order).
+			if err := mu.stampMembers(m); err != nil {
+				return nil, err
+			}
 			if arg.Archived {
 				if err := dropChannelPushes(m, tx, mu.chid); err != nil {
 					return nil, err
 				}
 			}
-			if err := mu.finish(m); err != nil {
+			if err := touchChannelSet(m, tx, mu.ca.team, mu.appDB, mu.chid); err != nil {
 				return nil, err
 			}
 			app, uids := mu.ca.appID, mu.wakeUIDs
