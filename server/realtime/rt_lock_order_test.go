@@ -106,12 +106,11 @@ var (
 
 // lockFn is one function's own locks and the functions it calls.
 type lockFn struct {
-	name  string
-	locks []string // protected tables row-locked here, in source order
-	calls []string // callee names, in source order, interleaved by position
-	// steps preserves the interleaving: each entry is either a table ("t:x")
-	// or a call ("c:x"), so an expansion sees locks and calls in the order
-	// they actually appear.
+	name string
+	// steps preserves the interleaving of locks and calls: each entry is
+	// either a table ("t:x") or a call ("c:x"), so an expansion walks them in
+	// the order they actually appear. Keeping the two in one list is the whole
+	// trick -- a lock and a call are only comparable by position.
 	steps []string
 }
 

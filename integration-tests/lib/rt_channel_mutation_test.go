@@ -133,6 +133,7 @@ func (s *mutScene) find(
 // server: a UI-only rule is not a rule.
 func TestRenameRequiresAdmin(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 
 	err := sc.rename(t, sc.bob, sc.pubSpec(), randomChannelName(t, "nope-"), "")
 	require.Error(t, err)
@@ -151,6 +152,7 @@ func TestRenameRequiresAdmin(t *testing.T) {
 // the old name cannot read the new one.
 func TestRenameResealsAtTierRole(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 
 	// Bottom tier, renamed by the team OWNER (whose own role is far above
 	// MinRTRole). The box must still be sealed at the bottom tier's name role,
@@ -195,6 +197,7 @@ func TestRenameResealsAtTierRole(t *testing.T) {
 // with the bump missing entirely.
 func TestRenameVisibleToOtherMembers(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 
 	// Warm bob's cache at the pre-rename version, so the assertion below
 	// measures an incremental update rather than a first fetch.
@@ -216,6 +219,7 @@ func TestRenameVisibleToOtherMembers(t *testing.T) {
 // clobbering the other.
 func TestRenameCasRace(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 	before := sc.find(t, sc.alice, sc.pubID).Seqno
 
 	// Names generated HERE, on the test goroutine: randomChannelName calls
@@ -249,6 +253,7 @@ func TestRenameCasRace(t *testing.T) {
 // client's check -- but it is the only one there is.
 func TestRenameOntoExistingNameFails(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 	otherName := randomChannelName(t, "other-")
 	_, err := sc.alice.minder.MakeChannel(
 		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, otherName, "",
@@ -269,6 +274,7 @@ func TestRenameOntoExistingNameFails(t *testing.T) {
 
 func TestArchiveRequiresAdmin(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 	err := sc.setArchived(t, sc.bob, sc.pubSpec(), true)
 	require.Error(t, err)
 	require.IsType(t, core.PermissionError(""), err)
@@ -278,6 +284,7 @@ func TestArchiveRequiresAdmin(t *testing.T) {
 // An archived channel stops accepting messages.
 func TestArchivedChannelRejectsSend(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 	_, err := sc.alice.minder.Send(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
 		sc.pubSpec(), []byte("before"))
 	require.NoError(t, err)
@@ -295,6 +302,7 @@ func TestArchivedChannelRejectsSend(t *testing.T) {
 // team's channel listing carrying the flag, which is what reserves its name.
 func TestArchivedStaysInTheListing(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
 
 	for _, a := range []*privActor{sc.alice, sc.bob} {
@@ -310,6 +318,7 @@ func TestArchivedStaysInTheListing(t *testing.T) {
 // only defence is that the collision never becomes possible.
 func TestArchivedNameStaysReserved(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
 
 	_, err := sc.alice.minder.MakeChannel(
@@ -329,6 +338,7 @@ func TestArchivedNameStaysReserved(t *testing.T) {
 // a channel somebody archived could never be used again.
 func TestRenamedArchivedFreesTheName(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
 
 	require.NoError(t, sc.rename(t, sc.alice, sc.pubSpec(), randomChannelName(t, "retired-"), ""))
@@ -390,6 +400,7 @@ func TestCannotArchiveDefaultChannel(t *testing.T) {
 // that handshake an archived channel would sit in the inbox forever.
 func TestArchivedLeavesTheInbox(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 	_, err := sc.alice.minder.Send(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
 		sc.pubSpec(), []byte("hello"))
 	require.NoError(t, err)
@@ -443,6 +454,7 @@ func inboxHas(t *testing.T, a *privActor, id proto.RTChannelID) bool {
 // build.
 func TestArchiveIsReversible(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 	const n = 4
 	for i := 0; i < n; i++ {
 		_, err := sc.alice.minder.Send(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
@@ -478,6 +490,7 @@ func TestArchiveIsReversible(t *testing.T) {
 // account exists.
 func TestArchivedNotFannedInOnJoin(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
 
 	frank := sc.tew.NewTestUser(t)
@@ -519,6 +532,7 @@ func TestArchivedNotFannedInOnJoin(t *testing.T) {
 // the client, exactly as a box sealed with the wrong derivation would.
 func TestUndecryptableDescriptionKeepsTheName(t *testing.T) {
 	sc := setupMutScene(t)
+	defer sc.requireRTInvariants(t)
 
 	require.Equal(t, sc.pubName, sc.find(t, sc.alice, sc.pubID).Name)
 	sc.corruptDescBox(t, sc.pubID)

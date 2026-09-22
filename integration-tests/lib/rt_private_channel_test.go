@@ -76,6 +76,10 @@ type privScene struct {
 
 	chid proto.RTChannelID
 	name proto.RTChannelName
+
+	// invBaseline is the invariant violation count when this scene was built;
+	// see rt_invariants_test.go.
+	invBaseline map[string]int
 }
 
 // newPrivActor builds an actor with caching disabled, so that every list and
@@ -131,6 +135,13 @@ func setupPrivScene(t *testing.T, skipChannel bool) *privScene {
 	teamID, err := tm.id.ToTeamID()
 	require.NoError(t, err)
 	sc.teamID = teamID
+
+	// Baseline for the realtime invariants (rt_invariants_test.go). Taken
+	// here, because every test in this package shares one postgres and some
+	// violations are left behind legitimately by earlier tests -- notably the
+	// revoke path's deliberate "bump, don't stamp". The assertion is that a
+	// test did not make things worse, not that the database is pristine.
+	sc.invBaseline = sc.rtInvariantCounts(t)
 
 	if skipChannel {
 		return sc
