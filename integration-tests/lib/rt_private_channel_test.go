@@ -865,11 +865,10 @@ func TestPrivateSameErrorAsMissingChannel(t *testing.T) {
 	require.Error(t, errPrivate)
 	require.Equal(t, errMissingThread, errPrivate,
 		"a private channel must be indistinguishable from one that does not exist")
-	errMissing := errMissingThread
 
 	errPrivate = sc.cleo.raw(t).RtReadThrough(sc.cleo.m.Ctx(),
 		rem.RTReadThroughArg{ChannelID: sc.chid, Seq: 1})
-	errMissing = sc.cleo.raw(t).RtReadThrough(sc.cleo.m.Ctx(),
+	errMissing := sc.cleo.raw(t).RtReadThrough(sc.cleo.m.Ctx(),
 		rem.RTReadThroughArg{ChannelID: *missing, Seq: 1})
 	require.Error(t, errPrivate)
 	require.Equal(t, errMissing, errPrivate)
