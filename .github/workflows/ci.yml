@@ -13,7 +13,10 @@ concurrency:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45 was right when this job was lint plus unit tests. It now also runs
+    # two integration steps that bring up containers, and a job killed at the
+    # cap fails the lib gate even when the tests themselves passed.
+    timeout-minutes: 75
     env:
       # Packages to lint + test. client/ is back in: the API drift that made it
       # untypecheckable after the first upstream merge is reconciled, and it is

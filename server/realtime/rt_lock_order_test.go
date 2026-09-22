@@ -24,6 +24,16 @@ package realtime
 // same transaction is free to re-appear -- the lock is already held -- so only
 // the first acquisition of each table counts.
 //
+// TWO PARSER LESSONS, both found by this test covering nothing while passing.
+// Comments are stripped before anything else: prose here names functions
+// freely ("fanned in lazily by reconcileUserChannels (fanin.go)"), and reading
+// that as a call spliced a whole unrelated lock sequence into its neighbour's,
+// inventing a violation. And a call is resolved through its receiver's type,
+// not its bare name: three types declare `run`, so a bare-name lookup gave up
+// on all of them and MakeChannel, SendMessage and MarkReadThrough expanded to
+// nothing at all -- the three transactions this guard most needed to cover.
+// mustCover now fails if any of them stops producing a sequence.
+//
 // WHAT IT DOES NOT CHECK. It reads source, not execution: a lock taken in a
 // branch that never runs still counts, a lock taken through a function value
 // or an interface is invisible, and it cannot see ordering that depends on
@@ -97,12 +107,64 @@ var (
 	}
 	lockSelectFor = regexp.MustCompile(`(?is)\bfrom\s+([a-z_]+)`)
 
-	lockFuncDecl = regexp.MustCompile(`^func\s+(?:\(\s*\w+\s+\*?([A-Za-z0-9_]+)\s*\)\s*)?([A-Za-z0-9_]+)\s*\(`)
-	// A call to something in this package: bare `foo(` or `x.foo(`. Over-matches
-	// (it catches stdlib and method calls on other types too), which is safe --
-	// a name that is not a function in this package simply resolves to nothing.
-	lockCallSite = regexp.MustCompile(`(?:^|[^\w.])(?:[a-zA-Z_][\w]*\.)?([a-zA-Z_][\w]*)\s*\(`)
+	// Group 1 is the receiver VARIABLE, group 2 its type, group 3 the method
+	// name. The variable matters: inside a method, `c.checkPerms(m)` is only
+	// resolvable if `c` is known to be a channelMaker.
+	lockFuncDecl = regexp.MustCompile(`^func\s+(?:\(\s*(\w+)\s+\*?([A-Za-z0-9_]+)\s*\)\s*)?([A-Za-z0-9_]+)\s*\(`)
+	// A call to something in this package. Group 1 is the receiver variable
+	// when there is one (`mk` in `mk.run(m)`), group 2 the name. Over-matches
+	// stdlib and other types, which is safe -- a name that is not a function
+	// here resolves to nothing.
+	lockCallSite = regexp.MustCompile(`(?:^|[^\w.])(?:([a-zA-Z_][\w]*)\.)?([a-zA-Z_][\w]*)\s*\(`)
+	// `mk := channelMaker{` / `s := &messageSender{` -- how every receiver in
+	// this package is built, and what lets an ambiguous method name resolve.
+	// The type is [a-z] as often as [A-Z] here -- channelMaker, messageSender
+	// and readThroughMarker are all unexported, and requiring a capital made
+	// this match nothing at exactly the call sites that needed it.
+	lockVarDecl = regexp.MustCompile(`(?m)^\s*([a-zA-Z_][\w]*)\s*:?=\s*&?([a-zA-Z_][\w]*)\{`)
 )
+
+// stripComments blanks out // and /* */ comments, preserving byte offsets so
+// positions stay comparable, and leaving backtick strings alone (SQL is
+// written in them and can contain anything).
+func stripComments(src string) string {
+	out := []byte(src)
+	inTick, inLine, inBlock := false, false, false
+	for i := 0; i < len(out); i++ {
+		c := out[i]
+		switch {
+		case inLine:
+			if c == '\n' {
+				inLine = false
+			} else {
+				out[i] = ' '
+			}
+		case inBlock:
+			if c == '*' && i+1 < len(out) && out[i+1] == '/' {
+				out[i], out[i+1] = ' ', ' '
+				i++
+				inBlock = false
+			} else if c != '\n' {
+				out[i] = ' '
+			}
+		case inTick:
+			if c == '`' {
+				inTick = false
+			}
+		case c == '`':
+			inTick = true
+		case c == '/' && i+1 < len(out) && out[i+1] == '/':
+			out[i], out[i+1] = ' ', ' '
+			i++
+			inLine = true
+		case c == '/' && i+1 < len(out) && out[i+1] == '*':
+			out[i], out[i+1] = ' ', ' '
+			i++
+			inBlock = true
+		}
+	}
+	return string(out)
+}
 
 // lockFn is one function's own locks and the functions it calls.
 type lockFn struct {
@@ -125,8 +187,10 @@ func parseLockFns(t *testing.T) map[string]*lockFn {
 	ambiguous := map[string]bool{}
 
 	type pending struct {
-		name string
-		body []string
+		name    string
+		recvVar string
+		recvTyp string
+		body    []string
 	}
 	var all []pending
 
@@ -137,23 +201,24 @@ func parseLockFns(t *testing.T) map[string]*lockFn {
 		}
 		body, err := os.ReadFile(nm)
 		require.NoError(t, err)
-		cur := ""
+		cur, curVar, curTyp := "", "", ""
 		var lines []string
 		flush := func() {
 			if cur != "" {
-				all = append(all, pending{cur, lines})
+				all = append(all, pending{cur, curVar, curTyp, lines})
 			}
 			lines = nil
 		}
 		for _, ln := range strings.Split(string(body), "\n") {
 			if m := lockFuncDecl.FindStringSubmatch(ln); m != nil {
 				flush()
-				if m[1] != "" {
-					cur = m[1] + "." + m[2]
+				curVar, curTyp = m[1], m[2]
+				if m[2] != "" {
+					cur = m[2] + "." + m[3]
 				} else {
-					cur = m[2]
+					cur = m[3]
 				}
-				bare := m[2]
+				bare := m[3]
 				if prev, ok := byBare[bare]; ok && prev != cur {
 					ambiguous[bare] = true
 				}
@@ -169,7 +234,13 @@ func parseLockFns(t *testing.T) map[string]*lockFn {
 
 	for _, p := range all {
 		fn := &lockFn{name: p.name}
-		text := strings.Join(p.body, "\n")
+		// Comments stripped FIRST. Prose in this package names functions
+		// freely -- "fanned in lazily by reconcileUserChannels (fanin.go)"
+		// reads as a call to reconcileUserChannels, and spliced that
+		// function's whole lock sequence into the middle of its neighbour's.
+		// That is not a hypothetical: it put user_inbox ahead of channel_acl
+		// in MakeChannel and produced a violation that does not exist.
+		text := stripComments(strings.Join(p.body, "\n"))
 
 		// Locks, positioned by where their SQL literal starts.
 		type at struct {
@@ -216,12 +287,38 @@ func parseLockFns(t *testing.T) map[string]*lockFn {
 			}
 			return false
 		}
+		// Receiver variable -> concrete type, for this function only. Scoped
+		// per function because that is where these are built, and it is what
+		// makes `mk.run(m)` resolvable when three types have a `run`.
+		varType := map[string]string{}
+		// The method's own receiver first, so `c.commit(m)` inside
+		// channelMaker.run resolves to channelMaker.commit.
+		if p.recvVar != "" && p.recvTyp != "" {
+			varType[p.recvVar] = p.recvTyp
+		}
+		for _, mm := range lockVarDecl.FindAllStringSubmatch(text, -1) {
+			varType[mm[1]] = mm[2]
+		}
+		// The declaration line names the function itself; reading it as a call
+		// made every method look like it called something with its own bare
+		// name, which for `run` was ambiguous and poisoned the expansion.
+		declEnd := len(p.body[0]) + 1
 		for _, loc := range lockCallSite.FindAllStringSubmatchIndex(text, -1) {
-			if inSQL(loc[0]) {
+			if inSQL(loc[0]) || loc[0] < declEnd {
 				continue
 			}
-			nm := text[loc[2]:loc[3]]
+			recv := ""
+			if loc[2] >= 0 {
+				recv = text[loc[2]:loc[3]]
+			}
+			nm := text[loc[4]:loc[5]]
 			if nm == p.name {
+				continue
+			}
+			// Prefer the receiver's type: `mk.run` is channelMaker.run, not
+			// whichever `run` happened to be seen last.
+			if typ, ok := varType[recv]; ok {
+				marks = append(marks, at{loc[0], "c:" + typ + "." + nm})
 				continue
 			}
 			marks = append(marks, at{loc[0], "c:" + nm})
@@ -233,7 +330,12 @@ func parseLockFns(t *testing.T) map[string]*lockFn {
 		fns[p.name] = fn
 	}
 
-	// Resolve bare call names to qualified ones where unambiguous.
+	// Resolve bare call names to qualified ones where unambiguous. A name
+	// that is ambiguous AND was not resolved by its receiver above stays
+	// unresolved; TestRealtimeLockOrder fails on a transaction that contains
+	// one rather than quietly skipping the callee's locks, which is how this
+	// guard silently covered nothing for MakeChannel, SendMessage and
+	// MarkReadThrough in its first version.
 	for _, fn := range fns {
 		for i, s := range fn.steps {
 			if !strings.HasPrefix(s, "c:") {
@@ -245,6 +347,10 @@ func parseLockFns(t *testing.T) map[string]*lockFn {
 			}
 			if q, ok := byBare[nm]; ok {
 				fn.steps[i] = "c:" + q
+				continue
+			}
+			if ambiguous[nm] {
+				fn.steps[i] = "?:" + nm
 			}
 		}
 	}
@@ -253,7 +359,7 @@ func parseLockFns(t *testing.T) map[string]*lockFn {
 
 // expand returns the tables a transaction rooted at fn locks, in order, each
 // counted at its first acquisition.
-func expand(fns map[string]*lockFn, name string, seen map[string]bool, out *[]string, has map[string]bool) {
+func expand(fns map[string]*lockFn, name string, seen map[string]bool, out *[]string, has map[string]bool, unresolved *[]string) {
 	fn, ok := fns[name]
 	if !ok || seen[name] {
 		return
@@ -269,7 +375,11 @@ func expand(fns map[string]*lockFn, name string, seen map[string]bool, out *[]st
 				*out = append(*out, tbl)
 			}
 		case strings.HasPrefix(s, "c:"):
-			expand(fns, strings.TrimPrefix(s, "c:"), seen, out, has)
+			expand(fns, strings.TrimPrefix(s, "c:"), seen, out, has, unresolved)
+		case strings.HasPrefix(s, "?:"):
+			// An ambiguous method call whose receiver could not be typed. Its
+			// locks are invisible, so the sequence below it is a guess.
+			*unresolved = append(*unresolved, name+" -> "+strings.TrimPrefix(s, "?:"))
 		}
 	}
 }
@@ -291,10 +401,30 @@ func TestRealtimeLockOrder(t *testing.T) {
 	sort.Strings(roots)
 	require.NotEmpty(t, roots, "found no transactions to check -- the parser is broken, not the code")
 
+	// Transactions that MUST produce a sequence. The first version of this
+	// test resolved `run` to nothing, because three types declare one, so
+	// MakeChannel, SendMessage and MarkReadThrough expanded to an empty list
+	// and were silently checked against nothing -- while the test passed,
+	// because other roots still had sequences. A guard that can cover nothing
+	// and look green is worse than no guard.
+	mustCover := []string{
+		"MakeChannel", "SendMessage", "MarkReadThrough",
+		"UpdateChannel", "SetChannelArchived",
+		"GrantChannelMember", "RevokeChannelMember",
+	}
+
+	seqs := map[string][]string{}
 	var checked int
 	for _, root := range roots {
 		var seq []string
-		expand(fns, root, map[string]bool{}, &seq, map[string]bool{})
+		var unresolved []string
+		expand(fns, root, map[string]bool{}, &seq, map[string]bool{}, &unresolved)
+		seqs[root] = seq
+		require.Emptyf(t, unresolved,
+			"%s(): could not resolve %v, so the locks below those calls are "+
+				"invisible and this transaction's order is unchecked. Give the "+
+				"receiver a concrete type at the call site, or rename the method.",
+			root, unresolved)
 		if len(seq) < 2 {
 			continue
 		}
@@ -315,9 +445,19 @@ func TestRealtimeLockOrder(t *testing.T) {
 				root, seq, seq[i], lockRank[seq[i]], seq[i-1], lockRank[seq[i-1]], root)
 		}
 	}
-	require.GreaterOrEqual(t, checked, 5,
-		"only %d transactions had a checkable lock sequence; the parser has probably "+
-			"stopped resolving calls, which would make this test pass by seeing nothing", checked)
+	for _, name := range mustCover {
+		require.Containsf(t, roots, name,
+			"%q no longer opens a transaction. If it was renamed, update mustCover; "+
+				"if it stopped being a transaction, say so here.", name)
+		require.GreaterOrEqualf(t, len(seqs[name]), 2,
+			"%s() expanded to %v -- fewer than two locks, so nothing about its order "+
+				"was checked. This is what a broken parser looks like from the inside, "+
+				"and it is exactly how this test covered nothing for three transactions "+
+				"while passing. Fix call resolution rather than removing the entry.",
+			name, seqs[name])
+	}
+	require.GreaterOrEqual(t, checked, len(mustCover),
+		"only %d transactions had a checkable lock sequence", checked)
 
 	// A stale exception makes the rule look more contested than it is.
 	for name := range lockOrderExceptions {
