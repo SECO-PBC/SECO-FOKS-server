@@ -353,12 +353,14 @@ existing RT block runs `@12001`–`@12007`.
 - `SetChannelArchived(m, team, appID, chSpec, archived Bool)` — same shape,
   and **no collision check on unarchive**: §3.3 reserves the name for the
   whole time the channel is archived, so there is nothing to collide with.
-- **The listing filter moves to the client.** `ListAllChannelsForTeam`
-  already drops `unreadable` rows before the app sees them; it now also
-  partitions on `archived`, returning live channels as today and archived ones
-  only to a caller that asks. Keeping archived rows *inside* librt's cache
-  while hiding them from the default view is what makes the collision map
-  complete without listing closed channels in the members' default view.
+- **The listing filter is the caller's, not the agent's. As built,**
+  `ListAllChannelsForTeam` returns archived channels alongside live ones,
+  each carrying `archived`, and does *not* partition them. Deciding what a
+  channel list shows is a product question, and the agent is the wrong place
+  to settle it; the CLI marks archived rows, and the app must filter on the
+  flag when it wires this up. An earlier draft of this section described a
+  partition that was never built — recorded here rather than quietly dropped,
+  because the app work depends on which of the two is true.
 - Both drop through to agent (`lcl`) RPCs following the `clientRTChannelGrant
   @5` / `Revoke @6` / `Members @7` precedent → `clientRTUpdateChannel @8`,
   `clientRTSetChannelArchived @9`, addressing the channel by

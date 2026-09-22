@@ -4,8 +4,11 @@
  *
  * An archived channel is closed to new activity and leaves the inbox, but it
  * is not deleted: every message, party, ACL and delivery row stays. NULL means
- * live, so existing channels need no backfill and every read path spells the
- * predicate `archived_at IS NULL`.
+ * live, so existing channels need no backfill. Only the paths that
+ * deliberately exclude archived channels test it -- today just the late-join
+ * fan-in's anti-join. The team listing, the inbox delta and reads by explicit
+ * channel id all still serve an archived channel, each for its own reason
+ * (see below and docs/rt-channel-mutation.md).
  *
  * A nullable timestamp rather than a boolean, because "when was this closed"
  * is the question that gets asked afterwards and the column costs the same.

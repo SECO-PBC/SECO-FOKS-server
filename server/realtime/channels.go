@@ -1133,6 +1133,101 @@ func (c *channelMutator) finish(m shared.MetaContext) error {
 	return touchChannelSet(m, c.tx, c.ca.team, c.appDB, c.chid)
 }
 
+// fanInEligibleMembers gives a delivery row to every current team member who
+// can read the channel and has none, at one fresh inbox version each.
+//
+// Unarchiving needs this and stampMembers is not enough. The late-join fan-in
+// skips archived channels -- it has to, or it would re-create rows for them on
+// every sync -- but it still records the membership version it reconciled
+// through. So a member who joined the team while the channel was archived is
+// recorded as reconciled, has no delivery row, and will never be given one:
+// stampMembers only re-stamps rows that already exist, and the fan-in will not
+// look again until their membership changes. They would be permanently absent
+// from a channel everybody else can see.
+//
+// Only for public channels. A private channel's membership is its ACL, which
+// archiving does not touch, so its rows are all still there.
+func (c *channelMutator) fanInEligibleMembers(m shared.MetaContext) error {
+	if c.ca.private {
+		return nil
+	}
+	readRole, err := core.ImportRole(c.ca.readRole)
+	if err != nil {
+		return err
+	}
+	ownerType, ownerViz, err := proto.OwnerRole.ExportToDB()
+	if err != nil {
+		return err
+	}
+	rows, err := c.userdb.Query(
+		m.Ctx(),
+		`SELECT member_id, dst_role_type, dst_viz_level
+		 FROM team_members
+		 WHERE short_host_id=$1
+		 AND team_id=$2
+		 AND member_host_id=$3
+		 AND src_role_type=$4
+		 AND src_viz_level=$5
+		 AND active=true`,
+		m.ShortHostID(),
+		c.ca.team.ExportToDB(),
+		shared.ExportHostP(nil),
+		ownerType,
+		ownerViz,
+	)
+	if err != nil {
+		return err
+	}
+	var uids []proto.UID
+	for rows.Next() {
+		var memRaw []byte
+		var dstType, dstViz int
+		if err = rows.Scan(&memRaw, &dstType, &dstViz); err != nil {
+			rows.Close()
+			return err
+		}
+		var pid proto.PartyID
+		if err = pid.ImportFromDB(memRaw); err != nil {
+			rows.Close()
+			return err
+		}
+		if !pid.IsUser() {
+			continue
+		}
+		memRole, err := core.ImportRoleKeyFromDB(dstType, dstViz)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		if memRole.LessThan(*readRole) {
+			continue
+		}
+		uid, err := pid.UID()
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		uids = append(uids, uid)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	// Ascending uid, the package-wide user_inbox lock order.
+	slices.SortFunc(uids, func(a, b proto.UID) int { return bytes.Compare(a[:], b[:]) })
+	for _, uid := range uids {
+		inserted, err := fanUserIntoChannel(m, c.tx, uid, c.appDB, proto.RTChannelIDShort(c.chid))
+		if err != nil {
+			return err
+		}
+		if inserted {
+			c.wakeUIDs = append(c.wakeUIDs, uid)
+		}
+	}
+	return nil
+}
+
 // dropChannelPushes discards a closing channel's undelivered push rows.
 //
 // Held rows would otherwise sit forever: only a hold's holder may decide one,
@@ -1296,6 +1391,8 @@ func SetChannelArchived(m shared.MetaContext, arg rem.RtSetChannelArchivedArg) e
 				if err := dropChannelPushes(m, tx, mu.chid); err != nil {
 					return nil, err
 				}
+			} else if err := mu.fanInEligibleMembers(m); err != nil {
+				return nil, err
 			}
 			if err := touchChannelSet(m, tx, mu.ca.team, mu.appDB, mu.chid); err != nil {
 				return nil, err

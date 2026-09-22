@@ -184,7 +184,10 @@ func (d *Minder) SyncInboxWithPageSize(
 		// and a failure just means no snippet until the channel next bumps.
 		for i := range delta.Channels {
 			ch := &delta.Channels[i]
-			if ch.Md.LastMsg == nil {
+			// An archived channel was just dropped from the index; prefetching
+			// a snippet for a row nothing will render is a thread read and a
+			// cache write per member for nothing.
+			if ch.Md.LastMsg == nil || ch.Md.Archived {
 				continue
 			}
 			err := d.prefetchLastMsg(m, ch)

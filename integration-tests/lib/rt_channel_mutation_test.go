@@ -29,6 +29,7 @@ import (
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
+	"github.com/foks-proj/go-foks/proto/rem"
 	"github.com/foks-proj/go-foks/server/shared"
 	"github.com/stretchr/testify/require"
 )
@@ -172,11 +173,18 @@ func TestRenameResealsAtTierRole(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, proto.RTChannelTier_Admin, sc.pubChannelTier(t, *adminID))
 
+	// Renamed by ALICE, the team owner, whose role is above AdminRole. Renaming
+	// as dara would seal at AdminRole whether the code used the tier's role or
+	// the caller's, so that version of this assertion could not tell them
+	// apart. dara must be able to read the result and bob must not.
 	renamedAdmin := randomChannelName(t, "admin2-")
-	require.NoError(t, sc.rename(t, sc.dara, sc.specFor(*adminID), renamedAdmin, ""))
-	require.Equal(t, renamedAdmin, sc.find(t, sc.alice, *adminID).Name)
+	require.NoError(t, sc.rename(t, sc.alice, sc.specFor(*adminID), renamedAdmin, ""))
 	require.Equal(t, proto.RTChannelTier_Admin, sc.pubChannelTier(t, *adminID),
 		"a rename must not move the channel between tiers")
+	fromDara := sc.find(t, sc.dara, *adminID)
+	require.NotNil(t, fromDara, "a team admin must still see an admin-tier channel")
+	require.Equal(t, renamedAdmin, fromDara.Name,
+		"an admin-tier rename must stay readable at AdminRole, not at the owner's role")
 	require.Nil(t, sc.find(t, sc.bob, *adminID),
 		"an admin-tier channel's name must not become visible to an ordinary member")
 }
@@ -210,14 +218,21 @@ func TestRenameCasRace(t *testing.T) {
 	sc := setupMutScene(t)
 	before := sc.find(t, sc.alice, sc.pubID).Seqno
 
-	var wg sync.WaitGroup
-	errs := make([]error, 2)
+	// Names generated HERE, on the test goroutine: randomChannelName calls
+	// require, and testify's FailNow must not run off the test goroutine --
+	// it would also leave errs[i] zero and let the assertions below pass.
 	actors := []*privActor{sc.alice, sc.dara}
+	names := []proto.RTChannelName{
+		randomChannelName(t, "race-"), randomChannelName(t, "race-"),
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, len(actors))
 	for i := range actors {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = sc.rename(t, actors[i], sc.pubSpec(), randomChannelName(t, "race-"), "")
+			errs[i] = actors[i].minder.UpdateChannel(actors[i].m, sc.teamCfg(),
+				proto.RTAppID_Chat, sc.pubSpec(), names[i], "")
 		}(i)
 	}
 	wg.Wait()
@@ -348,6 +363,20 @@ func TestCannotArchiveDefaultChannel(t *testing.T) {
 	}
 	require.NotNil(t, defID, "the default channel should exist")
 
+	// Through the raw client, not the Minder: Minder.SetChannelArchived
+	// refuses the empty name locally, so going through it would assert the
+	// client guard and never reach the server's structural check.
+	var seqno proto.RTChannelSeqno
+	for i := range lst.Channels {
+		if lst.Channels[i].Id.Eq(*defID) {
+			seqno = lst.Channels[i].Seqno
+		}
+	}
+	err = sc.alice.raw(t).RtSetChannelArchived(sc.alice.m.Ctx(),
+		rem.RtSetChannelArchivedArg{Chid: *defID, Seqno: seqno, Archived: true})
+	require.Error(t, err, "the server must refuse to archive the default channel")
+
+	// And the client refuses it too, before the RPC.
 	err = sc.alice.minder.SetChannelArchived(sc.alice.m, sc.teamCfg(),
 		proto.RTAppID_Chat, lcl.NewRTChannelSpecifierWithId(*defID), true)
 	require.Error(t, err)

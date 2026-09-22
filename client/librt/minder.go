@@ -2619,6 +2619,38 @@ func nameRoleForTier(tier proto.RTChannelTier) proto.Role {
 	return proto.MinRTRole
 }
 
+// keyMgrForRole builds a sealing key manager for one role, turning the "this
+// caller holds no key at that role" case into an error rather than a panic.
+//
+// PrivateKeysForRole returns (nil, nil) when the caller has no keys for the
+// role -- not an error, just an absence -- and calling Current() on that nil
+// sequence panics. It is reachable: the server deliberately lets a team admin
+// manage a channel whose read role sits above their own, so editing such a
+// channel's description asks for a key the admin does not hold.
+func keyMgrForRole(
+	m MetaContext,
+	rtp *RTParty,
+	appID proto.RTAppID,
+	role proto.Role,
+	what string,
+) (
+	*KeyMgr,
+	error,
+) {
+	seq, err := rtp.PLCNode().SKM().PrivateKeysForRole(m.Base(), role)
+	if err != nil {
+		return nil, err
+	}
+	if seq == nil {
+		return nil, core.KeyNotFoundError{Which: what}
+	}
+	cur := seq.Current()
+	if cur == nil {
+		return nil, core.KeyNotFoundError{Which: what}
+	}
+	return NewKeyMgr(cur, appID)
+}
+
 // UpdateChannel renames a channel and replaces its description. An empty desc
 // clears it. Admin-only, enforced by the server.
 //
@@ -2655,10 +2687,12 @@ func (d *Minder) SetChannelArchived(
 		if err != nil {
 			return err
 		}
-		if archived && ch.Name.IsEmpty() {
-			// The default channel is never archived. The client can say so by
-			// name; the server can only approximate it (isDefaultChannel), so
-			// say it here where the answer is exact.
+		// The default channel is never archived. The client can recognise it by
+		// name, which the server cannot. Private channels are excluded for the
+		// same reason the server excludes them: a private channel may also
+		// carry an empty name, and it is never the team's default one, so
+		// testing the name alone would wrongly refuse to archive it.
+		if archived && !ch.Private && ch.Name.IsEmpty() {
 			return core.RTGenericError("cannot archive a team's default channel")
 		}
 		return cli.RtSetChannelArchived(m.Ctx(), rem.RtSetChannelArchivedArg{
@@ -2741,8 +2775,13 @@ func (d *Minder) updateChannelOneAttempt(
 	nm proto.RTChannelName,
 	desc proto.RTChannelDesc,
 ) error {
-	if nm.Eq(proto.RTGeneralChannel) {
-		return core.RTGenericError("cannot rename a channel to #general")
+	// The default channel carries the EMPTY name, and "general" is its
+	// reserved alias (MakeChannel refuses both). Renaming onto either would
+	// produce a second default channel -- and at a different tier the
+	// collision check would not even catch it, since names are compared
+	// per-tier.
+	if nm.IsEmpty() || nm.Eq(proto.RTGeneralChannel) {
+		return core.RTGenericError("cannot rename a channel to the default channel's name")
 	}
 	rtp, ch, lst, cli, err := d.loadChannelForMutation(m, team, appID, spec)
 	if err != nil {
@@ -2768,11 +2807,7 @@ func (d *Minder) updateChannelOneAttempt(
 	// The name is sealed at the channel's tier role, the description at its
 	// read role -- both properties of the CHANNEL, not of whoever is editing
 	// it. The server rejects a box at any other role.
-	nameKeySeq, err := rtp.PLCNode().SKM().PrivateKeysForRole(m.Base(), nameRoleForTier(ch.Tier))
-	if err != nil {
-		return err
-	}
-	nameKeyMgr, err := NewKeyMgr(nameKeySeq.Current(), appID)
+	nameKeyMgr, err := keyMgrForRole(m, rtp, appID, nameRoleForTier(ch.Tier), "channel name")
 	if err != nil {
 		return err
 	}
@@ -2789,11 +2824,7 @@ func (d *Minder) updateChannelOneAttempt(
 	}
 
 	if !desc.IsEmpty() {
-		descKeySeq, err := rtp.PLCNode().SKM().PrivateKeysForRole(m.Base(), ch.Roles.Read)
-		if err != nil {
-			return err
-		}
-		descKeyMgr, err := NewKeyMgr(descKeySeq.Current(), appID)
+		descKeyMgr, err := keyMgrForRole(m, rtp, appID, ch.Roles.Read, "channel description")
 		if err != nil {
 			return err
 		}

@@ -335,6 +335,10 @@ func ReleasePushes(m shared.MetaContext, arg rem.RtReleasePushesArg) error {
 
 // NotifyMembers queues one content-free 'system' push per entry whose member
 // can read the channel. Others are skipped without error.
+// NotifyMembers queues system pushes, which is new activity, so an archived
+// channel must not produce one. holderTx authorizes at accessRead, which the
+// chokepoint deliberately does not gate on archived_at (a read by explicit id
+// still works), so the check belongs here rather than there.
 func NotifyMembers(m shared.MetaContext, arg rem.RtNotifyMembersArg) error {
 	if len(arg.Entries) > maxPushNotifyEntries {
 		return core.BadArgsError("too many push notify entries")
@@ -355,6 +359,9 @@ func NotifyMembers(m shared.MetaContext, arg rem.RtNotifyMembersArg) error {
 	arg.Entries = entries
 	return holderTx(m, arg.ChannelID, "realtime.NotifyMembers",
 		func(m shared.MetaContext, tx pgx.Tx, ca *channelAuth, userdb shared.Querier) error {
+			if err := archivedBlocks(ca.archivedAt); err != nil {
+				return err
+			}
 			if len(arg.Entries) == 0 {
 				return nil
 			}

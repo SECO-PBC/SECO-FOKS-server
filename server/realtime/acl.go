@@ -432,6 +432,35 @@ func dropChannelMember(
 	}
 	removed := tag.RowsAffected() > 0
 
+	// The inbox bump comes BEFORE the user_channels delete, and the order is a
+	// lock order rather than a preference: every other writer in this package
+	// takes user_inbox before the user_channels rows it touches (see
+	// channelMutator.finish). Deleting first would invert this against a
+	// concurrent channel mutation, which holds a member's user_inbox row and
+	// then updates that member's user_channels row.
+	//
+	// Bump, don't stamp: the revoked user has no user_channels row left to
+	// stamp, so this version is a deliberate gap. It is what makes their next
+	// sync return a head they haven't seen, and hence run the full sync in
+	// which the channel is simply absent. The client-side rule (drop the
+	// channel and its cached plaintext) is the follow-up client spec's; the
+	// server cannot enforce it.
+	if bumpInbox {
+		_, err = tx.Exec(
+			m.Ctx(),
+			`INSERT INTO user_inbox (short_host_id, uid, app_id, inbox_version, mtime)
+			 VALUES ($1, $2, $3, 1, NOW())
+			 ON CONFLICT (short_host_id, uid, app_id)
+			 DO UPDATE SET inbox_version = user_inbox.inbox_version + 1, mtime = NOW()`,
+			m.ShortHostID(),
+			uid.ExportToDB(),
+			appDB,
+		)
+		if err != nil {
+			return false, err
+		}
+	}
+
 	_, err = tx.Exec(
 		m.Ctx(),
 		`DELETE FROM user_channels
@@ -439,30 +468,6 @@ func dropChannelMember(
 		m.ShortHostID(),
 		channelID,
 		uid.ExportToDB(),
-	)
-	if err != nil {
-		return false, err
-	}
-
-	if !bumpInbox {
-		return removed, nil
-	}
-
-	// Bump, don't stamp: the revoked user has no user_channels row left to
-	// stamp, so this version is a deliberate gap. It is what makes their next
-	// sync return a head they haven't seen, and hence run the full sync in
-	// which the channel is simply absent. The client-side rule (drop the
-	// channel and its cached plaintext) is the follow-up client spec's; the
-	// server cannot enforce it.
-	_, err = tx.Exec(
-		m.Ctx(),
-		`INSERT INTO user_inbox (short_host_id, uid, app_id, inbox_version, mtime)
-		 VALUES ($1, $2, $3, 1, NOW())
-		 ON CONFLICT (short_host_id, uid, app_id)
-		 DO UPDATE SET inbox_version = user_inbox.inbox_version + 1, mtime = NOW()`,
-		m.ShortHostID(),
-		uid.ExportToDB(),
-		appDB,
 	)
 	if err != nil {
 		return false, err
@@ -757,6 +762,16 @@ func RevokeChannelMember(
 			}
 			ca, err := authorizeChannel(m, tx, userdb, chid, want, false)
 			if err != nil {
+				return nil, err
+			}
+			// Self-revoke reaches here at accessRoster, which the chokepoint's
+			// archived gate does not block -- reading the roster of an
+			// archived channel is fine. REMOVING yourself from one is not:
+			// archive is meant to preserve the ACL and delivery rows exactly,
+			// so that unarchiving restores the channel with its membership
+			// intact. Leaving a channel nobody can see or post in has no use
+			// that is worth breaking that.
+			if err := archivedBlocks(ca.archivedAt); err != nil {
 				return nil, err
 			}
 			appDB, err := ca.appID.ExportToDB()

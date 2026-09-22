@@ -66,8 +66,8 @@ var rpcAccessClass = map[string]rpcClassification{
 	},
 	"rtSetChannelArchived": {
 		channelWrite,
-		"TestArchiveRequiresAdmin, TestUnarchiveRestoresToInbox, " +
-			"TestCannotArchiveGeneral (row 17). Chokepoint at accessMutate",
+		"TestArchiveRequiresAdmin, TestArchivedLeavesTheInbox, " +
+			"TestCannotArchiveDefaultChannel (row 17). Chokepoint at accessMutate",
 	},
 	"rtNewChannel": {
 		channelWrite,

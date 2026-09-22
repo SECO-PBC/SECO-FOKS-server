@@ -81,11 +81,6 @@ CREATE TABLE channels (
     ctime TIMESTAMPTZ NOT NULL,
     mtime TIMESTAMPTZ NOT NULL,
     updated_at_set_vers INTEGER NOT NULL, /* corresponds to channel_sets at time of update */
-    /* fork-only (p9): NULL = live. An archived channel is closed to new
-     * activity and leaves the inbox, but keeps every row it had and STAYS in
-     * the team's channel listing, which is what reserves its (encrypted) name.
-     * See docs/rt-channel-mutation.md. */
-    archived_at TIMESTAMPTZ,
     /* Orthogonal to tier: additionally requires a channel_acl row. Declared
      * last to match the column order ADD COLUMN gives a patched database
      * (patches/foks_realtime/p5.sql), so a fresh and a migrated DB dump the
@@ -99,6 +94,13 @@ CREATE TABLE channels (
      * declared last -- it matches the order ADD COLUMN gives a patched
      * database (patches/foks_realtime/p6.sql, which runs after p5). */
     no_push BOOLEAN NOT NULL DEFAULT false,
+    /* fork-only (p9): NULL = live. An archived channel is closed to new
+     * activity and leaves the inbox, but keeps every row it had and STAYS in
+     * the team's channel listing, which is what reserves its (encrypted) name.
+     * Declared last, like the fork columns above it, so a fresh install's
+     * column order matches what ADD COLUMN produces on a migrated database.
+     * See docs/rt-channel-mutation.md. */
+    archived_at TIMESTAMPTZ,
     PRIMARY KEY(short_host_id, channel_id)
 );
 /* no FK to teams (cross-DB); enforced at app layer */
