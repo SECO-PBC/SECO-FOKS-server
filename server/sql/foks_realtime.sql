@@ -81,6 +81,11 @@ CREATE TABLE channels (
     ctime TIMESTAMPTZ NOT NULL,
     mtime TIMESTAMPTZ NOT NULL,
     updated_at_set_vers INTEGER NOT NULL, /* corresponds to channel_sets at time of update */
+    /* fork-only (p9): NULL = live. An archived channel is closed to new
+     * activity and leaves the inbox, but keeps every row it had and STAYS in
+     * the team's channel listing, which is what reserves its (encrypted) name.
+     * See docs/rt-channel-mutation.md. */
+    archived_at TIMESTAMPTZ,
     /* Orthogonal to tier: additionally requires a channel_acl row. Declared
      * last to match the column order ADD COLUMN gives a patched database
      * (patches/foks_realtime/p5.sql), so a fresh and a migrated DB dump the
@@ -349,3 +354,4 @@ INSERT INTO schema_patches (id, ctime) VALUES (5, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (6, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (7, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (8, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (9, NOW());
