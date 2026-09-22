@@ -5,6 +5,7 @@ package kvStore
 
 import (
 	"bytes"
+	"errors"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/lib/kv"
@@ -92,6 +93,7 @@ func putSmallFileOrSymlink(
 	pid proto.PartyID,
 	role proto.Role,
 	arg rem.KvPutSmallFileOrSymlinkArg,
+	chid *int64,
 ) (bool, error) {
 	err := assertAtOrAbove(role, arg.Sfb.Rg.Role, proto.KVOp_Read, proto.KVNodeType_Symlink)
 	if err != nil {
@@ -122,8 +124,8 @@ func putSmallFileOrSymlink(
 		m.Ctx(),
 		`INSERT INTO small_file_or_symlink(short_host_id, short_party_id, node_id, 
 			ptk_gen, read_role_type, read_role_viz_level,
-			size, box, ctime, mtime, refcount 
-		) VALUES($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), 0)
+			size, box, channel_id, ctime, mtime, refcount 
+		) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW(), 0)
 		 ON CONFLICT DO NOTHING`,
 		int(m.HostID().Short),
 		pid.Shorten().ExportToDB(),
@@ -133,6 +135,7 @@ func putSmallFileOrSymlink(
 		int(rk.Lev),
 		len(arg.Sfb.DataBox),
 		arg.Sfb.DataBox.ExportToDB(),
+		chid,
 	)
 	if err != nil {
 		return false, err
@@ -154,23 +157,27 @@ func putSmallFileOrSymlink(
 		// a row that no longer exists.
 		var box []byte
 		var gen, rt, vl int
+		var storedChid *int64
 		err = tx.QueryRow(
 			m.Ctx(),
-			`SELECT box, ptk_gen, read_role_type, read_role_viz_level
+			`SELECT box, ptk_gen, read_role_type, read_role_viz_level, channel_id
 			 FROM small_file_or_symlink
 			 WHERE short_host_id=$1 AND short_party_id=$2 AND node_id=$3
 			 FOR UPDATE`,
 			int(m.HostID().Short),
 			pid.Shorten().ExportToDB(),
 			arg.Id.ExportToDB(),
-		).Scan(&box, &gen, &rt, &vl)
+		).Scan(&box, &gen, &rt, &vl, &storedChid)
 		if err != nil {
 			return false, err
 		}
+		// The tag joins the comparison for the same reason the rest of it is
+		// here, and it is what keeps the tag immutable on this path.
 		if bytes.Equal(box, arg.Sfb.DataBox) &&
 			gen == int(arg.Sfb.Rg.Gen) &&
 			rt == int(rk.Typ) &&
-			vl == int(rk.Lev) {
+			vl == int(rk.Lev) &&
+			eqChannelTag(storedChid, chid) {
 			// An identical replay. No second usage charge.
 			return true, nil
 		}
@@ -238,16 +245,39 @@ type fileUploader struct {
 	fid  proto.FileID
 	chnk proto.UploadChunk
 	md   proto.LargeFileMetadata
+	chid *int64
 }
 
 func (f *fileUploader) assertUploading(m shared.MetaContext) error {
 	var status string
+	var chid *int64
 	err := f.tx.QueryRow(
 		m.Ctx(),
-		`SELECT status FROM large_file
+		`SELECT status, channel_id FROM large_file
 		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3`,
 		int(m.HostID().Short), f.pid.Shorten().ExportToDB(), f.fid.ExportToDB(),
-	).Scan(&status)
+	).Scan(&status, &chid)
+	// A file with no row answers exactly as one the caller may not see. Left
+	// as pgx.ErrNoRows it would differ from the masked answer below, and the
+	// pair would tell a caller holding a guessed ID whether a private
+	// channel's file exists.
+	if err != nil && errors.Is(err, pgx.ErrNoRows) {
+		return core.UploadError("file not in uploading state")
+	}
+	if err != nil {
+		return err
+	}
+	// Channel-ACL chokepoint (acl.go). kvFileUploadChunk names a file by ID
+	// alone, with no directory in front of it, and this is the only place
+	// that loads the file's row -- so without this check a caller outside the
+	// channel could append to a tagged file mid-upload if they learned its
+	// ID. The design does not rest on IDs being secret, so it is checked
+	// rather than assumed. Masked as the status error a caller who cannot
+	// see the file would otherwise get, so the tag discloses nothing.
+	err = authorizeKVNodeRead(m, f.pid, chid)
+	if errors.Is(err, errKVNodeMasked) {
+		return core.UploadError("file not in uploading state")
+	}
 	if err != nil {
 		return err
 	}
@@ -304,8 +334,12 @@ func fileUploadInit(
 	pid proto.PartyID,
 	role proto.Role,
 	arg rem.KvFileUploadInitArg,
+	chid *int64,
 ) error {
-	ful := fileUploader{tx: tx, pid: pid, role: role, fid: arg.FileID, md: arg.Md, chnk: arg.Chunk, lfe: lfe}
+	ful := fileUploader{
+		tx: tx, pid: pid, role: role, fid: arg.FileID,
+		md: arg.Md, chnk: arg.Chunk, lfe: lfe, chid: chid,
+	}
 	return ful.run(m)
 }
 
@@ -334,14 +368,15 @@ func (f *fileUploader) insLargeFile(m shared.MetaContext) error {
 		m.Ctx(),
 		`INSERT INTO large_file(
 			short_host_id, short_party_id, file_id, size, 
-			ctime, mtime, refcount, status, storage_type
-		) VALUES($1, $2, $3, $4, NOW(), NOW(), 0, $5, $6)`,
+			ctime, mtime, refcount, status, storage_type, channel_id
+		) VALUES($1, $2, $3, $4, NOW(), NOW(), 0, $5, $6, $7)`,
 		int(m.HostID().Short),
 		f.pid.Shorten().ExportToDB(),
 		f.fid.ExportToDB(),
 		0, // will update later
 		LargeFileStatusUploading.ExportToDB(),
 		f.lfe.Strategy().ExportToDB(),
+		f.chid,
 	)
 	if err != nil {
 		return err
@@ -558,6 +593,7 @@ func loadLargeFileMetadata(
 	var v, ptkg, rt, vl int
 	var keyBox []byte
 	var status string
+	var chid *int64
 	fid, err := val.ToFileID()
 	if err != nil {
 		return nil, err
@@ -566,20 +602,49 @@ func loadLargeFileMetadata(
 	err = db.QueryRow(
 		m.Ctx(),
 		`SELECT version, read_role_type, read_role_viz_level, ptk_gen, key_box,
-		    status
+		    status, large_file.channel_id
 		FROM large_file
 		JOIN large_file_key USING(short_host_id, short_party_id, file_id)
 		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3
 		ORDER BY version DESC
 		LIMIT 1`,
 		int(m.ShortHostID()), pid.Shorten().ExportToDB(), fid.ExportToDB(),
-	).Scan(&v, &rt, &vl, &ptkg, &keyBox, &status)
+	).Scan(&v, &rt, &vl, &ptkg, &keyBox, &status, &chid)
 	if err != nil && err == pgx.ErrNoRows {
 		return nil, core.NotFoundError("large file metadata")
 	}
 	if err != nil {
 		return nil, err
 	}
+	// Channel-ACL chokepoint (acl.go): ahead of the role gate, so a
+	// non-member below the read role learns nothing a non-member above it
+	// would not, and masked as the same not-found a missing file answers.
+	err = authorizeKVNodeRead(m, pid, chid)
+	if errors.Is(err, errKVNodeMasked) {
+		return nil, core.NotFoundError("large file metadata")
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Authorize before disclosing anything further about the file. Every other
+	// loader in this package checks this -- getDir, listDir, loadDirent and
+	// mLoadSmallFilesOrSymlinks -- and large files were the one node type that
+	// did not, even though this function hands back the key box.
+	//
+	// The check comes before the status switch on purpose: KVUploadInProgress
+	// and KVNoent below distinguish an uploading file from a deleted one from
+	// a live one, which is exactly what a caller under the read role must not
+	// learn. It also avoids decoding the key box for a caller who is refused.
+	var fileRole proto.Role
+	err = fileRole.ImportFromDB(rt, vl)
+	if err != nil {
+		return nil, err
+	}
+	err = assertAtOrAbove(role, fileRole, proto.KVOp_Read, proto.KVNodeType_File)
+	if err != nil {
+		return nil, err
+	}
+
 	st, err := ParseLargeFileStatus(status)
 	if err != nil {
 		return nil, err
@@ -601,17 +666,62 @@ func loadLargeFileMetadata(
 
 	ret := proto.LargeFileMetadata{
 		Rg: proto.RoleAndGen{
-			Gen: proto.Generation(ptkg),
+			Role: fileRole,
+			Gen:  proto.Generation(ptkg),
 		},
 		KeySeed: sb,
 		Vers:    proto.KVVersion(v),
 	}
-	err = ret.Rg.Role.ImportFromDB(rt, vl)
-	if err != nil {
-		return nil, err
-	}
 
 	return &ret, nil
+}
+
+// loadLargeFileReadRole reads the read role of a large file's current version,
+// for callers that must authorize access without loading the key box.
+func loadLargeFileReadRole(
+	m shared.MetaContext,
+	db *pgxpool.Conn,
+	pid proto.PartyID,
+	fid proto.FileID,
+) (
+	proto.Role,
+	error,
+) {
+	var ret proto.Role
+	var rt, vl int
+	var chid *int64
+	err := db.QueryRow(
+		m.Ctx(),
+		`SELECT read_role_type, read_role_viz_level, large_file.channel_id
+		FROM large_file_key
+		JOIN large_file USING(short_host_id, short_party_id, file_id)
+		WHERE short_host_id=$1 AND short_party_id=$2 AND file_id=$3
+		ORDER BY version DESC
+		LIMIT 1`,
+		int(m.ShortHostID()), pid.Shorten().ExportToDB(), fid.ExportToDB(),
+	).Scan(&rt, &vl, &chid)
+	if err != nil && err == pgx.ErrNoRows {
+		return ret, core.NotFoundError("large file key")
+	}
+	if err != nil {
+		return ret, err
+	}
+	// Channel-ACL chokepoint (acl.go): getChunk serves raw ciphertext by
+	// file ID with no directory context, so the tag rides the file's own
+	// identity row. Masked as the not-found a missing file answers, ahead
+	// of the caller's role check.
+	err = authorizeKVNodeRead(m, pid, chid)
+	if errors.Is(err, errKVNodeMasked) {
+		return ret, core.NotFoundError("large file key")
+	}
+	if err != nil {
+		return ret, err
+	}
+	err = ret.ImportFromDB(rt, vl)
+	if err != nil {
+		return ret, err
+	}
+	return ret, nil
 }
 
 func getNode(
@@ -643,6 +753,19 @@ func getChunk(
 	*rem.GetEncryptedChunkRes,
 	error,
 ) {
+	// Authorize before serving bytes. This path accepted a role and ignored it,
+	// so chunks of any large file went to any party member who knew the file
+	// ID, at any role. The chunk is sealed to the PTK at the file's read role,
+	// so this was not a plaintext leak; it disclosed existence, size and chunk
+	// layout, and left the whole gate to the crypto.
+	fileRole, err := loadLargeFileReadRole(m, db, pid, arg.Id)
+	if err != nil {
+		return nil, err
+	}
+	err = assertAtOrAbove(role, fileRole, proto.KVOp_Read, proto.KVNodeType_File)
+	if err != nil {
+		return nil, err
+	}
 	return lfe.Get(m, db, pid, arg.Id, arg.Offset)
 }
 
@@ -696,6 +819,14 @@ func loadNode(
 		}
 		tmp := rem.NewKVGetNodeResWithDir(*dir)
 		ret = &tmp
+	default:
+		// KVNodeType_None is a tombstone, which is a legal value of the type
+		// -- Type() returns it without error -- but not a node anyone can
+		// load. Without this arm ret stays nil and the caller dereferences
+		// it. A default rather than a None case so that a node type added to
+		// the enum later fails loudly here instead of panicking in the
+		// handler. Also upstream as #374.
+		return nil, core.BadArgsError("cannot load a node of this type")
 	}
 	return ret, nil
 }
@@ -716,7 +847,8 @@ func mLoadSmallFilesOrSymlinks(
 
 	rows, err := db.Query(
 		m.Ctx(),
-		`SELECT ptk_gen, box, read_role_type, read_role_viz_level, node_id
+		`SELECT ptk_gen, box, read_role_type, read_role_viz_level, node_id,
+		    channel_id
 		FROM small_file_or_symlink
 		WHERE short_host_id=$1 AND short_party_id=$2 AND node_id = ANY($3)`,
 		int(m.ShortHostID()), pid.Shorten().ExportToDB(), nodeIDs,
@@ -734,11 +866,25 @@ func mLoadSmallFilesOrSymlinks(
 		var box []byte
 		var rt, vl int
 		var nodeIdRaw []byte
+		var chid *int64
 
-		err := rows.Scan(&g, &box, &rt, &vl, &nodeIdRaw)
+		err := rows.Scan(&g, &box, &rt, &vl, &nodeIdRaw, &chid)
 		if err != nil {
 			return nil, err
 		}
+
+		// Channel-ACL chokepoint (acl.go): a denied row is simply not
+		// added to the table, which is byte-for-byte how a row that does
+		// not exist behaves on both the direct-load and the listing path,
+		// and it happens ahead of the role check below.
+		err = authorizeKVNodeRead(m, pid, chid)
+		if errors.Is(err, errKVNodeMasked) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+
 		var fileRole proto.Role
 		err = fileRole.ImportFromDB(rt, vl)
 		if err != nil {
@@ -791,7 +937,13 @@ func loadSmallFileOrSymlink(
 	if err != nil {
 		return nil, err
 	}
-	if len(ret) != 1 {
+	// A row that is not in the table comes back as a nil entry, not as a
+	// short slice -- mLoadSmallFilesOrSymlinks appends its map lookup
+	// unconditionally -- and loadNode dereferences this result. Without the
+	// nil check, a KvGetNode for any absent small-file or symlink ID was a
+	// remotely triggered panic. The listing path already guards (listDir
+	// checks f != nil); this was the one caller that did not.
+	if len(ret) != 1 || ret[0] == nil {
 		return nil, core.NotFoundError("small file")
 	}
 	return ret[0], nil

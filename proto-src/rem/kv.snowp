@@ -96,7 +96,12 @@ protocol KVStore
 
     kvMkdir @0 (
         hdr @0 : KVReqHeader,
-        dir @1 : lib.KVDir
+        dir @1 : lib.KVDir,
+        // Fork-only (docs/kv-channel-acl.md): tags the new directory as
+        // private-channel storage. None = ordinary storage, the upstream
+        // behavior. The server requires the caller to hold a channel_acl row
+        // and the tag is immutable afterward.
+        channelID @2 : Option(lib.RTChannelID)
     ) -> KVMkdirRes;
 
     kvPut @1 (
@@ -113,7 +118,9 @@ protocol KVStore
         auth @0 : KVAuth,
         fileID @1 : lib.FileID,
         md @2 : lib.LargeFileMetadata,
-        chunk @3 : lib.UploadChunk
+        chunk @3 : lib.UploadChunk,
+        // Fork-only channel-storage tag; see kvMkdir.
+        channelID @4 : Option(lib.RTChannelID)
     );
 
     kvFileUploadChunk @4 (
@@ -125,7 +132,9 @@ protocol KVStore
     kvPutSmallFileOrSymlink @7 (
         auth @0 : KVAuth,
         id @1 : lib.KVNodeID, // can work for either a small file OR a symlink
-        sfb @2 : lib.SmallFileBox
+        sfb @2 : lib.SmallFileBox,
+        // Fork-only channel-storage tag; see kvMkdir.
+        channelID @3 : Option(lib.RTChannelID)
     ) -> KVPutSmallFileOrSymlinkRes;
 
     kvGetRoot @8 (
@@ -182,4 +191,18 @@ protocol KVStore
     selectVHost @18 (
         host @0 : lib.HostID
     ) : KVSelectVhost;
+
+    // Fork-only methods are numbered from @200, so upstream can keep
+    // appending after @18 without colliding; same convention as
+    // rem/realtime.snowp.
+
+    // kvChannelMkRoot registers dirID as the storage root of a private
+    // channel: the one place a tagged directory may hang beneath an untagged
+    // parent. Caller must be an ACL owner of the channel or a team
+    // admin-or-above. One root per channel; a second registration fails.
+    kvChannelMkRoot @200 (
+        auth @0 : KVAuth,
+        channelID @1 : lib.RTChannelID,
+        dirID @2 : lib.DirID
+    );
 }

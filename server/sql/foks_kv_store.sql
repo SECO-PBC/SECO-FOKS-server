@@ -29,6 +29,7 @@ CREATE TABLE dir (
     ctime TIMESTAMP NOT NULL,
     mtime TIMESTAMP NOT NULL,
     status dir_status NOT NULL,
+    channel_id BIGINT, -- p1: realtime private-channel tag; NULL = not channel storage
     PRIMARY KEY(short_host_id, short_party_id, dir_id, version)
 );
 
@@ -104,6 +105,7 @@ CREATE TABLE large_file (
     storage_type storage_type NOT NULL,
     ctime TIMESTAMP NOT NULL,
     mtime TIMESTAMP NOT NULL,
+    channel_id BIGINT, -- p1: realtime private-channel tag; NULL = not channel storage
     PRIMARY KEY(short_host_id, short_party_id, file_id)
 );
 
@@ -151,6 +153,7 @@ CREATE TABLE small_file_or_symlink (
     ctime TIMESTAMP NOT NULL,
     mtime TIMESTAMP NOT NULL,
     refcount INT NOT NULL,
+    channel_id BIGINT, -- p1: realtime private-channel tag; NULL = not channel storage
     PRIMARY KEY(short_host_id, short_party_id, node_id)
 );
 
@@ -194,3 +197,23 @@ CREATE TABLE quota_check_vhost (
 
 CREATE INDEX quota_check_idx ON quota_check(short_host_id, check_time) WHERE (num_new_writes > 0);
 CREATE INDEX quota_check_vhost_idx ON quota_check_vhost(check_time) WHERE (num_new_writes > 0);
+
+-- p1 (fork-only): channel-scoped storage for the realtime private-channel
+-- ACL; see docs/kv-channel-acl.md and patches/foks_kv_store/p1.sql.
+CREATE INDEX dir_channel_idx ON dir(short_host_id, short_party_id, channel_id)
+    WHERE (channel_id IS NOT NULL);
+
+CREATE TABLE channel_kv_root (
+    short_host_id SMALLINT NOT NULL,
+    short_party_id BYTEA NOT NULL,
+    channel_id BIGINT NOT NULL,
+    dir_id BYTEA NOT NULL,
+    ctime TIMESTAMP NOT NULL,
+    PRIMARY KEY(short_host_id, short_party_id, channel_id)
+);
+
+CREATE TABLE schema_patches (
+    id INTEGER NOT NULL PRIMARY KEY,
+    ctime TIMESTAMP NOT NULL
+);
+INSERT INTO schema_patches (id, ctime) VALUES (1, NOW());

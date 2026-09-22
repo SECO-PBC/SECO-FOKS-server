@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"errors"
+
 	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-foks/proto/rem"
@@ -25,6 +27,7 @@ type direntUpdater struct {
 
 	// internal state
 	dir      *proto.KVDir
+	dirChid  *int64
 	existing *proto.KVDirent
 }
 
@@ -116,6 +119,7 @@ func loadDirent(
 	var dv, wrt, wvl, ptkg, v, rrt, rvl int
 	var val, nb, nmac, bmac, id []byte
 	var status string
+	var chid *int64
 
 	args := []any{
 		int(m.ShortHostID()),
@@ -125,7 +129,7 @@ func loadDirent(
 
 	q := `SELECT E.dir_version, E.name_box, E.value, E.write_role_type,
 	        E.write_role_viz_level, E.name_mac, E.binding_mac, E.dirent_id, E.version, D.ptk_gen, D.status,
-			D.read_role_type, D.read_role_viz_level
+			D.read_role_type, D.read_role_viz_level, D.channel_id
 		FROM dirent AS E
 	    JOIN dir AS D ON (
 			E.short_host_id=D.short_host_id AND 
@@ -138,10 +142,20 @@ func loadDirent(
 	q, args = f(q, "E", args)
 
 	err := rq.QueryRow(m.Ctx(), q, args...).Scan(
-		&dv, &nb, &val, &wrt, &wvl, &nmac, &bmac, &id, &v, &ptkg, &status, &rrt, &rvl,
+		&dv, &nb, &val, &wrt, &wvl, &nmac, &bmac, &id, &v, &ptkg, &status, &rrt, &rvl, &chid,
 	)
 
 	if err != nil && err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Channel-ACL chokepoint (acl.go): a dirent in a channel directory
+	// answers a non-member exactly as an absent dirent does -- nil, nil is
+	// this loader's missing-row result -- and ahead of the role gate below.
+	err = authorizeKVNodeRead(m, pid, chid)
+	if errors.Is(err, errKVNodeMasked) {
 		return nil, nil
 	}
 	if err != nil {
@@ -206,12 +220,20 @@ func putDirent(m shared.MetaContext, tx pgx.Tx, pid proto.PartyID, role proto.Ro
 }
 
 func (p *direntUpdater) loadParentDir(m shared.MetaContext) error {
-	dir, err := loadDir(m, p.tx, p.pid, p.de.ParentDir, p.de.DirVersion)
+	dir, chid, err := loadDir(m, p.tx, p.pid, p.de.ParentDir, p.de.DirVersion)
 	if err != nil {
 		return err
 	}
 	p.dir = dir
+	p.dirChid = chid
 	return nil
+}
+
+// checkContainment holds a channel's storage to a single subtree: the value
+// being linked must carry the parent's tag, or be the channel's registered
+// root arriving under the untagged community tree. See acl.go.
+func (p *direntUpdater) checkContainment(m shared.MetaContext) error {
+	return checkChannelContainment(m, p.tx, p.pid, p.dirChid, p.de.Value)
 }
 
 func (p *direntUpdater) loadExistingDirent(m shared.MetaContext, role proto.Role) error {
@@ -358,6 +380,10 @@ func (p *direntUpdater) run(m shared.MetaContext) error {
 	if err != nil {
 		return err
 	}
+	err = p.checkContainment(m)
+	if err != nil {
+		return err
+	}
 	err = p.updateRefcounts(m)
 	if err != nil {
 		return err
@@ -459,7 +485,7 @@ func listDir(
 	*rem.KVListRes,
 	error,
 ) {
-	dir, err := loadDir(m, db, pid, arg.Dir, 0)
+	dir, _, err := loadDir(m, db, pid, arg.Dir, 0)
 	if err != nil {
 		return nil, err
 	}

@@ -968,13 +968,15 @@ func (k *KVLock) Bytes() []byte { return nil }
 var KVStoreProtocolID rpc.ProtocolUniqueID = rpc.ProtocolUniqueID(0x8ee37b6b)
 
 type KvMkdirArg struct {
-	Hdr KVReqHeader
-	Dir lib.KVDir
+	Hdr       KVReqHeader
+	Dir       lib.KVDir
+	ChannelID *lib.RTChannelID
 }
 type KvMkdirArgInternal__ struct {
-	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Hdr     *KVReqHeaderInternal__
-	Dir     *lib.KVDirInternal__
+	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Hdr       *KVReqHeaderInternal__
+	Dir       *lib.KVDirInternal__
+	ChannelID *lib.RTChannelIDInternal__
 }
 
 func (k KvMkdirArgInternal__) Import() KvMkdirArg {
@@ -991,12 +993,30 @@ func (k KvMkdirArgInternal__) Import() KvMkdirArg {
 			}
 			return x.Import()
 		})(k.Dir),
+		ChannelID: (func(x *lib.RTChannelIDInternal__) *lib.RTChannelID {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *lib.RTChannelIDInternal__) (ret lib.RTChannelID) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(k.ChannelID),
 	}
 }
 func (k KvMkdirArg) Export() *KvMkdirArgInternal__ {
 	return &KvMkdirArgInternal__{
 		Hdr: k.Hdr.Export(),
 		Dir: k.Dir.Export(),
+		ChannelID: (func(x *lib.RTChannelID) *lib.RTChannelIDInternal__ {
+			if x == nil {
+				return nil
+			}
+			return (*x).Export()
+		})(k.ChannelID),
 	}
 }
 func (k *KvMkdirArg) Encode(enc rpc.Encoder) error {
@@ -1133,17 +1153,19 @@ func (k *KvPutRootArg) Decode(dec rpc.Decoder) error {
 func (k *KvPutRootArg) Bytes() []byte { return nil }
 
 type KvFileUploadInitArg struct {
-	Auth   KVAuth
-	FileID lib.FileID
-	Md     lib.LargeFileMetadata
-	Chunk  lib.UploadChunk
+	Auth      KVAuth
+	FileID    lib.FileID
+	Md        lib.LargeFileMetadata
+	Chunk     lib.UploadChunk
+	ChannelID *lib.RTChannelID
 }
 type KvFileUploadInitArgInternal__ struct {
-	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Auth    *KVAuthInternal__
-	FileID  *lib.FileIDInternal__
-	Md      *lib.LargeFileMetadataInternal__
-	Chunk   *lib.UploadChunkInternal__
+	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Auth      *KVAuthInternal__
+	FileID    *lib.FileIDInternal__
+	Md        *lib.LargeFileMetadataInternal__
+	Chunk     *lib.UploadChunkInternal__
+	ChannelID *lib.RTChannelIDInternal__
 }
 
 func (k KvFileUploadInitArgInternal__) Import() KvFileUploadInitArg {
@@ -1172,6 +1194,18 @@ func (k KvFileUploadInitArgInternal__) Import() KvFileUploadInitArg {
 			}
 			return x.Import()
 		})(k.Chunk),
+		ChannelID: (func(x *lib.RTChannelIDInternal__) *lib.RTChannelID {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *lib.RTChannelIDInternal__) (ret lib.RTChannelID) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(k.ChannelID),
 	}
 }
 func (k KvFileUploadInitArg) Export() *KvFileUploadInitArgInternal__ {
@@ -1180,6 +1214,12 @@ func (k KvFileUploadInitArg) Export() *KvFileUploadInitArgInternal__ {
 		FileID: k.FileID.Export(),
 		Md:     k.Md.Export(),
 		Chunk:  k.Chunk.Export(),
+		ChannelID: (func(x *lib.RTChannelID) *lib.RTChannelIDInternal__ {
+			if x == nil {
+				return nil
+			}
+			return (*x).Export()
+		})(k.ChannelID),
 	}
 }
 func (k *KvFileUploadInitArg) Encode(enc rpc.Encoder) error {
@@ -1256,15 +1296,17 @@ func (k *KvFileUploadChunkArg) Decode(dec rpc.Decoder) error {
 func (k *KvFileUploadChunkArg) Bytes() []byte { return nil }
 
 type KvPutSmallFileOrSymlinkArg struct {
-	Auth KVAuth
-	Id   lib.KVNodeID
-	Sfb  lib.SmallFileBox
+	Auth      KVAuth
+	Id        lib.KVNodeID
+	Sfb       lib.SmallFileBox
+	ChannelID *lib.RTChannelID
 }
 type KvPutSmallFileOrSymlinkArgInternal__ struct {
-	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Auth    *KVAuthInternal__
-	Id      *lib.KVNodeIDInternal__
-	Sfb     *lib.SmallFileBoxInternal__
+	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Auth      *KVAuthInternal__
+	Id        *lib.KVNodeIDInternal__
+	Sfb       *lib.SmallFileBoxInternal__
+	ChannelID *lib.RTChannelIDInternal__
 }
 
 func (k KvPutSmallFileOrSymlinkArgInternal__) Import() KvPutSmallFileOrSymlinkArg {
@@ -1287,6 +1329,18 @@ func (k KvPutSmallFileOrSymlinkArgInternal__) Import() KvPutSmallFileOrSymlinkAr
 			}
 			return x.Import()
 		})(k.Sfb),
+		ChannelID: (func(x *lib.RTChannelIDInternal__) *lib.RTChannelID {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *lib.RTChannelIDInternal__) (ret lib.RTChannelID) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(k.ChannelID),
 	}
 }
 func (k KvPutSmallFileOrSymlinkArg) Export() *KvPutSmallFileOrSymlinkArgInternal__ {
@@ -1294,6 +1348,12 @@ func (k KvPutSmallFileOrSymlinkArg) Export() *KvPutSmallFileOrSymlinkArgInternal
 		Auth: k.Auth.Export(),
 		Id:   k.Id.Export(),
 		Sfb:  k.Sfb.Export(),
+		ChannelID: (func(x *lib.RTChannelID) *lib.RTChannelIDInternal__ {
+			if x == nil {
+				return nil
+			}
+			return (*x).Export()
+		})(k.ChannelID),
 	}
 }
 func (k *KvPutSmallFileOrSymlinkArg) Encode(enc rpc.Encoder) error {
@@ -1840,6 +1900,63 @@ func (k *KVSelectVhost) Decode(dec rpc.Decoder) error {
 
 func (k *KVSelectVhost) Bytes() []byte { return nil }
 
+type KvChannelMkRootArg struct {
+	Auth      KVAuth
+	ChannelID lib.RTChannelID
+	DirID     lib.DirID
+}
+type KvChannelMkRootArgInternal__ struct {
+	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Auth      *KVAuthInternal__
+	ChannelID *lib.RTChannelIDInternal__
+	DirID     *lib.DirIDInternal__
+}
+
+func (k KvChannelMkRootArgInternal__) Import() KvChannelMkRootArg {
+	return KvChannelMkRootArg{
+		Auth: (func(x *KVAuthInternal__) (ret KVAuth) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Auth),
+		ChannelID: (func(x *lib.RTChannelIDInternal__) (ret lib.RTChannelID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.ChannelID),
+		DirID: (func(x *lib.DirIDInternal__) (ret lib.DirID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.DirID),
+	}
+}
+func (k KvChannelMkRootArg) Export() *KvChannelMkRootArgInternal__ {
+	return &KvChannelMkRootArgInternal__{
+		Auth:      k.Auth.Export(),
+		ChannelID: k.ChannelID.Export(),
+		DirID:     k.DirID.Export(),
+	}
+}
+func (k *KvChannelMkRootArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(k.Export())
+}
+
+func (k *KvChannelMkRootArg) Decode(dec rpc.Decoder) error {
+	var tmp KvChannelMkRootArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*k = tmp.Import()
+	return nil
+}
+
+func (k *KvChannelMkRootArg) Bytes() []byte { return nil }
+
 type KVStoreInterface interface {
 	KvMkdir(context.Context, KvMkdirArg) (KVMkdirRes, error)
 	KvPut(context.Context, KvPutArg) error
@@ -1858,6 +1975,7 @@ type KVStoreInterface interface {
 	KvLockRelease(context.Context, KvLockReleaseArg) error
 	KvUsage(context.Context, KVAuth) (lib.KVUsage, error)
 	SelectVHost(context.Context, lib.HostID) error
+	KvChannelMkRoot(context.Context, KvChannelMkRootArg) error
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h lib.Header) error
 	MakeResHeader() lib.Header
@@ -2253,6 +2371,26 @@ func (c KVStoreClient) SelectVHost(ctx context.Context, host lib.HostID) (err er
 	}
 	var tmp rpc.DataWrap[lib.Header, interface{}]
 	err = c.Cli.Call2(ctx, rpc.NewMethodV2(KVStoreProtocolID, 18, "KVStore.selectVHost"), warg, &tmp, 0*time.Millisecond, kVStoreErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+func (c KVStoreClient) KvChannelMkRoot(ctx context.Context, arg KvChannelMkRootArg) (err error) {
+	warg := &rpc.DataWrap[lib.Header, *KvChannelMkRootArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, interface{}]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(KVStoreProtocolID, 200, "KVStore.kvChannelMkRoot"), warg, &tmp, 0*time.Millisecond, kVStoreErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
 	if err != nil {
 		return
 	}
@@ -2753,6 +2891,34 @@ func KVStoreProtocol(i KVStoreInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "selectVHost",
+			},
+			200: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *KvChannelMkRootArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *KvChannelMkRootArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *KvChannelMkRootArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						err := i.KvChannelMkRoot(ctx, (typedArg.Import()))
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[lib.Header, interface{}]{
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "kvChannelMkRoot",
 			},
 		},
 		WrapError: KVStoreMakeGenericErrorWrapper(i.ErrorWrapper()),

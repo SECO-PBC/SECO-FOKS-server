@@ -482,6 +482,9 @@ func (k *Minder) openOutboxPayload(
 // anything else declines (returns nil) and the caller propagates the original
 // error. Writes queue only on failure of a live attempt whose local half
 // completed -- exactly the state D3 records.
+//
+// channelID names the private channel a creation was tagged for, if any; such
+// a write is never queued. See below.
 func (k *Minder) maybeQueueWrite(
 	m MetaContext,
 	kvp *KVParty,
@@ -490,8 +493,31 @@ func (k *Minder) maybeQueueWrite(
 	key *kv.KeyBundle,
 	rg proto.RoleAndGen,
 	payload *lcl.KVOutboxPayload,
+	channelID *proto.RTChannelID,
 ) error {
 	if !core.IsTransportError(sendErr) {
+		return nil
+	}
+	if channelID != nil {
+		// Channel storage cannot be created offline, and declining to queue
+		// is the honest answer rather than a limitation to route around.
+		//
+		// The server tags a node only after checking the caller holds a
+		// channel_acl row, which is a membership question this client cannot
+		// answer while it cannot reach the server -- it may have been revoked
+		// since it last synced. The outbox payload carries no tag either
+		// (KVOutboxPayload predates this), so a queued tagged creation could
+		// only drain UNtagged, which would put a private channel's data in
+		// the community's tree where every member can read it. That is the
+		// exact failure docs/kv-channel-acl.md exists to prevent, and it
+		// would be silent.
+		//
+		// Declining here returns nil, so the caller propagates the original
+		// transport error: the user is told the write did not happen, rather
+		// than being told it was saved and finding out otherwise later.
+		m.Infow("kvOutbox", "stage", "declined",
+			"why", "channel-tagged writes are not queued offline",
+			"party", kvp.Id(), "op", payload.Op)
 		return nil
 	}
 	err := k.enqueueOutbox(m, kvp, eid, key, rg, payload)
@@ -510,6 +536,7 @@ func (k *Minder) uploadNode(
 	kvp *KVParty,
 	nid proto.KVNodeID,
 	sfb proto.SmallFileBox,
+	channelID *proto.RTChannelID,
 ) error {
 	if err := k.preRPCHook("uploadNode"); err != nil {
 		return err
@@ -525,9 +552,10 @@ func (k *Minder) uploadNode(
 	// rather than a conflict (upstream #358). Either answer means the write
 	// landed, which is all the drain needs before retiring the row.
 	_, err = cli.KvPutSmallFileOrSymlink(m.Ctx(), rem.KvPutSmallFileOrSymlinkArg{
-		Auth: *auth,
-		Id:   nid,
-		Sfb:  sfb,
+		Auth:      *auth,
+		Id:        nid,
+		Sfb:       sfb,
+		ChannelID: channelID,
 	})
 	return err
 }
@@ -999,7 +1027,10 @@ func (k *Minder) drainPut(
 	kvp *KVParty,
 	payload *lcl.KVOutboxPayload,
 ) error {
-	err := k.uploadNode(m, kvp, payload.Nid, payload.Sfb)
+	// Untagged, for the reason drainMkdir gives: a tagged creation is
+	// refused at the call rather than queued, so nothing tagged reaches a
+	// drain, and nil here asserts that rather than dropping a tag.
+	err := k.uploadNode(m, kvp, payload.Nid, payload.Sfb, nil)
 	if err != nil {
 		return err
 	}
@@ -1017,7 +1048,14 @@ func (k *Minder) drainMkdir(
 	if payload.Dir == nil {
 		return core.InternalError("mkdir outbox entry with no dir")
 	}
-	err := k.uploadDir(m, kvp, payload.Dir)
+	// Untagged: a queued creation is by definition one that could not reach
+	// the server, and a channel tag cannot be honoured offline -- the server
+	// gates tagging on a membership check the client cannot make, and a
+	// drain that replayed a tagged intent untagged would put channel data in
+	// the community's tree. Queuing a tagged creation is refused at the
+	// call instead (see Minder.Mkdir / putFile), so nothing tagged reaches
+	// here; passing nil is the assertion of that, not a silent drop.
+	err := k.uploadDir(m, kvp, payload.Dir, nil)
 	if err != nil {
 		return err
 	}

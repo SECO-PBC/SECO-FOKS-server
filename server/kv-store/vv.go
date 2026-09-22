@@ -23,15 +23,26 @@ func getCurrentDirVersion(
 	error,
 ) {
 	var v, rt, vl int
+	var chid *int64
 	err := rq.QueryRow(
 		m.Ctx(),
-		`SELECT version, read_role_type, read_role_viz_level
+		`SELECT version, read_role_type, read_role_viz_level, channel_id
 		 FROM dir 
 		 WHERE short_host_id=$1 AND short_party_id=$2 AND dir_id=$3
 		 ORDER BY version DESC LIMIT 1`,
 		int(m.ShortHostID()), pid.Shorten().ExportToDB(), dir.ExportToDB(),
-	).Scan(&v, &rt, &vl)
+	).Scan(&v, &rt, &vl, &chid)
 	if err != nil && errors.Is(err, pgx.ErrNoRows) {
+		return 0, core.NotFoundError("cached dir")
+	}
+	if err != nil {
+		return 0, err
+	}
+	// Channel-ACL chokepoint (acl.go): version numbers are a probing side
+	// channel (docs/kv-channel-acl.md §6 row 11); masked before the role
+	// check below, as the same not-found a missing dir answers.
+	err = authorizeKVNodeRead(m, pid, chid)
+	if errors.Is(err, errKVNodeMasked) {
 		return 0, core.NotFoundError("cached dir")
 	}
 	if err != nil {
