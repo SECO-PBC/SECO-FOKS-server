@@ -595,6 +595,33 @@ func (r *readThroughMarker) run(m shared.MetaContext) error {
 		return core.BadArgsError("read-through seq exceeds last message")
 	}
 
+	// Take the user_inbox row lock BEFORE touching user_channels, without
+	// bumping it. Every other writer in this package locks user_inbox first
+	// (fanoutInboxVersions says so explicitly; so do the channel-creation
+	// fanout, the metadata mutations and the revoke path), and this path used
+	// to be the one exception: it updated user_channels and only then bumped
+	// user_inbox, so a concurrent send or revoke holding the inbox row and
+	// waiting for the membership row deadlocked against it.
+	//
+	// A plain SELECT ... FOR UPDATE rather than moving the bump up, because
+	// the bump must stay conditional -- see the monotonicity note below.
+	// Anyone with a user_channels row has a user_inbox row (fanUserIntoChannel
+	// writes the inbox row first), so this finds one whenever the update below
+	// can succeed; when it finds none, the update below fails anyway.
+	var lockedVers int64
+	err = r.tx.QueryRow(
+		m.Ctx(),
+		`SELECT inbox_version FROM user_inbox
+		 WHERE short_host_id=$1 AND uid=$2 AND app_id=$3
+		 FOR UPDATE`,
+		m.ShortHostID(),
+		r.reader.ExportToDB(),
+		r.appID,
+	).Scan(&lockedVers)
+	if err != nil && err != pgx.ErrNoRows {
+		return err
+	}
+
 	// Advance monotonically. A stale or repeated mark (seq at or below the
 	// current pointer) is a no-op and must NOT bump the inbox version, or
 	// out-of-order marks from racing devices would churn every device's sync.

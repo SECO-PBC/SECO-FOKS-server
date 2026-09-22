@@ -1214,9 +1214,24 @@ func (c *channelMutator) fanInEligibleMembers(m shared.MetaContext) error {
 	if err != nil {
 		return err
 	}
+	// Only members who have NO delivery row. fanUserIntoChannel allocates an
+	// inbox version before it inserts, and its insert is ON CONFLICT DO
+	// NOTHING -- so calling it for a member stampMembers has already stamped
+	// burns a version that stamps no row. The head would then sit permanently
+	// above every version the client can reach: SyncInbox pages until it gets
+	// an empty delta, stops without advancing its cursor, and PollInbox
+	// returns immediately forever after, because head > since is always true.
+	// One skipped query here is the difference between that and a quiet inbox.
+	existing, err := c.membersWithDeliveryRow(m)
+	if err != nil {
+		return err
+	}
 	// Ascending uid, the package-wide user_inbox lock order.
 	slices.SortFunc(uids, func(a, b proto.UID) int { return bytes.Compare(a[:], b[:]) })
 	for _, uid := range uids {
+		if existing[uid] {
+			continue
+		}
 		inserted, err := fanUserIntoChannel(m, c.tx, uid, c.appDB, proto.RTChannelIDShort(c.chid))
 		if err != nil {
 			return err
@@ -1226,6 +1241,43 @@ func (c *channelMutator) fanInEligibleMembers(m shared.MetaContext) error {
 		}
 	}
 	return nil
+}
+
+// membersWithDeliveryRow is the set of users who already hold a user_channels
+// row for this channel.
+func (c *channelMutator) membersWithDeliveryRow(
+	m shared.MetaContext,
+) (
+	map[proto.UID]bool,
+	error,
+) {
+	rows, err := c.tx.Query(
+		m.Ctx(),
+		`SELECT uid FROM user_channels
+		 WHERE short_host_id=$1 AND channel_id=$2`,
+		m.ShortHostID(),
+		c.chid,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := make(map[proto.UID]bool)
+	for rows.Next() {
+		var raw []byte
+		if err = rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var uid proto.UID
+		if err = uid.ImportFromDB(raw); err != nil {
+			return nil, err
+		}
+		ret[uid] = true
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return ret, nil
 }
 
 // dropChannelPushes discards a closing channel's undelivered push rows.

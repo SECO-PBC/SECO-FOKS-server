@@ -159,7 +159,7 @@ stays in the **channel set** and disappears from the **inbox**:
 | Surface | Archived channel | Why |
 |---|---|---|
 | `rtListAllChannelsForTeam` (the set) | **present**, flagged `archived` | The set is the team's name registry as well as its channel list. Keeping the row is what reserves the name (§3.3). |
-| `rtGetChangedThreads` (the inbox) | **absent** | The inbox is the active-conversation view. An archived channel is not active. |
+| `rtGetChangedThreads` (the inbox) | **delivered once, carrying `archived`** | A delta of rows cannot express a removal, so there is no server-side filter here. The archived channel arrives one final time with the flag set and the CLIENT drops its stored row (`SyncInbox`); after that it never bumps again, so it never reappears. Filtering server-side would leave it in every member's inbox forever. |
 | Late-join fan-in | **skipped** | Otherwise every sync re-fans members into it forever. |
 | `rtSend` | **refused** | "Closes the channel to new activity." |
 
@@ -370,8 +370,10 @@ existing RT block runs `@12001`–`@12007`.
   `#general` guard is client-side (`minder.go:209`, at create). The server
   cannot read names — so the client refuses by name, and the server
   additionally refuses to archive the team's **oldest public, bottom-tier
-  channel** (lowest `ctime`), which `#general` always is — it is created on the
-  team's first send, before any private or admin-tier channel can exist.
+  channel** (lowest `ctime`), which `#general` is whenever the app created it —
+  it goes in on the team's first send, before any private or admin-tier
+  channel exists. It is **not** guaranteed: a public channel created before it
+  (`foks rt new-channel`) would take its place. See §6 Q6.
   Restricting the query to those two properties is what keeps a private channel
   created early in a team's life from being mistaken for the default one, which
   an oldest-of-all-channels query would do. State the approximation rather than
@@ -413,7 +415,7 @@ addition. Every row must have a test (§7).
 | 4 | `rtSend` fan-out | unreachable (3 refuses first) | — | covered by 3 |
 | 5 | `rtListAllChannelsForTeam @2` (`channels.go:133`) | **no filter** — the row stays, carrying `archived = true`. This is the name reservation (§3.3); the client hides it from the UI and keeps it in the collision map | — | `TestArchivedStaysInTheListing`, `TestArchivedNameStaysReserved` |
 | 6 | `rtGetChannel @1` | none; returns `archived @22 = true` | — | `TestGetChannelReportsArchived` |
-| 7 | `rtGetChangedThreads @6` (`inbox.go`) | `AND ` + `notArchived("c")` — **the opposite decision from row 5, deliberately** (§3.2) | — | `TestArchivedChannelLeavesTheInbox` |
+| 7 | `rtGetChangedThreads @6` (`inbox.go`) | **none — no server-side filter, deliberately.** The row is delivered once with `archived = true` and the client removes it; `notArchived` is *not* used here. **The app must handle this:** an archived channel arrives in the delta and has to be dropped, not rendered | — | `TestArchivedLeavesTheInbox` (asserts against the stored sync index, not the rendered view) |
 | 9 | Late-join fan-in (`fanin.go:findMissingChannels`) | `AND ` + `notArchived("c")` — **without this, every sync re-fans members into archived channels and burns inbox versions forever** | — | `TestArchivedNotFannedInOnJoin`, and a second sync asserting the row count does not grow |
 | 10 | `rtReadThrough @7` | **permitted** — it writes only the caller's own `user_channels` row and cannot produce activity for anyone else. Refusing it would make a client that marks read as a pane closes throw errors for no gain | — | `TestArchivedAllowsReadThrough` |
 | 11 | `rtNewChannel @0` | an archived channel **does** block its name, because it is still in the listing the collision map is built from (client-side, as ever) | — | `TestArchivedNameStaysReserved`, `TestRenamedArchivedFreesTheName` |
@@ -488,6 +490,16 @@ admins'.
   says *"its threads go with it"*. Threads are an app-layer concept the
   realtime server knows nothing about, so this is the app's cascade, not the
   server's — but it needs an owner before the app work starts. *App / Threads.*
+- **Q6. Is the default channel's structural identification good enough?**
+  `isDefaultChannel` takes the oldest public, bottom-tier channel, and that is
+  `#general` only if nothing public was created before it. The app creates it
+  on the team's first send, so in practice it is — but `foks rt new-channel`
+  can create a named public channel first, and then the server protects the
+  wrong one and lets the real default be archived. The client's check is
+  exact (it reads the name) and runs first, so this is the backstop being
+  approximate, not the rule. A precise fix needs a server-side default marker
+  set at creation, which is a schema and wire change; worth doing if the CLI
+  ever becomes something users drive. *Ours.*
 - **Q5. Does archiving a private channel close its members-only store?**
   Archive leaves `channel_acl` untouched, so stored files stay reachable by
   direct reference (§1). Leaving them open is right for a reversible hide and

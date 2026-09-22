@@ -353,6 +353,13 @@ func currentChannelName(
 				(want.Tier == proto.RTChannelTier_None || c.Tier == want.Tier) {
 				return &c.Name, nil
 			}
+		case lcl.RTChannelSpecifierType_None:
+			// No --channel means the team's default channel, the same default
+			// every other rt subcommand takes. It is the one with the empty
+			// name.
+			if c.Name.IsEmpty() {
+				return &c.Name, nil
+			}
 		default:
 			return nil, ArgsError("select a channel with --channel")
 		}
