@@ -305,7 +305,6 @@ func (d *Minder) makeChannelOneAttempt(
 	// for the admins (and above).
 	newChTier := proto.RTChannelTier_Bottom
 	readRole := roles.Read
-	nameRole := proto.MinRTRole
 
 	if readRole == nil {
 		readRole = rtp.PLCNode().DirectDstRole()
@@ -324,8 +323,8 @@ func (d *Minder) makeChannelOneAttempt(
 	}
 	if isAdmin {
 		newChTier = proto.RTChannelTier_Admin
-		nameRole = proto.AdminRole
 	}
+	nameRole := nameRoleForTier(newChTier)
 
 	// Private channels are exempt from team-wide name-collision detection: the
 	// server cannot dedupe names it hides from the caller, the listing the map
@@ -592,6 +591,8 @@ func (k *Minder) decryptChannelMetadata(
 	ret.Unreadable = chmdenc.Unreadable
 	ret.NoPush = chmdenc.NoPush
 	ret.Private = chmdenc.Private
+	ret.Seqno = chmdenc.Seqno
+	ret.Archived = chmdenc.Archived
 
 	return &ret, nil
 }
@@ -2584,4 +2585,202 @@ func (d *Minder) NotifyMembers(
 		ChannelID: chid,
 		Entries:   entries,
 	})
+}
+
+// nameRoleForTier gives the role a channel's name box is sealed at.
+//
+// It is a property of the channel's TIER, never of the caller's own role: a
+// bottom-tier channel's name is readable by every member so that all of them
+// can detect a name collision, and an admin-tier channel's name only by admins.
+// Sealing a rename at the caller's role instead would either hand an
+// admin-tier channel's name to ordinary members, or lock members out of a name
+// they could read a moment earlier.
+//
+// Both channel creation and rename derive the role here rather than inline, so
+// the two can never disagree. The server rejects a box sealed at any other
+// role (checkNameBoxRole), so a client that gets this wrong fails loudly
+// instead of persisting an unreadable or over-shared name.
+func nameRoleForTier(tier proto.RTChannelTier) proto.Role {
+	if tier == proto.RTChannelTier_Admin {
+		return proto.AdminRole
+	}
+	return proto.MinRTRole
+}
+
+// UpdateChannel renames a channel and replaces its description. An empty desc
+// clears it. Admin-only, enforced by the server.
+//
+// Retries a lost metadata CAS the same way MakeChannel does: another device
+// mutating the same channel bumps its seqno, and the next attempt re-reads it.
+func (d *Minder) UpdateChannel(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	spec lcl.RTChannelSpecifier,
+	nm proto.RTChannelName,
+	desc proto.RTChannelDesc,
+) error {
+	return d.retryOnRace(m, func() error {
+		return d.updateChannelOneAttempt(m, team, appID, spec, nm, desc)
+	})
+}
+
+// SetChannelArchived archives or unarchives a channel. Admin-only, enforced by
+// the server.
+//
+// Unarchiving needs no name-collision check: an archived channel keeps its
+// place in the team's channel list precisely so that nothing can take its name
+// while it is away.
+func (d *Minder) SetChannelArchived(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	spec lcl.RTChannelSpecifier,
+	archived bool,
+) error {
+	return d.retryOnRace(m, func() error {
+		_, ch, cli, err := d.loadChannelForMutation(m, team, appID, spec)
+		if err != nil {
+			return err
+		}
+		return cli.RtSetChannelArchived(m.Ctx(), rem.RtSetChannelArchivedArg{
+			Chid:     ch.Id,
+			Seqno:    ch.Seqno,
+			Archived: archived,
+		})
+	})
+}
+
+// retryOnRace runs f, retrying with backoff while it loses a metadata CAS.
+// Shared by the channel mutations and shaped like MakeChannelWithTestHooks'
+// loop, which predates it.
+func (d *Minder) retryOnRace(m MetaContext, f func() error) error {
+	sleepDur := time.Millisecond
+	numTries := 5
+	for i := range numTries {
+		err := f()
+		if err == nil {
+			return nil
+		}
+		var raceErr core.RTRaceError
+		if !errors.As(err, &raceErr) || i == numTries-1 {
+			return err
+		}
+		m.Warnw("race condition on channel metadata update", "iter", i, "sleep", sleepDur)
+		time.Sleep(sleepDur)
+		sleepDur *= 2
+	}
+	return core.RTRaceError{Which: "channels"}
+}
+
+// loadChannelForMutation resolves the channel a mutation addresses and returns
+// it together with the party and the server client. The resolved metadata
+// carries the seqno the mutation CASes on, read fresh on every attempt so a
+// retry sees the winner's bump.
+func (d *Minder) loadChannelForMutation(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	spec lcl.RTChannelSpecifier,
+) (
+	*RTParty,
+	*lcl.RTChannelMetadataPlaintext,
+	*rem.RealTimeClient,
+	error,
+) {
+	if err := assertTeam(team); err != nil {
+		return nil, nil, nil, err
+	}
+	rtp, err := d.base.GetParty(m.Base(), team)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ch, err := d.resolveChannel(m, rtp, appID, spec)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return rtp, ch, cli, nil
+}
+
+func (d *Minder) updateChannelOneAttempt(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	spec lcl.RTChannelSpecifier,
+	nm proto.RTChannelName,
+	desc proto.RTChannelDesc,
+) error {
+	if nm.Eq(proto.RTGeneralChannel) {
+		return core.RTGenericError("cannot rename a channel to #general")
+	}
+	rtp, ch, cli, err := d.loadChannelForMutation(m, team, appID, spec)
+	if err != nil {
+		return err
+	}
+
+	// Name-collision check, against the same list the create path uses. A
+	// private channel is exempt for the same reason it is at create: the
+	// server cannot dedupe names it hides, so the list this is built from is
+	// itself partial. Archived channels are NOT exempt -- their names stay
+	// reserved, which is what makes unarchiving safe.
+	if !ch.Private {
+		lst, err := d.listAllChannelsForTeam(m, rtp, appID)
+		if err != nil {
+			return err
+		}
+		for _, other := range lst.Channels {
+			if other.Id.Eq(ch.Id) {
+				continue // renaming a channel to its own name is a no-op, not a clash
+			}
+			if other.Tier == ch.Tier && other.Name.Normalize().Eq(nm.Normalize()) {
+				return core.RTChannelExistsError{}
+			}
+		}
+	}
+
+	// The name is sealed at the channel's tier role, the description at its
+	// read role -- both properties of the CHANNEL, not of whoever is editing
+	// it. The server rejects a box at any other role.
+	nameKeySeq, err := rtp.PLCNode().SKM().PrivateKeysForRole(m.Base(), nameRoleForTier(ch.Tier))
+	if err != nil {
+		return err
+	}
+	nameKeyMgr, err := NewKeyMgr(nameKeySeq.Current(), appID)
+	if err != nil {
+		return err
+	}
+	namePlain := proto.NewRTChannelNamePlaintextWithUtf8v1(nm)
+	nameEnc, err := nameKeyMgr.SealIntoSecretBox(proto.RTKeyType_ChannelName, &namePlain)
+	if err != nil {
+		return err
+	}
+
+	arg := rem.RtUpdateChannelArg{
+		Chid:    ch.Id,
+		Seqno:   ch.Seqno,
+		NameBox: *nameEnc,
+	}
+
+	if !desc.IsEmpty() {
+		descKeySeq, err := rtp.PLCNode().SKM().PrivateKeysForRole(m.Base(), ch.Roles.Read)
+		if err != nil {
+			return err
+		}
+		descKeyMgr, err := NewKeyMgr(descKeySeq.Current(), appID)
+		if err != nil {
+			return err
+		}
+		descPlain := proto.NewRTChannelDescPlaintextWithUtf8v1(desc)
+		descEnc, err := descKeyMgr.SealIntoSecretBox(proto.RTKeyType_ChannelDesc, &descPlain)
+		if err != nil {
+			return err
+		}
+		arg.DescBox = descEnc
+	}
+
+	return cli.RtUpdateChannel(m.Ctx(), arg)
 }
