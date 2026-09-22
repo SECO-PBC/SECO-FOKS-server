@@ -116,10 +116,28 @@ func (d *Minder) SyncInboxWithPageSize(
 		}
 		pageVers := state.Vers
 		args := make([]libclient.PutArg, 0, len(delta.Channels)+1)
+		var dropped []proto.RTChannelID
 		for i := range delta.Channels {
 			ch := &delta.Channels[i]
 			if ch.InboxVersion > pageVers {
 				pageVers = ch.InboxVersion
+			}
+			// An archived channel is delivered once, carrying the flag, so
+			// that this is reachable: drop it from the inbox rather than
+			// storing it. The server cannot do this for us -- there is no way
+			// to express "forget this row" in a delta of rows -- and nothing
+			// else ever removes an inbox row, so without this an archived
+			// channel would sit in the inbox forever. Unarchiving delivers it
+			// again with the flag clear, and the ordinary path below re-adds
+			// it.
+			if ch.Md.Archived {
+				if _, ok := indexed[ch.Md.Id]; ok {
+					delete(indexed, ch.Md.Id)
+					state.Channels = slices.DeleteFunc(state.Channels,
+						func(id proto.RTChannelID) bool { return id.Eq(ch.Md.Id) })
+					dropped = append(dropped, ch.Md.Id)
+				}
+				continue
 			}
 			if _, ok := indexed[ch.Md.Id]; !ok {
 				indexed[ch.Md.Id] = struct{}{}
@@ -147,6 +165,16 @@ func (d *Minder) SyncInboxWithPageSize(
 		err = m.DbPutTx(libclient.DbTypeSoft, args)
 		if err != nil {
 			return nil, err
+		}
+		// The index written above is what LocalInbox iterates, so an archived
+		// channel is already invisible. Deleting its row is housekeeping, and
+		// best-effort on purpose: a row nothing indexes is inert soft state.
+		for _, id := range dropped {
+			err := m.DbDelete(libclient.DbTypeSoft, &scope,
+				lcl.DataType_RTInboxChannel, id)
+			if err != nil {
+				m.Warnw("SyncInbox", "stage", "dropArchived", "chid", id, "err", err)
+			}
 		}
 		numChanged += uint64(len(delta.Channels))
 
@@ -200,6 +228,12 @@ func (d *Minder) LocalInbox(
 			lcl.DataType_RTInboxChannel, chid)
 		if err != nil {
 			m.Warnw("LocalInbox", "stage", "dbGet", "chid", chid, "err", err)
+			continue
+		}
+		// Defensive: an archived channel is removed from the index above, so
+		// this should not be reachable. A row that survived a partial apply
+		// must not resurface as a live conversation.
+		if row.Md.Archived {
 			continue
 		}
 		rv, err := d.renderInboxRow(m, &row)

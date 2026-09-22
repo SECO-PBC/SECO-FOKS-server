@@ -767,7 +767,19 @@ func (d *Minder) resolveChannel(
 	if err != nil {
 		return nil, err
 	}
+	return resolveChannelInList(lst, spc)
+}
 
+// resolveChannelInList is resolveChannel's second half, over a listing the
+// caller already has. Split out so the channel mutations, which must list
+// anyway to learn the channel's seqno, do not list a second time.
+func resolveChannelInList(
+	lst *lcl.RTChannelSetForTeam,
+	spc lcl.RTChannelSpecifier,
+) (
+	*lcl.RTChannelMetadataPlaintext,
+	error,
+) {
 	t, err := spc.GetT()
 	if err != nil {
 		return nil, err
@@ -2639,9 +2651,15 @@ func (d *Minder) SetChannelArchived(
 	archived bool,
 ) error {
 	return d.retryOnRace(m, func() error {
-		_, ch, cli, err := d.loadChannelForMutation(m, team, appID, spec)
+		_, ch, _, cli, err := d.loadChannelForMutation(m, team, appID, spec)
 		if err != nil {
 			return err
+		}
+		if archived && ch.Name.IsEmpty() {
+			// The default channel is never archived. The client can say so by
+			// name; the server can only approximate it (isDefaultChannel), so
+			// say it here where the answer is exact.
+			return core.RTGenericError("cannot archive a team's default channel")
 		}
 		return cli.RtSetChannelArchived(m.Ctx(), rem.RtSetChannelArchivedArg{
 			Chid:     ch.Id,
@@ -2685,25 +2703,34 @@ func (d *Minder) loadChannelForMutation(
 ) (
 	*RTParty,
 	*lcl.RTChannelMetadataPlaintext,
+	*lcl.RTChannelSetForTeam,
 	*rem.RealTimeClient,
 	error,
 ) {
 	if err := assertTeam(team); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	rtp, err := d.base.GetParty(m.Base(), team)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	ch, err := d.resolveChannel(m, rtp, appID, spec)
+	// One listing per attempt, reused for both jobs it has to do: resolving
+	// the channel (and its current seqno, which the mutation CASes on) and, for
+	// a rename, checking the new name against the team. Re-listing for the
+	// second would double the network cost of every retry.
+	lst, err := d.listAllChannelsForTeam(m, rtp, appID)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
+	}
+	ch, err := resolveChannelInList(lst, spec)
+	if err != nil {
+		return nil, nil, nil, nil, err
 	}
 	_, cli, err := d.clientLocal(m.Base(), d.au)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return rtp, ch, cli, nil
+	return rtp, ch, lst, cli, nil
 }
 
 func (d *Minder) updateChannelOneAttempt(
@@ -2717,7 +2744,7 @@ func (d *Minder) updateChannelOneAttempt(
 	if nm.Eq(proto.RTGeneralChannel) {
 		return core.RTGenericError("cannot rename a channel to #general")
 	}
-	rtp, ch, cli, err := d.loadChannelForMutation(m, team, appID, spec)
+	rtp, ch, lst, cli, err := d.loadChannelForMutation(m, team, appID, spec)
 	if err != nil {
 		return err
 	}
@@ -2728,10 +2755,6 @@ func (d *Minder) updateChannelOneAttempt(
 	// itself partial. Archived channels are NOT exempt -- their names stay
 	// reserved, which is what makes unarchiving safe.
 	if !ch.Private {
-		lst, err := d.listAllChannelsForTeam(m, rtp, appID)
-		if err != nil {
-			return err
-		}
 		for _, other := range lst.Channels {
 			if other.Id.Eq(ch.Id) {
 				continue // renaming a channel to its own name is a no-op, not a clash
