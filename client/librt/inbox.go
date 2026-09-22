@@ -429,3 +429,24 @@ func (d *Minder) prefetchLastMsg(
 	_, err = d.decodeAndCacheServerMsgs(m, sess, irr, page.SeqMsgs)
 	return err
 }
+
+// InboxChannelIDs returns the channels the local inbox index currently holds.
+//
+// The index, not the rendered view: LocalInbox also skips an archived row
+// defensively, so a test that asserts only on what renders cannot tell a
+// channel that was REMOVED from one that is merely hidden. Archiving is
+// supposed to remove it, and that difference is the whole of what SyncInbox's
+// archived branch does.
+func (d *Minder) InboxChannelIDs(
+	m MetaContext,
+	appID proto.RTAppID,
+) (
+	[]proto.RTChannelID,
+	error,
+) {
+	state, err := d.dbGetInboxSyncState(m, appID)
+	if err != nil {
+		return nil, err
+	}
+	return state.Channels, nil
+}
