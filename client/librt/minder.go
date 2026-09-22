@@ -571,13 +571,24 @@ func (k *Minder) decryptChannelMetadata(
 ) {
 	var ret lcl.RTChannelMetadataPlaintext
 
+	// The NAME is identity: without it the channel cannot be addressed, cannot
+	// be told apart from another, and cannot take part in collision detection,
+	// so a name that will not open fails the row.
 	nm, err := k.decryptChannelName(m, rtp, chmdenc.AppID, chmdenc.NameBox)
 	if err != nil {
 		return nil, err
 	}
+	// The DESCRIPTION is decoration, and must not be able to cost the row.
+	// Failing here would discard a perfectly good name -- and with it that
+	// name's entry in the caller's collision map, which is what reserves it
+	// against a new channel or an unarchive taking it. A row with no
+	// description is a channel you can still see and still cannot duplicate;
+	// no row at all is a name anyone can claim.
 	desc, err := k.decryptChannelDesc(m, rtp, chmdenc.AppID, chmdenc.DescBox)
 	if err != nil {
-		return nil, err
+		m.Warnw("decryptChannelMetadata", "stage", "desc",
+			"chid", chmdenc.Id, "err", err)
+		desc = nil
 	}
 
 	ret.Name = nm
@@ -718,13 +729,18 @@ func (k *Minder) listAllChannelsForTeam(
 	for _, chmdenc := range mdlist {
 		chmdpt, err := k.decryptChannelMetadata(m, rtp, chmdenc)
 		if err != nil {
-			// Skip the channel rather than failing the whole listing, as
-			// renderInboxRow already does for the inbox. Every box the server
-			// hands us should open -- it gates by tier and read role, and an
-			// unreadable channel's NAME is still sealed at the tier's name
-			// role -- so reaching here means something is wrong with that one
-			// row: a generation this device cannot fetch, a corrupt box, or a
-			// name box sealed with the wrong key derivation.
+			// Only a NAME that will not open reaches here; a bad description
+			// is survivable and handled inside decryptChannelMetadata, which
+			// matters because dropping the row would drop its name from the
+			// collision map and let the next create claim it.
+			//
+			// Skip rather than failing the whole listing, as renderInboxRow
+			// already does for the inbox. Every box the server hands us should
+			// open -- it gates by tier and read role, and an unreadable
+			// channel's name is still sealed at the tier's name role -- so
+			// reaching here means something is wrong with that one row: a
+			// generation this device cannot fetch, a corrupt box, or a name
+			// box sealed with the wrong key derivation.
 			//
 			// The last of those is worth naming. RTBoxRG carries a role and a
 			// generation and nothing about the box's PURPOSE, so the server

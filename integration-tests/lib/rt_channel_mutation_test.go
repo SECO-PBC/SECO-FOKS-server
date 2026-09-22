@@ -505,3 +505,53 @@ func TestArchivedNotFannedInOnJoin(t *testing.T) {
 			"the fan-in must not create a delivery row for an archived channel")
 	}
 }
+
+// A channel whose DESCRIPTION will not decrypt must keep its name in the
+// listing, because that name is what the collision map reserves. Dropping the
+// row instead would let the next create -- or an unarchive -- claim a name
+// that is still in use, and the server cannot detect that: names are
+// PTK-encrypted, so the client's map is the only check there is.
+//
+// The name and the description are sealed under different key derivations, so
+// one can fail while the other opens. Simulated here by flipping a byte inside
+// the stored description ciphertext, which leaves the RTBoxRG well-formed (the
+// server still decodes and serves it) and makes only the NaCl open fail, on
+// the client, exactly as a box sealed with the wrong derivation would.
+func TestUndecryptableDescriptionKeepsTheName(t *testing.T) {
+	sc := setupMutScene(t)
+
+	require.Equal(t, sc.pubName, sc.find(t, sc.alice, sc.pubID).Name)
+	sc.corruptDescBox(t, sc.pubID)
+
+	got := sc.find(t, sc.bob, sc.pubID)
+	require.NotNil(t, got, "a bad description must not cost the channel its row")
+	require.Equal(t, sc.pubName, got.Name)
+	require.Nil(t, got.Desc, "the unreadable description is dropped, not guessed")
+
+	// The invariant that matters: the name is still taken.
+	_, err := sc.alice.minder.MakeChannel(
+		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, sc.pubName, "",
+		proto.RolePairOpt{Read: &proto.DefaultRole, Write: &proto.DefaultRole},
+	)
+	require.Error(t, err)
+	require.IsType(t, core.RTChannelExistsError{}, err)
+}
+
+// corruptDescBox flips one byte of a channel's stored description ciphertext,
+// leaving the encoded RTBoxRG structurally valid so the server still serves it.
+func (s *mutScene) corruptDescBox(t *testing.T, id proto.RTChannelID) {
+	m := s.tew.MetaContext()
+	db, err := m.Db(shared.DbTypeRealTime)
+	require.NoError(t, err)
+	defer db.Release()
+	var box []byte
+	require.NoError(t, db.QueryRow(m.Ctx(),
+		`SELECT desc_box FROM channels WHERE short_host_id=$1 AND channel_id=$2`,
+		m.ShortHostID(), id.Short().Int64()).Scan(&box))
+	require.NotEmpty(t, box, "the channel under test needs a description")
+	box[len(box)-1] ^= 0xff
+	_, err = db.Exec(m.Ctx(),
+		`UPDATE channels SET desc_box=$3 WHERE short_host_id=$1 AND channel_id=$2`,
+		m.ShortHostID(), id.Short().Int64(), box)
+	require.NoError(t, err)
+}
