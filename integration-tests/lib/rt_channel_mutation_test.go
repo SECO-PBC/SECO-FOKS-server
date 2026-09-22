@@ -485,22 +485,23 @@ func TestArchivedNotFannedInOnJoin(t *testing.T) {
 		[]proto.MemberRole{frank.toMemberRole(t, proto.DefaultRole, sc.tm.hepks)}, nil)
 	fa := newPrivActor(t, sc.tew, frank)
 
-	_, err := fa.minder.SyncInbox(fa.m, proto.RTAppID_Chat)
-	require.NoError(t, err)
-	require.False(t, inboxHas(t, fa, sc.pubID))
-
-	rows := sc.rtdbCount(t,
-		`SELECT count(*) FROM user_channels WHERE short_host_id=$1 AND channel_id=$2`,
-		sc.tew.MetaContext().ShortHostID(), sc.pubID.Short().Int64())
-
-	// Sync twice more: an un-excluded archived channel would add a row each
-	// time the fan-in ran, so a stable count is the assertion that matters.
-	for i := 0; i < 2; i++ {
-		_, err = fa.minder.SyncInbox(fa.m, proto.RTAppID_Chat)
-		require.NoError(t, err)
+	// Baseline BEFORE frank's first sync. Taking it afterwards would fold a
+	// first-sync fan-in bug into the baseline itself, and every later
+	// comparison would then agree with it.
+	deliveryRows := func() int {
+		return sc.rtdbCount(t,
+			`SELECT count(*) FROM user_channels WHERE short_host_id=$1 AND channel_id=$2`,
+			sc.tew.MetaContext().ShortHostID(), sc.pubID.Short().Int64())
 	}
-	require.Equal(t, rows, sc.rtdbCount(t,
-		`SELECT count(*) FROM user_channels WHERE short_host_id=$1 AND channel_id=$2`,
-		sc.tew.MetaContext().ShortHostID(), sc.pubID.Short().Int64()),
-		"the fan-in must not keep re-creating delivery rows for an archived channel")
+	before := deliveryRows()
+
+	// Three syncs: the first is the one that would fan frank in, the rest
+	// catch a fan-in that re-creates the row on every pass.
+	for i := 0; i < 3; i++ {
+		_, err := fa.minder.SyncInbox(fa.m, proto.RTAppID_Chat)
+		require.NoError(t, err)
+		require.False(t, inboxHas(t, fa, sc.pubID))
+		require.Equal(t, before, deliveryRows(),
+			"the fan-in must not create a delivery row for an archived channel")
+	}
 }

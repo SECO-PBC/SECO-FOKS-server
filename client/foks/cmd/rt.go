@@ -315,13 +315,9 @@ func rtRenameChannel(m libclient.MetaContext, top *cobra.Command) {
 				}
 				ch = *cur
 			}
-			err := cli.ClientRTUpdateChannel(m.Ctx(),
+			return cli.ClientRTUpdateChannel(m.Ctx(),
 				lcl.ClientRTUpdateChannelArg{Cfg: cfg, Name: ch, Desc: cd},
 			)
-			if err != nil {
-				return err
-			}
-			return PartingConsoleMessage(m)
 		},
 	)
 }
@@ -384,13 +380,9 @@ func rtArchiveChannel(m libclient.MetaContext, top *cobra.Command) {
 			if len(args) != 0 {
 				return ArgsError("no args; select the channel with --channel")
 			}
-			err := cli.ClientRTSetChannelArchived(m.Ctx(),
+			return cli.ClientRTSetChannelArchived(m.Ctx(),
 				lcl.ClientRTSetChannelArchivedArg{Cfg: cfg, Archived: !unarchive},
 			)
-			if err != nil {
-				return err
-			}
-			return PartingConsoleMessage(m)
 		},
 	)
 }

@@ -340,6 +340,11 @@ protocol RealTime
 
     // Holder only. Queue one content-free 'system' push per entry whose member
     // can read the channel; others are skipped.
+    rtNotifyMembers @206 (
+        channelID @0 : lib.RTChannelID,
+        entries @1 : List(RTPushNotify)
+    );
+
     // Change a channel's own metadata: rename, and edit or clear the
     // description. CAS on md.seqno -- the caller passes the seqno it last
     // saw, and a mismatch is RTRaceError, which librt retries. Team admins
@@ -363,10 +368,5 @@ protocol RealTime
         chid @0 : lib.RTChannelID,
         seqno @1 : lib.RTChannelSeqno,
         archived @2 : Bool
-    );
-
-    rtNotifyMembers @206 (
-        channelID @0 : lib.RTChannelID,
-        entries @1 : List(RTPushNotify)
     );
 }

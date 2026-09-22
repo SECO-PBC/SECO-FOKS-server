@@ -665,7 +665,12 @@ func GrantChannelMember(
 		rtdb,
 		"realtime.GrantChannelMember",
 		func(m shared.MetaContext, tx pgx.Tx) (func(shared.MetaContext), error) {
-			ca, err := authorizeChannel(m, tx, userdb, chid, accessManage, false)
+			// lock=true: without the channels row lock this transaction can
+			// read a live channel, pause, and commit ACL and delivery rows
+			// after a concurrent archive has committed archived_at -- past
+			// the gate that just let it through. Taking the lock serializes
+			// the two the way the send path already serializes against them.
+			ca, err := authorizeChannel(m, tx, userdb, chid, accessManage, true)
 			if err != nil {
 				return nil, err
 			}
@@ -760,7 +765,9 @@ func RevokeChannelMember(
 				// with no row falls out below as RowNotFound.
 				want = accessRoster
 			}
-			ca, err := authorizeChannel(m, tx, userdb, chid, want, false)
+			// lock=true for the same reason as GrantChannelMember: a revoke
+			// that read a live channel must not commit after an archive did.
+			ca, err := authorizeChannel(m, tx, userdb, chid, want, true)
 			if err != nil {
 				return nil, err
 			}

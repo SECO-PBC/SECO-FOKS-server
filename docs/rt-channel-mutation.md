@@ -369,15 +369,21 @@ existing RT block runs `@12001`–`@12007`.
   it is never archived, and `#general` *can* be renamed. Today the only
   `#general` guard is client-side (`minder.go:209`, at create). The server
   cannot read names — so the client refuses by name, and the server
-  additionally refuses to archive the team's **oldest channel in the app**
-  (lowest `ctime`), which is `#general` by construction. State the
-  approximation rather than pretending the server knows the name.
+  additionally refuses to archive the team's **oldest public, bottom-tier
+  channel** (lowest `ctime`), which `#general` always is — it is created on the
+  team's first send, before any private or admin-tier channel can exist.
+  Restricting the query to those two properties is what keeps a private channel
+  created early in a team's life from being mistaken for the default one, which
+  an oldest-of-all-channels query would do. State the approximation rather than
+  pretending the server knows the name.
 
-### 3.7 Two existing bugs sit on exactly this path — fix them first
+### 3.7 Two existing bugs sat on exactly this path — fixed first
 
-Both are live on `origin/main` today and both are two-line fixes. Creation is
-the only thing that currently exercises this code, so they are nearly
-unreachable; rename and archive would drive them on every mutation.
+**As built: both are fixed**, in `318f2fb`, ahead of everything else on this
+branch. They were live on `origin/main` when this was written, and both were
+two-line fixes. Creation was the only thing that exercised this code, so they
+were nearly unreachable; rename and archive would have driven them on every
+mutation. Coordinates below are the pre-fix ones.
 
 - **`channels.go:99` — `readChannelSet` reports success on a database
   error.** The `pgx.ErrNoRows` branch correctly returns a zero version with a
@@ -603,7 +609,7 @@ The test is mechanical and worth running literally: *does this diff apply to
 | Piece | Upstream-legal? | What to do |
 |---|---|---|
 | `archived_at` column + p9 | **Yes** | Goes upstream unchanged. Upstream's patch number will differ from our p9 — expect that and do not fight it. |
-| `touchChannelSet` | **Yes, but it lives in the wrong file.** Its body touches only `channel_sets` and `channels.updated_at_set_vers`; it sits in `acl.go` purely because grant/revoke needed it first. | **Move it to `channels.go` in the fork first, as a pure no-behaviour-change refactor.** One commit, callers unchanged, `queryAllowlist` key updated. After that it is an ordinary `channels.go` helper the upstream PR can introduce where it belongs, and our merge conflict on it disappears. This single move is the highest-leverage thing on this list. |
+| `touchChannelSet` | **Yes, but it lives in the wrong file.** Its body touches only `channel_sets` and `channels.updated_at_set_vers`; it sits in `acl.go` purely because grant/revoke needed it first. | **Move it to `channels.go` in the fork first, as a pure no-behaviour-change refactor.** One commit, callers unchanged, and — **as built** — no `queryAllowlist` change at all: the guard keys on receiver-plus-function name rather than on the file, so a move within the package is invisible to it. After that it is an ordinary `channels.go` helper the upstream PR can introduce where it belongs, and our merge conflict on it disappears. This single move is the highest-leverage thing on this list. |
 | The archived gate | **Content yes, placement no.** Upstream has no chokepoint to put it in. | Write it as a standalone helper — `checkNotArchived(archivedAt, want)` for row paths and `notArchived(alias)` for set paths — so the *predicate* is shared and only the *call site* differs. Upstream calls it from `loadChannelForRead` and `lockChannel`; the fork calls it from `authorizeChannel`. That reduces the permanent fork delta to a handful of call lines instead of a redesign. |
 | Listing / inbox / fan-in filters | **Yes** | Upstream's diff is `AND c.archived_at IS NULL`. The fork's sits beside the private gate. Small, predictable, recurring conflict — the cost of having a fork. |
 | `rtUpdateChannel`, `rtSetChannelArchived` | **Yes** | See §9.4 — the numbers differ between the two versions. |
