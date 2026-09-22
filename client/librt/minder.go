@@ -718,7 +718,25 @@ func (k *Minder) listAllChannelsForTeam(
 	for _, chmdenc := range mdlist {
 		chmdpt, err := k.decryptChannelMetadata(m, rtp, chmdenc)
 		if err != nil {
-			return nil, err
+			// Skip the channel rather than failing the whole listing, as
+			// renderInboxRow already does for the inbox. Every box the server
+			// hands us should open -- it gates by tier and read role, and an
+			// unreadable channel's NAME is still sealed at the tier's name
+			// role -- so reaching here means something is wrong with that one
+			// row: a generation this device cannot fetch, a corrupt box, or a
+			// name box sealed with the wrong key derivation.
+			//
+			// The last of those is worth naming. RTBoxRG carries a role and a
+			// generation and nothing about the box's PURPOSE, so the server
+			// cannot tell a channel-description box from a channel-name box
+			// and will store either as name_box if the role matches
+			// (checkNameBoxRole is the most it can do). Failing the loop meant
+			// one such row made every channel in the team unlistable for
+			// everyone; skipping costs only that row. Closing the gap itself
+			// needs an authenticated purpose discriminator on the wire.
+			m.Warnw("listAllChannelsForTeam", "stage", "decrypt",
+				"chid", chmdenc.Id, "err", err)
+			continue
 		}
 		out.Channels = append(out.Channels, *chmdpt)
 	}

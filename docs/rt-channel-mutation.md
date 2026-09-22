@@ -490,6 +490,17 @@ admins'.
   says *"its threads go with it"*. Threads are an app-layer concept the
   realtime server knows nothing about, so this is the app's cascade, not the
   server's — but it needs an owner before the app work starts. *App / Threads.*
+- **Q7. Should a channel box carry an authenticated purpose?**
+  `RTBoxRG` carries a role and a generation and nothing about what the box is
+  *for*, so the server cannot tell a description box from a name box and will
+  store either as `name_box` when the role matches — `checkNameBoxRole` is the
+  most it can do. A client then fails to derive `ChannelNameKey` for that row.
+  This is not new: the same hole exists at channel creation and predates this
+  work. What this PR changed is the blast radius — `listAllChannelsForTeam`
+  now skips a row it cannot decrypt instead of failing the whole listing, so
+  one bad box costs one channel rather than every channel in the team. Closing
+  the hole itself needs a purpose discriminator on the wire, which is a
+  protocol change and belongs with #351 rather than here. *Ours, deferred.*
 - **Q6. Is the default channel's structural identification good enough?**
   `isDefaultChannel` takes the oldest public, bottom-tier channel, and that is
   `#general` only if nothing public was created before it. The app creates it
