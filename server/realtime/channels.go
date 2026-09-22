@@ -92,11 +92,17 @@ func readChannelSet(
 		teamID.ExportToDB(),
 		app,
 	).Scan(&vers, &mtime)
+	// No channel_sets row means no channel has ever been created under this
+	// (team, app): version 0, which is what a first create expects to see.
 	if err == pgx.ErrNoRows {
 		return retVers, retTime, nil
 	}
+	// Any other error must propagate. Returning a nil error here reported
+	// version 0 for a team whose set may be at version 40, so the caller's
+	// next create proposed version 1 and lost the CAS -- or, worse, a client
+	// cached 0 and re-listed from scratch on every sync.
 	if err != nil {
-		return retVers, retTime, nil
+		return retVers, retTime, err
 	}
 	return proto.RTChannelSetVersion(vers), proto.ExportTime(mtime), nil
 }
@@ -533,8 +539,11 @@ func (c *channelMaker) updateChannelSet(m shared.MetaContext) error {
 		app,
 		c.vers-1,
 	)
+	// Must propagate: returning nil here swallowed the failure and skipped the
+	// RowsAffected check below, so a channel-set version bump that never
+	// committed was reported to the caller as a successful create.
 	if err != nil {
-		return nil
+		return err
 	}
 	if tag.RowsAffected() != 1 {
 		return core.RTRaceError{Which: "channels"}
