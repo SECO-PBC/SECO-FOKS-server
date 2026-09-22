@@ -183,11 +183,11 @@ type allowedQueries struct {
 // authorizeKVNodeCreate.
 var queryAllowlist = map[string]allowedQueries{
 	// --- the chokepoint and its helpers (acl.go) ---
-	"kvChannelMembership":   {2, "the membership probe itself: channel_acl joined to channels, scoped to the team owning this store"},
-	"authorizeKVNodeManage": {2, "the management gate: ACL owner or team admin, channel private and of this team"},
-	"loadNodeChannelTag":    {3, "reads the tag of an existing node of any kind, for containment; returns no node contents"},
-	"assertIsChannelRoot":   {1, "the single legal crossing: is this exact dir the channel's registered root"},
-	"registerChannelRoot":   {2, "writes channel_kv_root; reached only from KvChannelMkRoot after authorizeKVNodeManage"},
+	"kvChannelMembershipUncached": {2, "the membership probe itself: channel_acl joined to channels, scoped to the team owning this store. kvChannelMembership wraps it with the per-request memo and makes no query of its own"},
+	"authorizeKVNodeManage":       {2, "the management gate: ACL owner or team admin, channel private and of this team"},
+	"loadNodeChannelTag":          {3, "reads the tag of an existing node of any kind, for containment; returns no node contents"},
+	"assertIsChannelRoot":         {1, "the single legal crossing: is this exact dir the channel's registered root"},
+	"registerChannelRoot":         {2, "writes channel_kv_root; reached only from KvChannelMkRoot after authorizeKVNodeManage"},
 
 	// --- the five read loaders, each of which IS a chokepoint ---
 	"loadDir":                   {1, "chokepoint: calls authorizeKVNodeRead on the row it just loaded, before its callers' role gates"},

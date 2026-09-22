@@ -34,6 +34,8 @@ import (
 	"context"
 	"errors"
 
+	"sync"
+
 	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-foks/server/shared"
@@ -58,15 +60,59 @@ var errKVNodeMasked = errors.New("kv node masked by channel acl")
 const kvAclRoleOwner = 1
 
 type kvActorKey struct{}
+type kvAclMemoKey struct{}
 
-// withActor records the acting user for channel-ACL checks downstream.
+// kvAclMemo caches this request's membership decisions, keyed by channel.
+//
+// Without it a single listing is an N+1 against a SECOND database:
+// mLoadSmallFilesOrSymlinks authorizes per row, inside the loop reading the
+// KV shard's cursor, so a directory of N tagged files meant N pool acquires
+// and N queries against foks_realtime while that cursor was open. A
+// directory's files almost always belong to one channel, so one query now
+// serves the whole listing.
+//
+// Only settled answers are cached -- allowed, or masked. An infrastructure
+// failure is never memoized, or one blip would be remembered as a denial for
+// the rest of the request.
+//
+// The cache lives for one request, so a revocation landing mid-request is
+// not observed by that request. That is the same bound the design already
+// accepts for lack of a cross-database transaction (§2.6): every subsequent
+// request re-authorizes.
+type kvAclMemo struct {
+	mu   sync.Mutex
+	seen map[int64]error
+}
+
+func (c *kvAclMemo) get(chid int64) (error, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	err, ok := c.seen[chid]
+	return err, ok
+}
+
+func (c *kvAclMemo) put(chid int64, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seen[chid] = err
+}
+
+// withActor records the acting user for channel-ACL checks downstream, and
+// opens a fresh per-request memo for the decisions they lead to.
 func withActor(m shared.MetaContext, uid *proto.UID) shared.MetaContext {
-	return m.WithContext(context.WithValue(m.Ctx(), kvActorKey{}, uid))
+	ctx := context.WithValue(m.Ctx(), kvActorKey{}, uid)
+	ctx = context.WithValue(ctx, kvAclMemoKey{}, &kvAclMemo{seen: make(map[int64]error)})
+	return m.WithContext(ctx)
 }
 
 func actorUID(m shared.MetaContext) *proto.UID {
 	uid, _ := m.Ctx().Value(kvActorKey{}).(*proto.UID)
 	return uid
+}
+
+func aclMemo(m shared.MetaContext) *kvAclMemo {
+	c, _ := m.Ctx().Value(kvAclMemoKey{}).(*kvAclMemo)
+	return c
 }
 
 // authorizeKVNodeRead gates a read of a node whose row carried channelID.
@@ -89,6 +135,25 @@ func authorizeKVNodeRead(
 // whose store this is. Absence is errKVNodeMasked; the caller decides what
 // that looks like from outside.
 func kvChannelMembership(
+	m shared.MetaContext,
+	pid proto.PartyID,
+	channelID int64,
+) error {
+	memo := aclMemo(m)
+	if memo != nil {
+		if err, ok := memo.get(channelID); ok {
+			return err
+		}
+	}
+	err := kvChannelMembershipUncached(m, pid, channelID)
+	// Only settled answers are worth remembering; see kvAclMemo.
+	if memo != nil && (err == nil || errors.Is(err, errKVNodeMasked)) {
+		memo.put(channelID, err)
+	}
+	return err
+}
+
+func kvChannelMembershipUncached(
 	m shared.MetaContext,
 	pid proto.PartyID,
 	channelID int64,
@@ -398,11 +463,18 @@ func registerChannelRoot(
 	if tag.RowsAffected() == 1 {
 		return nil
 	}
+	// FOR UPDATE for the reason putDir and putSmallFileOrSymlink give: the
+	// comparison runs in a later statement, and snapshot, than the insert
+	// that conflicted, so without the lock the row could change underneath
+	// it and the reported success would describe something else. No path
+	// deletes these rows today, which makes this cheap insurance rather than
+	// a live fix -- and the day one appears, this is already right.
 	var existing []byte
 	err = db.QueryRow(
 		m.Ctx(),
 		`SELECT dir_id FROM channel_kv_root
-		 WHERE short_host_id=$1 AND short_party_id=$2 AND channel_id=$3`,
+		 WHERE short_host_id=$1 AND short_party_id=$2 AND channel_id=$3
+		 FOR UPDATE`,
 		int(m.ShortHostID()), pid.Shorten().ExportToDB(), channelID,
 	).Scan(&existing)
 	if err != nil {
