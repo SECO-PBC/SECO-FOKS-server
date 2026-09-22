@@ -241,7 +241,7 @@ var queryAllowlist = map[string]allowedQueries{
 	"channelMutator.stampMembers":           {2, "metadata mutation; re-stamps the delivery rows of the already-authorized channel so the change reaches members' inboxes. Reads no channel identity a member does not already hold"},
 	"isDefaultChannel":                      {1, "metadata mutation; returns one boolean about a channel the caller already passed authorizeChannel(accessMutate) for, and no identity of any other channel"},
 	"channelMaker.insertChannel":            {1, "creation; runs after channelMaker.checkPerms -> authorizeChannelCreate"},
-	"fanUserIntoChannel":                    {1, "delivery-row write, reached from creation fan-out, grant, or the (private-excluding) fan-in"},
+	"fanUserIntoChannel":                    {2, "delivery-row write, reached from creation fan-out, grant, or the (private-excluding) fan-in; the second reference is its own existence check, which only decides whether to allocate an inbox version"},
 	"channelMaker.fanoutToUser":             {1, "thin wrapper over fanUserIntoChannel, inside the creation transaction"},
 	"channelMaker.insertNewChannelSetRow":   {1, "channel-set version bookkeeping; carries no channel identity to a caller"},
 	"channelMaker.updateChannelSet":         {1, "channel-set version bookkeeping; carries no channel identity to a caller"},

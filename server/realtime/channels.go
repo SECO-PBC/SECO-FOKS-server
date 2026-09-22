@@ -787,8 +787,36 @@ func fanUserIntoChannel(
 	bool,
 	error,
 ) {
-	var inboxVers int64
+	// Does the delivery row already exist? If so there is nothing to stamp,
+	// and allocating a version anyway would leave the user's head above every
+	// version any row carries -- a gap their client's cursor can never reach,
+	// so SyncInbox stops on an empty delta and PollInbox returns instantly
+	// until the next real bump. The comment below used to call that harmless;
+	// it is the same defect that made unarchive leave clients polling, found
+	// by the invariant suite once it was pointed at the grant path.
+	//
+	// Still check RowsAffected afterwards: two devices can race between this
+	// read and the insert, and then one of them wastes a version. Rare, and
+	// self-healing on the next delivery, where doing it on EVERY re-grant was
+	// neither.
+	var exists int
 	err := tx.QueryRow(
+		m.Ctx(),
+		`SELECT 1 FROM user_channels
+		 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3`,
+		m.ShortHostID(),
+		channelID.Int64(),
+		uid.ExportToDB(),
+	).Scan(&exists)
+	if err == nil {
+		return false, nil
+	}
+	if err != pgx.ErrNoRows {
+		return false, err
+	}
+
+	var inboxVers int64
+	err = tx.QueryRow(
 		m.Ctx(),
 		`INSERT INTO user_inbox (short_host_id, uid, app_id, inbox_version, mtime)
 		 VALUES ($1, $2, $3, 1, NOW())

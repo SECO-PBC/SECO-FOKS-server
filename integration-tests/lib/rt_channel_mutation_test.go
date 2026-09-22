@@ -46,6 +46,20 @@ type mutScene struct {
 
 func setupMutScene(t *testing.T) *mutScene {
 	sc := setupPrivScene(t, true)
+	// Every test on this scene gets the invariant suite, rather than each
+	// remembering to defer it. Cleanup rather than defer, because setup
+	// returns long before the test does.
+	//
+	// Wired here rather than in setupPrivScene, which would cover the
+	// private-channel tests too. That was tried, and it does not hold yet: the
+	// revoke path bumps a member's inbox version without stamping a row, on
+	// purpose, and privScene can only count the revokes that go through its
+	// own helper -- several tests call RevokeChannelMember directly. Covering
+	// them needs either revoke to stop leaving the gap or the orphan check to
+	// identify revoked users, and neither belongs in this change. Extending
+	// the net that far did earn its keep once already: it is what found the
+	// wasted version in fanUserIntoChannel.
+	t.Cleanup(func() { sc.requireRTInvariants(t) })
 	// The default channel first, as a real team has it: it is created on the
 	// team's first send, before anything else. Without it the channel under
 	// test would itself be the team's oldest public bottom-tier channel, which
@@ -133,7 +147,6 @@ func (s *mutScene) find(
 // server: a UI-only rule is not a rule.
 func TestRenameRequiresAdmin(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 
 	err := sc.rename(t, sc.bob, sc.pubSpec(), randomChannelName(t, "nope-"), "")
 	require.Error(t, err)
@@ -152,7 +165,6 @@ func TestRenameRequiresAdmin(t *testing.T) {
 // the old name cannot read the new one.
 func TestRenameResealsAtTierRole(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 
 	// Bottom tier, renamed by the team OWNER (whose own role is far above
 	// MinRTRole). The box must still be sealed at the bottom tier's name role,
@@ -197,7 +209,6 @@ func TestRenameResealsAtTierRole(t *testing.T) {
 // with the bump missing entirely.
 func TestRenameVisibleToOtherMembers(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 
 	// Warm bob's cache at the pre-rename version, so the assertion below
 	// measures an incremental update rather than a first fetch.
@@ -219,7 +230,6 @@ func TestRenameVisibleToOtherMembers(t *testing.T) {
 // clobbering the other.
 func TestRenameCasRace(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 	before := sc.find(t, sc.alice, sc.pubID).Seqno
 
 	// Names generated HERE, on the test goroutine: randomChannelName calls
@@ -253,7 +263,6 @@ func TestRenameCasRace(t *testing.T) {
 // client's check -- but it is the only one there is.
 func TestRenameOntoExistingNameFails(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 	otherName := randomChannelName(t, "other-")
 	_, err := sc.alice.minder.MakeChannel(
 		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, otherName, "",
@@ -274,7 +283,6 @@ func TestRenameOntoExistingNameFails(t *testing.T) {
 
 func TestArchiveRequiresAdmin(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 	err := sc.setArchived(t, sc.bob, sc.pubSpec(), true)
 	require.Error(t, err)
 	require.IsType(t, core.PermissionError(""), err)
@@ -284,7 +292,6 @@ func TestArchiveRequiresAdmin(t *testing.T) {
 // An archived channel stops accepting messages.
 func TestArchivedChannelRejectsSend(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 	_, err := sc.alice.minder.Send(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
 		sc.pubSpec(), []byte("before"))
 	require.NoError(t, err)
@@ -302,7 +309,6 @@ func TestArchivedChannelRejectsSend(t *testing.T) {
 // team's channel listing carrying the flag, which is what reserves its name.
 func TestArchivedStaysInTheListing(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
 
 	for _, a := range []*privActor{sc.alice, sc.bob} {
@@ -318,7 +324,6 @@ func TestArchivedStaysInTheListing(t *testing.T) {
 // only defence is that the collision never becomes possible.
 func TestArchivedNameStaysReserved(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
 
 	_, err := sc.alice.minder.MakeChannel(
@@ -338,7 +343,6 @@ func TestArchivedNameStaysReserved(t *testing.T) {
 // a channel somebody archived could never be used again.
 func TestRenamedArchivedFreesTheName(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
 
 	require.NoError(t, sc.rename(t, sc.alice, sc.pubSpec(), randomChannelName(t, "retired-"), ""))
@@ -400,7 +404,6 @@ func TestCannotArchiveDefaultChannel(t *testing.T) {
 // that handshake an archived channel would sit in the inbox forever.
 func TestArchivedLeavesTheInbox(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 	_, err := sc.alice.minder.Send(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
 		sc.pubSpec(), []byte("hello"))
 	require.NoError(t, err)
@@ -454,7 +457,6 @@ func inboxHas(t *testing.T, a *privActor, id proto.RTChannelID) bool {
 // build.
 func TestArchiveIsReversible(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 	const n = 4
 	for i := 0; i < n; i++ {
 		_, err := sc.alice.minder.Send(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
@@ -490,7 +492,6 @@ func TestArchiveIsReversible(t *testing.T) {
 // account exists.
 func TestArchivedNotFannedInOnJoin(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
 
 	frank := sc.tew.NewTestUser(t)
@@ -532,7 +533,6 @@ func TestArchivedNotFannedInOnJoin(t *testing.T) {
 // the client, exactly as a box sealed with the wrong derivation would.
 func TestUndecryptableDescriptionKeepsTheName(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 
 	require.Equal(t, sc.pubName, sc.find(t, sc.alice, sc.pubID).Name)
 	sc.corruptDescBox(t, sc.pubID)
@@ -568,4 +568,35 @@ func (s *mutScene) corruptDescBox(t *testing.T, id proto.RTChannelID) {
 		`UPDATE channels SET desc_box=$3 WHERE short_host_id=$1 AND channel_id=$2`,
 		m.ShortHostID(), id.Short().Int64(), box)
 	require.NoError(t, err)
+}
+
+// Re-granting a member who already has a delivery row must not allocate an
+// inbox version.
+//
+// fanUserIntoChannel used to bump user_inbox and then insert ON CONFLICT DO
+// NOTHING, so every re-grant left a version that stamped no row. A version no
+// row carries cannot be reached by a client's cursor, so the user's head sits
+// above it: SyncInbox stops on an empty delta without advancing and PollInbox
+// returns instantly until the next real delivery. The source called it "a
+// harmless gap"; it is the same defect that made unarchive leave clients
+// polling, and the invariant suite found it once it was pointed at the grant
+// path.
+//
+// Counted directly rather than through requireRTInvariants, because the point
+// is that this operation adds exactly zero -- not that it stays under an
+// allowance.
+func TestRegrantDoesNotWasteInboxVersion(t *testing.T) {
+	sc := setupPrivScene(t, false)
+
+	sc.grant(t, sc.alice, sc.bob, false)
+	before := sc.rtInvariantCounts(t)["orphan inbox versions"]
+
+	// Same member again, promoted to owner: the ACL row changes, the delivery
+	// row is already there and needs no new version.
+	sc.grant(t, sc.alice, sc.bob, true)
+
+	require.Equal(t, before, sc.rtInvariantCounts(t)["orphan inbox versions"],
+		"re-granting an existing member allocated an inbox version that stamps "+
+			"no row, leaving that member's inbox head permanently above anything "+
+			"their client can sync to")
 }

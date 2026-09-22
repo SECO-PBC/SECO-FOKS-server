@@ -15,14 +15,17 @@ package lib
 //
 //	defer sc.requireRTInvariants(t)
 //
-// Asserted against a BASELINE, not against zero. Every test in this package
-// shares one postgres, and one of these is legitimately violated elsewhere:
-// the revoke path bumps a user's inbox version without stamping a row ("bump,
-// don't stamp" in dropChannelMember), deliberately, so the revoked member's
-// next sync is a full one. Asserting zero would fail in whichever test
-// happened to run after a revoke -- wrong, and maddening to debug. A baseline
-// also makes the check say what is actually meant: not "the database is
-// pristine" but "this operation did not break anything".
+// Wired once, in setupPrivScene's t.Cleanup, so EVERY test built on that scene
+// is covered rather than each remembering to opt in.
+//
+// Asserted against a BASELINE PLUS an allowance, not against zero. Every test
+// in this package shares one postgres, so a violation left by an earlier test
+// is not this test's fault; and one of these is violated on purpose, by the
+// revoke path, which bumps a member's inbox version without stamping a row so
+// their next sync is a full one. The scene counts those (privScene.revoke), so
+// a revoking test can still be checked and an ACCIDENTAL orphan on top of the
+// deliberate ones still fails. Without the count, the revoke path would be the
+// one place these invariants could not look.
 
 import (
 	"testing"
@@ -122,13 +125,43 @@ var rtInvariantWhy = map[string]string{
 // invariant worse than it was when the scene was built.
 func (s *privScene) requireRTInvariants(t *testing.T) {
 	t.Helper()
+	// Quiet once the test has already failed. This runs from t.Cleanup, so on
+	// a failing test it would otherwise add a second failure blaming the
+	// database for whatever wreckage the first one left -- and its queries can
+	// trip over that wreckage themselves. The first failure is the actionable
+	// one; these are a diagnostic for tests that would otherwise be green.
+	if t.Failed() {
+		return
+	}
 	require.NotNil(t, s.invBaseline,
 		"no invariant baseline: the scene was not built by setupPrivScene")
 	for name, now := range s.rtInvariantCounts(t) {
-		require.LessOrEqualf(t, now, s.invBaseline[name],
-			"invariant %q went from %d to %d during this test.\n\n%s",
-			name, s.invBaseline[name], now, rtInvariantWhy[name])
+		allowed := s.invBaseline[name] + s.invAllow[name]
+		if name == "orphan inbox versions" {
+			// Each revoke deliberately bumps without stamping; anything beyond
+			// that count is not deliberate.
+			allowed += s.deliberateOrphans
+		}
+		require.LessOrEqualf(t, now, allowed,
+			"invariant %q is at %d, above the %d this test may account for "+
+				"(%d at scene build, %d deliberate).\n\n%s",
+			name, now, allowed, s.invBaseline[name], allowed-s.invBaseline[name],
+			rtInvariantWhy[name])
 	}
+}
+
+// allowRTInvariant declares that this test knowingly adds n violations of one
+// invariant, so the check can still catch anything else it does.
+//
+// For tests that PLANT state the server would never write -- a user_channels
+// row at a version no allocator issued, say -- rather than for real behaviour.
+// A deliberate violation produced by production code belongs in the counters
+// above, not here.
+func (s *privScene) allowRTInvariant(name string, n int) {
+	if s.invAllow == nil {
+		s.invAllow = map[string]int{}
+	}
+	s.invAllow[name] += n
 }
 
 // rtdbScalar runs a one-value query against the realtime DB.

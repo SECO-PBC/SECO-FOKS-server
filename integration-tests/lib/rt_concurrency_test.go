@@ -65,17 +65,8 @@ func allowedUnderContention(err error) bool {
 		core.RTChannelExistsError,   // raced a rename onto the same name
 		core.PermissionError,        // not an admin
 		core.RowNotFoundError,       // raced something that removed the row
-		core.RTGenericError:         // e.g. refusing the default channel
-		return true
-	}
-	// RTNotFoundError is a string type, so it needs its own arm.
-	var nf core.RTNotFoundError
-	return errorsAs(err, &nf)
-}
-
-func errorsAs(err error, target *core.RTNotFoundError) bool {
-	if v, ok := err.(core.RTNotFoundError); ok {
-		*target = v
+		core.RTGenericError,         // e.g. refusing the default channel
+		core.RTNotFoundError:        // raced something that archived or removed it
 		return true
 	}
 	return false
@@ -93,7 +84,6 @@ var rtStressOps = []int{0, 1, 1, 2, 3, 4, 4}
 // the team's single channel_sets row.
 func TestRealtimeConcurrentWrites(t *testing.T) {
 	sc := setupMutScene(t)
-	defer sc.requireRTInvariants(t)
 
 	// A second channel, so a mutation on one races a send on the other -- the
 	// case where two transactions share the team's channel_sets row without
@@ -203,11 +193,11 @@ func TestRealtimeConcurrentWrites(t *testing.T) {
 	// Leave both channels live, so the invariant pass at the end runs against
 	// a team in its ordinary state rather than a half-archived one.
 	for _, id := range []lcl.RTChannelSpecifier{sc.pubSpec(), sc.specFor(*otherID)} {
-		err := sc.alice.minder.SetChannelArchived(sc.alice.m, sc.teamCfg(),
-			proto.RTAppID_Chat, id, false)
-		if err != nil {
-			t.Logf("final unarchive: %v", err)
-		}
+		// Required, not logged: if this fails the team is left archived and the
+		// invariant pass that follows would be judging a state no test meant
+		// to create.
+		require.NoError(t, sc.alice.minder.SetChannelArchived(sc.alice.m,
+			sc.teamCfg(), proto.RTAppID_Chat, id, false))
 	}
 	t.Logf("%d operations completed", len(log))
 }
