@@ -86,7 +86,17 @@ cd /opt/foks/workdir && docker compose up -d
 
 `foks-tool patch-db --yes --db <name>` runs once per database on every deploy. It is idempotent (already-applied patches are skipped via the `schema_patches` table). The deploy script iterates over: `server-config users beacon merkle-tree merkle-raft merkle-raft-archive queue-service realtime kv-store`.
 
-KV-store shards **are** migrated automatically, like every other database: `patch-db --db kv-store` enumerates the configured shards itself (`PatchDBEng.loadShards`) and patches each one, each keeping its own `schema_patches` table. It prints a line per shard — check every shard after a kv-store patch, not just the first. `--shard <id>` remains available for patching one shard by hand.
+KV-store shards **are** migrated automatically, like every other database: `patch-db --db kv-store` enumerates the configured shards itself (`PatchDBEng.loadShards`) and patches each one, each keeping its own `schema_patches` table. `--shard <id>` remains available for patching one shard by hand.
+
+**Do not try to confirm the rollout from the deploy output.** `run_patch` captures patch-db's output and logs only `kv-store: patched`, and patch-db itself prints nothing for a shard that had no pending patches (`PatchSummary.addPatches` skips it) — exiting with "no patches to apply" when every shard is already current. A silent shard and an up-to-date shard look identical. Ask the database instead:
+
+```bash
+for d in $(docker compose exec -T postgresql psql -U foks -lqt | cut -d'|' -f1 | tr -d ' ' | grep '^foks_kv_store_'); do
+  echo -n "$d: "; docker compose exec -T postgresql psql -U foks -d "$d" -tAc 'SELECT id FROM schema_patches ORDER BY 1;'
+done
+```
+
+Every shard must list every patch id.
 
 This used to say the opposite, and that is how `foks_kv_store/p1` reached production unapplied in `v0.1.9-seco.21`: `kv-store` was missing from the list above, nobody ran the manual step, and because the server `SELECT`s the column p1 adds, every KV read failed behind a green deploy and a passing health check. `TestDeployScriptPatchesEveryPatchedDB` now fails the build if a database with registered patches is missing from the list, so **do not remove an entry to work around a failing patch.**
 

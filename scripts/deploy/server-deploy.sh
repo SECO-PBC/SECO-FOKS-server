@@ -118,6 +118,16 @@ run_patch() {
         log "  $db: postgres database not present on this server, skipping"
         return 0
     fi
+    # kv-store resolves its databases from the shards config rather than from a
+    # single name, so "not configured here" arrives as a config error from
+    # KVShardsConfig instead of either message above. Without this arm, adding
+    # kv-store to DBS aborts the deploy on any host that runs no KV shards --
+    # before the restart, so it fails closed rather than half-deployed, but it
+    # still fails on a host that is correctly configured.
+    if echo "$out" | grep -q 'invalid/empty kv shards config'; then
+        log "  $db: no kv shards configured on this server, skipping"
+        return 0
+    fi
     echo "$out" >&2
     return $rc
 }
