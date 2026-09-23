@@ -189,6 +189,15 @@ var deployDBsRe = regexp.MustCompile(`(?m)^DBS=\(([^)]*)\)`)
 
 const deployScriptPath = "../../scripts/deploy/server-deploy.sh"
 
+var (
+	// The script must still iterate DBS...
+	deployLoopRe = regexp.MustCompile(`for\s+\w+\s+in\s+"\$\{DBS\[@\]\}"`)
+	// ...and patch-db must still receive a variable rather than a hard-coded
+	// name, which is what makes iterating the array mean anything. Both are
+	// required: an either/or would stay green while one link was cut.
+	deployPatchCallRe = regexp.MustCompile(`--db\s+"\$\w+"`)
+)
+
 // TestDeployScriptPatchesEveryPatchedDB pins the other end of the patch
 // lifecycle: a patch that is written, embedded and recorded still does
 // nothing if the deploy never asks patch-db to apply it to that database.
@@ -213,6 +222,29 @@ func TestDeployScriptPatchesEveryPatchedDB(t *testing.T) {
 	if m == nil {
 		t.Fatalf("%s: no `DBS=(...)` array found; if the script stopped listing "+
 			"databases that way, this guard needs to follow it", deployScriptPath)
+	}
+
+	// Membership in DBS only means anything while the script still walks the
+	// array and patches each entry. Without this, a refactor that deleted the
+	// loop would leave every name listed, this test green, and every database
+	// unpatched -- the same shape as the bug it was written for.
+	//
+	// This pins the two ends of that chain, not every way it could be cut: a
+	// loop body rewritten to patch one hard-coded name would still pass. It is
+	// a smoke alarm on the patching step, not a proof that it runs.
+	for _, want := range []struct {
+		re   *regexp.Regexp
+		what string
+	}{
+		{deployLoopRe, `a loop over "${DBS[@]}"`},
+		{deployPatchCallRe, `a patch-db call taking --db "$var" rather than a literal`},
+	} {
+		if !want.re.Match(raw) {
+			t.Errorf("%s: no %s found. DBS membership is only meaningful while the "+
+				"script actually patches each entry; if the patching step moved or was "+
+				"rewritten, point this guard at the new shape rather than deleting it.",
+				deployScriptPath, want.what)
+		}
 	}
 
 	// Map each listed name through the same parser patch-db's --db uses, so a

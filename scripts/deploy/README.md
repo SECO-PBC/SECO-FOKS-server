@@ -84,9 +84,11 @@ cd /opt/foks/workdir && docker compose up -d
 
 ## DB migrations
 
-`foks-tool patch-db --yes --db <name>` runs once per database on every deploy. It is idempotent (already-applied patches are skipped via the `schema_patches` table). The deploy script iterates over: `server-config users beacon merkle-tree merkle-raft merkle-raft-archive queue-service realtime`.
+`foks-tool patch-db --yes --db <name>` runs once per database on every deploy. It is idempotent (already-applied patches are skipped via the `schema_patches` table). The deploy script iterates over: `server-config users beacon merkle-tree merkle-raft merkle-raft-archive queue-service realtime kv-store`.
 
-KV-store shards are not migrated automatically — if you ever add a kv-store patch, run it manually with `--shard <id>`.
+KV-store shards **are** migrated automatically, like every other database: `patch-db --db kv-store` enumerates the configured shards itself (`PatchDBEng.loadShards`) and patches each one, each keeping its own `schema_patches` table. It prints a line per shard — check every shard after a kv-store patch, not just the first. `--shard <id>` remains available for patching one shard by hand.
+
+This used to say the opposite, and that is how `foks_kv_store/p1` reached production unapplied in `v0.1.9-seco.21`: `kv-store` was missing from the list above, nobody ran the manual step, and because the server `SELECT`s the column p1 adds, every KV read failed behind a green deploy and a passing health check. `TestDeployScriptPatchesEveryPatchedDB` now fails the build if a database with registered patches is missing from the list, so **do not remove an entry to work around a failing patch.**
 
 `patch-db` only patches databases that already exist — it cannot create one. A brand-new database (as `realtime` was for v0.1.7-seco.3) needs a one-off `foks-tool init-db --db <name>` first; the deploy script logs it as "not present on this server, skipping" until then. The base `.sql` schemas self-stamp their `schema_patches` rows, so a freshly init'd DB is already at the current patch level and the next `patch-db` reports "up to date".
 
