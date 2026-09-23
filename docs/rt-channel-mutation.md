@@ -652,20 +652,22 @@ The test is mechanical and worth running literally: *does this diff apply to
 | Inventory guard entries | **No** | Fork-only. Keep `rpcAccessClass` and `queryAllowlist` entirely out of the upstream PR; add them when merging into the fork. |
 | Anything naming `channel_acl`, `private`, `no_push`, `push_holds` | **No** | Must not appear in the upstream PR at all — not in code, not in comments, not in test names. |
 
-### 9.4 Numbering: three separate sequences, none of them aligned
+### 9.4 Numbering: four separate sequences, none of them aligned
 
-Three sequences run independently — RPC methods, struct fields, and SQL patch
-ids — and the fork and upstream disagree on all three. Verified against
-`upstream/main` on 2026-09-22, because the earlier draft of this section got
-two of them wrong from memory.
+Four sequences run independently — RPC methods, struct fields, SQL patch ids
+and status codes — and the fork and upstream disagree on all four. Verified
+against `upstream/main` on 2026-09-22, because the earlier draft of this
+section got two of them wrong from memory, and the fourth row was missing
+entirely until the upstream PR was opened (see below).
 
 | Sequence | Upstream today | Fork today | This change proposes |
 |---|---|---|---|
 | RealTime RPC methods | `@0`–`@11` (`rtSetPushToken @11`) | `@0`–`@11` shared, fork block `@200`–`@206` | upstream **`@16`/`@17`**, fork **`@207`/`@208`** |
 | `RTChannelMetadata` fields | `@0`–`@13` (**`noPush @13` merged**, #365) | upstream's plus `private @20`, `noPush @21` | upstream **`@14`**, fork **`@22`** |
 | `foks_realtime` patch ids | p1–**p5**, where **p5 is no-push** | p1–p8, where **p5 is private channels** | upstream **p8**, fork **p9** |
+| `lib.status` codes, RT block | `@12000`–**`@12009`** (`RT_MSG_QUEUED @12008`, `RT_OUTBOX_FULL @12009`, both #359) | `@12000`–**`@12008`**, where **`@12008` is `RT_CHANNEL_ARCHIVED_ERROR`** | upstream **`@12010`**, fork `@12008` **and it is wrong** |
 
-Three things in that table are easy to get wrong and were:
+Four things in that table are easy to get wrong and were:
 
 - **Upstream's next free field is `@14`, not `@13`.** `noPush @13` merged
   upstream on 2026-09-12 (#365) at a different number from ours (`@21`);
@@ -675,6 +677,15 @@ Three things in that table are easy to get wrong and were:
   mutation at `@12` would collide with our own proposal, not with upstream's
   work. Hence `@16`/`@17`, with the caveat that if #370 is declined or
   renumbered these move down.
+- **The fork's `RT_CHANNEL_ARCHIVED_ERROR @12008` is already taken upstream**,
+  by `RT_MSG_QUEUED` from #359, merged before the fork allocated it. Our last
+  upstream merge is `d39371c` (09-01), so `@12008` looked free here and was
+  not; the same blind spot would have hit any status code we added in this
+  window. It shipped in `v0.1.9-seco.21`. It costs nothing while our clients
+  only talk to our server, and the upstream PR uses the genuinely free
+  `@12010` — but the next upstream merge must renumber the fork's constant by
+  hand and re-run `make proto`. Git will not raise a conflict, because the two
+  names sit on different lines of the enum.
 - **Patch ids already collide, and the failure is silent.** `server/shared/patch.go`
   keys a patch on a bare integer with no content hash. Upstream p5 adds
   `no_push`; the fork's p5 creates `channel_acl`. A fresh fork database stamps
