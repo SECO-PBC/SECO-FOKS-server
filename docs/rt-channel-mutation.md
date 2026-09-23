@@ -393,7 +393,7 @@ existing RT block runs `@12001`–`@12007`.
 - the `{name, tier}` collision check;
 - the refusal of the name `general`.
 
-The empty name stays refused on update: `None`-specifier lookups resolve it, so renaming onto it would make a second default channel.
+The empty name is never covered: `None`-specifier lookups resolve it, so it stays refused on update, and on create it keeps its collision check even with the flag set. Either would otherwise make a second nameless default channel.
 
 **Off by default, on purpose.** A caller that creates a channel on demand relies on the collision check to create it exactly once. Two such callers exist: the app's `seco-ctl` control channel, and a DM team's nameless default channel. Only the app's user-facing create and rename paths set the flag. Test: `TestAllowDuplicateNameOnCreateAndRename`.
 

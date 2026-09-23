@@ -317,6 +317,18 @@ func TestAllowDuplicateNameOnCreateAndRename(t *testing.T) {
 	// The empty name stays refused either way: None lookups resolve it.
 	require.Error(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
 		proto.RTAppID_Chat, sc.specFor(*gen), "", "", true))
+
+	// …and stays unique on create: the flag never mints a second nameless
+	// channel.
+	_, err = sc.alice.minder.MakeChannel(
+		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, "", "", roles)
+	if err != nil {
+		require.IsType(t, core.RTChannelExistsError{}, err)
+	}
+	_, err = sc.alice.minder.MakeChannelWithOpts(
+		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, "", "", roles,
+		librt.MakeChannelOpts{AllowDuplicateName: true}, nil)
+	require.IsType(t, core.RTChannelExistsError{}, err)
 }
 
 // --- archive --------------------------------------------------------------

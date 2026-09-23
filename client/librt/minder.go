@@ -166,7 +166,8 @@ type MakeChannelOpts struct {
 	// AllowDuplicateName skips the team-wide name-collision check and the
 	// refusal of the name "general", for a caller that identifies channels
 	// by id and treats names as display text (fork-only, see
-	// docs/rt-channel-mutation.md). Off by default, because callers that
+	// docs/rt-channel-mutation.md). Never for the empty name, which stays
+	// unique so that None-specifier lookups of the default channel resolve. Off by default, because callers that
 	// create a channel on demand -- the app's control channel, a DM team's
 	// nameless default channel -- rely on the collision check to create it
 	// exactly once.
@@ -339,7 +340,11 @@ func (d *Minder) makeChannelOneAttempt(
 	// server cannot dedupe names it hides from the caller, the listing the map
 	// was built from is itself filtered, and two private channels sharing a
 	// name is legitimate anyway.
-	if !opts.Private && !opts.AllowDuplicateName {
+	//
+	// AllowDuplicateName never covers the EMPTY name: None-specifier lookups
+	// resolve a team's nameless default channel, and a second one would make
+	// them ambiguous.
+	if !opts.Private && (!opts.AllowDuplicateName || nm.IsEmpty()) {
 		if _, found := chMap[chKey{
 			name: nm.Normalize(),
 			tier: newChTier,
