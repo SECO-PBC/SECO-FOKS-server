@@ -59,8 +59,24 @@ jobs:
       # setup.go), so it needs no `services:` block -- only that nothing
       # excludes it, which until now something did. Fork CI compiled these
       # tests and never ran them, so the fork has merged integration tests
-      # that never passed at all; making lib a gate is what stops that.
-      - name: Test (integration, lib)
+      # that never passed at all; running it is what stops that.
+      #
+      # Advisory, not a gate -- and it WAS a gate for a day. TestLocks
+      # (integration-tests/lib/kv_store_test.go, upstream's, unmodified here)
+      # asks the server to override a held lock after 1ms, which does not hold
+      # on a loaded runner: it passed on one run of PR #48 and failed on the
+      # next, and failed on main, while that PR changed only a shell script, a
+      # README and a test file. Gating on a coin flip does not catch
+      # regressions, it teaches people to re-run CI until it is green -- which
+      # is strictly worse than not gating, because it also erodes the gates
+      # that do mean something.
+      #
+      # The suite is heavy rather than wrong: run in full on a laptop it also
+      # fails, on different tests, with `dial tcp: connect: operation timed
+      # out`. Promote it back to a gate once TestLocks is stable; the value of
+      # running it was never in question, only of blocking merges on it.
+      - name: Test (integration, lib -- advisory)
+        continue-on-error: true
         run: go test ./integration-tests/lib/... -count=1 -timeout 20m
 
       # NOT a gate, deliberately. integration-tests/cli flakes on signup and

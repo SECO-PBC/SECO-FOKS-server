@@ -25,8 +25,15 @@ HEALTH_HOST="${HEALTH_HOST:-127.0.0.1}"
 HEALTH_PORT="${HEALTH_PORT:-4430}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-90}"
 
-# All FOKS databases known to foks-tool patch-db (excl. kv-store, which uses shards).
-DBS=(server-config users beacon merkle-tree merkle-raft merkle-raft-archive queue-service realtime)
+# Every FOKS database foks-tool patch-db knows about. kv-store belongs here
+# like any other: it is sharded, but patch-db enumerates the shards itself
+# (PatchDBEng.loadShards) and each shard keeps its own schema_patches table.
+# It was left out while foks_kv_store had no patches, which stopped being true
+# with p1 -- and because the kv-store server SELECTs the columns p1 adds, a
+# release that skips it leaves every KV read failing on a live server that
+# deploys green. A database with registered patches must appear here;
+# server/sql/schema_patches_test.go fails the build if one does not.
+DBS=(server-config users beacon merkle-tree merkle-raft merkle-raft-archive queue-service realtime kv-store)
 
 log()  { printf '[deploy %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 fail() { printf '[deploy] FATAL: %s\n' "$*" >&2; exit 1; }
@@ -109,6 +116,16 @@ run_patch() {
     fi
     if echo "$out" | grep -qE 'database "foks_[a-z_]+" does not exist|SQLSTATE 3D000'; then
         log "  $db: postgres database not present on this server, skipping"
+        return 0
+    fi
+    # kv-store resolves its databases from the shards config rather than from a
+    # single name, so "not configured here" arrives as a config error from
+    # KVShardsConfig instead of either message above. Without this arm, adding
+    # kv-store to DBS aborts the deploy on any host that runs no KV shards --
+    # before the restart, so it fails closed rather than half-deployed, but it
+    # still fails on a host that is correctly configured.
+    if echo "$out" | grep -q 'invalid/empty kv shards config'; then
+        log "  $db: no kv shards configured on this server, skipping"
         return 0
     fi
     echo "$out" >&2

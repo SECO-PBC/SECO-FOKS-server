@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/foks-proj/go-foks/server/shared"
@@ -177,6 +178,98 @@ func TestBaseSchemaRecordsEveryPatch(t *testing.T) {
 		if _, err := os.Stat(filepath.Join("patches", db)); err != nil {
 			t.Errorf("Patches[%q] is registered but patches/%s/ does not exist: %v",
 				db, db, err)
+		}
+	}
+}
+
+// deployDBsRe reads the DBS array out of the deploy script. One line, one
+// array: the script is a fixed artifact in this repo, not arbitrary shell, so
+// matching the literal is enough and a parser would be worse.
+var deployDBsRe = regexp.MustCompile(`(?m)^DBS=\(([^)]*)\)`)
+
+const deployScriptPath = "../../scripts/deploy/server-deploy.sh"
+
+var (
+	// The script must still iterate DBS...
+	deployLoopRe = regexp.MustCompile(`for\s+\w+\s+in\s+"\$\{DBS\[@\]\}"`)
+	// ...and patch-db must still receive a variable rather than a hard-coded
+	// name, which is what makes iterating the array mean anything. Both are
+	// required: an either/or would stay green while one link was cut.
+	deployPatchCallRe = regexp.MustCompile(`--db\s+"\$\w+"`)
+)
+
+// TestDeployScriptPatchesEveryPatchedDB pins the other end of the patch
+// lifecycle: a patch that is written, embedded and recorded still does
+// nothing if the deploy never asks patch-db to apply it to that database.
+//
+// This is not hypothetical. foks_kv_store was left out of the deploy's DBS
+// list on the grounds that it is sharded, which was harmless for exactly as
+// long as it had no patches. p1 (the private-channel tag) added three columns
+// that the kv-store server SELECTs on every read path, so the release that
+// carried it deployed green onto a database without them and every KV read
+// failed -- display names, member profiles and the chat list's recency all
+// fell back to their empty values in the app. Sharding was never the
+// obstacle: PatchDBEng.loadShards enumerates the shards and patches each one.
+//
+// Needs no database: it reads the shell script and the embedded patch map.
+func TestDeployScriptPatchesEveryPatchedDB(t *testing.T) {
+	raw, err := os.ReadFile(deployScriptPath)
+	if err != nil {
+		t.Fatalf("cannot read %s; if the deploy script moved, update deployScriptPath: %v",
+			deployScriptPath, err)
+	}
+	m := deployDBsRe.FindSubmatch(raw)
+	if m == nil {
+		t.Fatalf("%s: no `DBS=(...)` array found; if the script stopped listing "+
+			"databases that way, this guard needs to follow it", deployScriptPath)
+	}
+
+	// Membership in DBS only means anything while the script still walks the
+	// array and patches each entry. Without this, a refactor that deleted the
+	// loop would leave every name listed, this test green, and every database
+	// unpatched -- the same shape as the bug it was written for.
+	//
+	// This pins the two ends of that chain, not every way it could be cut: a
+	// loop body rewritten to patch one hard-coded name would still pass. It is
+	// a smoke alarm on the patching step, not a proof that it runs.
+	for _, want := range []struct {
+		re   *regexp.Regexp
+		what string
+	}{
+		{deployLoopRe, `a loop over "${DBS[@]}"`},
+		{deployPatchCallRe, `a patch-db call taking --db "$var" rather than a literal`},
+	} {
+		if !want.re.Match(raw) {
+			t.Errorf("%s: no %s found. DBS membership is only meaningful while the "+
+				"script actually patches each entry; if the patching step moved or was "+
+				"rewritten, point this guard at the new shape rather than deleting it.",
+				deployScriptPath, want.what)
+		}
+	}
+
+	// Map each listed name through the same parser patch-db's --db uses, so a
+	// typo here is a failure rather than a silently skipped database.
+	deployed := map[string]bool{}
+	for _, name := range strings.Fields(string(m[1])) {
+		dbt, err := shared.ParseDbType(name)
+		if err != nil {
+			t.Errorf("%s: DBS lists %q, which `foks-tool patch-db --db` does not "+
+				"accept (shared.ParseDbType); the deploy would fail on it", deployScriptPath, name)
+			continue
+		}
+		deployed[dbt.ToString()] = true
+	}
+
+	for _, db := range slices.Sorted(maps.Keys(sqlpkg.Patches)) {
+		if len(sqlpkg.Patches[db]) == 0 {
+			continue
+		}
+		if !deployed[db] {
+			t.Errorf("%s has %d registered patch(es) but no deploy entry: nothing in "+
+				"`DBS` maps to %q, so patch-db is never run against it and a release "+
+				"carrying those patches deploys green onto a database that never got "+
+				"them. Add its `--db` name (shared.ParseDbType) to DBS in %s.",
+				db, len(sqlpkg.Patches[db]), db, deployScriptPath)
 		}
 	}
 }
