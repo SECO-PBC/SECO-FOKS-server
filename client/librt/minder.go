@@ -162,6 +162,15 @@ type MakeChannelOpts struct {
 	// machine-to-machine control channels (the app's `seco-` prefix).
 	// Creation-time only; any member may set it (it only reduces noise).
 	NoPush bool
+
+	// AllowDuplicateName skips the team-wide name-collision check and the
+	// refusal of the name "general", for a caller that identifies channels
+	// by id and treats names as display text (fork-only, see
+	// docs/rt-channel-mutation.md). Off by default, because callers that
+	// create a channel on demand -- the app's control channel, a DM team's
+	// nameless default channel -- rely on the collision check to create it
+	// exactly once.
+	AllowDuplicateName bool
 }
 
 func (d *Minder) MakeChannel(
@@ -206,7 +215,7 @@ func (d *Minder) MakeChannelWithOpts(
 	*proto.RTChannelID,
 	error,
 ) {
-	if nm.Eq(proto.RTGeneralChannel) {
+	if nm.Eq(proto.RTGeneralChannel) && !opts.AllowDuplicateName {
 		return nil, core.RTGenericError("cannot make channel named #general")
 	}
 	// The default channel may never be created no-push, and this is the only
@@ -330,7 +339,7 @@ func (d *Minder) makeChannelOneAttempt(
 	// server cannot dedupe names it hides from the caller, the listing the map
 	// was built from is itself filtered, and two private channels sharing a
 	// name is legitimate anyway.
-	if !opts.Private {
+	if !opts.Private && !opts.AllowDuplicateName {
 		if _, found := chMap[chKey{
 			name: nm.Normalize(),
 			tier: newChTier,
@@ -2697,9 +2706,10 @@ func (d *Minder) UpdateChannel(
 	spec lcl.RTChannelSpecifier,
 	nm proto.RTChannelName,
 	desc proto.RTChannelDesc,
+	allowDuplicateName bool,
 ) error {
 	return d.retryOnRace(m, func() error {
-		return d.updateChannelOneAttempt(m, team, appID, spec, nm, desc)
+		return d.updateChannelOneAttempt(m, team, appID, spec, nm, desc, allowDuplicateName)
 	})
 }
 
@@ -2808,13 +2818,16 @@ func (d *Minder) updateChannelOneAttempt(
 	spec lcl.RTChannelSpecifier,
 	nm proto.RTChannelName,
 	desc proto.RTChannelDesc,
+	allowDuplicateName bool,
 ) error {
 	// The default channel carries the EMPTY name, and "general" is its
 	// reserved alias (MakeChannel refuses both). Renaming onto either would
 	// produce a second default channel -- and at a different tier the
 	// collision check would not even catch it, since names are compared
-	// per-tier.
-	if nm.IsEmpty() || nm.Eq(proto.RTGeneralChannel) {
+	// per-tier. A caller that identifies channels by id (allowDuplicateName)
+	// treats "general" as an ordinary name; the empty name stays refused,
+	// because None-specifier lookups resolve it.
+	if nm.IsEmpty() || (nm.Eq(proto.RTGeneralChannel) && !allowDuplicateName) {
 		return core.RTGenericError("cannot rename a channel to the default channel's name")
 	}
 	rtp, ch, lst, cli, err := d.loadChannelForMutation(m, team, appID, spec)
@@ -2827,7 +2840,7 @@ func (d *Minder) updateChannelOneAttempt(
 	// server cannot dedupe names it hides, so the list this is built from is
 	// itself partial. Archived channels are NOT exempt -- their names stay
 	// reserved, which is what makes unarchiving safe.
-	if !ch.Private {
+	if !ch.Private && !allowDuplicateName {
 		for _, other := range lst.Channels {
 			if other.Id.Eq(ch.Id) {
 				continue // renaming a channel to its own name is a no-op, not a clash

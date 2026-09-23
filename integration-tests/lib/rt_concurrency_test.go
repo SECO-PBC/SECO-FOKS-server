@@ -161,7 +161,7 @@ func TestRealtimeConcurrentWrites(t *testing.T) {
 					record(ac.name, "send "+tname, err)
 				case 1:
 					err := ac.a.minder.UpdateChannel(ac.a.m, sc.teamCfg(),
-						proto.RTAppID_Chat, target, randomChannelName(t, "c-"), "")
+						proto.RTAppID_Chat, target, randomChannelName(t, "c-"), "", false)
 					record(ac.name, "rename "+tname, err)
 				case 2:
 					err := ac.a.minder.SetChannelArchived(ac.a.m, sc.teamCfg(),
