@@ -29,7 +29,6 @@ import (
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
-	"github.com/foks-proj/go-foks/proto/rem"
 	"github.com/foks-proj/go-foks/server/shared"
 	"github.com/stretchr/testify/require"
 )
@@ -354,12 +353,20 @@ func TestRenamedArchivedFreesTheName(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// The team's default channel is never archived. The server cannot read names,
-// so it identifies it structurally as the oldest public bottom-tier channel of
-// the pair; the client, which can read the name, refuses first.
+// The default channel is protected by the CLIENT, and only by the client.
+//
+// "#general is never archived" is a SECO product rule (channels/CHANNELS.md
+// 5.1), not a FOKS one: the realtime server has no concept of a default
+// channel, cannot read channel names to recognise one, and another app on this
+// server may well want to archive whatever it calls its first channel. An
+// earlier version of this guessed -- the oldest public bottom-tier channel --
+// and guessed wrong whenever anything public was created before #general,
+// protecting the wrong channel while leaving the real one archivable. A rule
+// the server enforces approximately is worse than one it does not enforce at
+// all, so the server now has no opinion and librt refuses by name, which it
+// can do exactly.
 func TestCannotArchiveDefaultChannel(t *testing.T) {
 	sc := setupPrivScene(t, true)
-	// The default channel is the one created with an empty name.
 	_, err := sc.alice.minder.MakeChannel(
 		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, "", "",
 		proto.RolePairOpt{Read: &proto.DefaultRole, Write: &proto.DefaultRole},
@@ -377,23 +384,10 @@ func TestCannotArchiveDefaultChannel(t *testing.T) {
 	}
 	require.NotNil(t, defID, "the default channel should exist")
 
-	// Through the raw client, not the Minder: Minder.SetChannelArchived
-	// refuses the empty name locally, so going through it would assert the
-	// client guard and never reach the server's structural check.
-	var seqno proto.RTChannelSeqno
-	for i := range lst.Channels {
-		if lst.Channels[i].Id.Eq(*defID) {
-			seqno = lst.Channels[i].Seqno
-		}
-	}
-	err = sc.alice.raw(t).RtSetChannelArchived(sc.alice.m.Ctx(),
-		rem.RtSetChannelArchivedArg{Chid: *defID, Seqno: seqno, Archived: true})
-	require.Error(t, err, "the server must refuse to archive the default channel")
-
-	// And the client refuses it too, before the RPC.
 	err = sc.alice.minder.SetChannelArchived(sc.alice.m, sc.teamCfg(),
 		proto.RTAppID_Chat, lcl.NewRTChannelSpecifierWithId(*defID), true)
-	require.Error(t, err)
+	require.Error(t, err, "librt must refuse to archive the default channel")
+	require.IsType(t, core.RTGenericError(""), err)
 }
 
 // --- archive and the inbox ------------------------------------------------

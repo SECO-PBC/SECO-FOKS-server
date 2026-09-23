@@ -1438,20 +1438,6 @@ func SetChannelArchived(m shared.MetaContext, arg rem.RtSetChannelArchivedArg) e
 			if err := mu.authorize(m); err != nil {
 				return nil, err
 			}
-			if arg.Archived {
-				// The default channel is never archived. The server cannot
-				// read names, so it identifies it structurally instead: the
-				// oldest channel of this (team, app), which is the default one
-				// by construction -- it is created first, on the team's first
-				// send.
-				isDefault, err := isDefaultChannel(m, tx, mu.ca.team, mu.appDB, mu.chid)
-				if err != nil {
-					return nil, err
-				}
-				if isDefault {
-					return nil, core.RTGenericError("cannot archive a team's default channel")
-				}
-			}
 			var set string
 			if arg.Archived {
 				set = `archived_at=NOW()`
@@ -1483,51 +1469,6 @@ func SetChannelArchived(m shared.MetaContext, arg rem.RtSetChannelArchivedArg) e
 			}, nil
 		},
 	)
-}
-
-// isDefaultChannel reports whether chid is this (team, app)'s default channel
-// -- the one the blueprint calls #general and never archives.
-//
-// It is an APPROXIMATION, and deliberately a narrow one. The server cannot
-// read channel names (name_box is sealed with the team's key), so it
-// identifies the default channel structurally: the oldest PUBLIC, BOTTOM-TIER
-// channel of the pair. The default channel is always both -- it is created on
-// the team's first send, before any private or admin-tier channel can exist --
-// and restricting the query to those two properties is what keeps a private
-// channel created early in a team's life from being mistaken for it, which an
-// oldest-of-all-channels query would do.
-//
-// The exact check lives in the client, which can read the name; this is the
-// backstop for a caller that skips it. Ties on ctime break by channel_id so
-// the answer is deterministic.
-func isDefaultChannel(
-	m shared.MetaContext,
-	tx pgx.Tx,
-	team proto.TeamID,
-	appDB string,
-	chid int64,
-) (bool, error) {
-	var oldest int64
-	err := tx.QueryRow(
-		m.Ctx(),
-		`SELECT channel_id FROM channels
-		 WHERE short_host_id=$1 AND parent_team_id=$2 AND app_id=$3
-		 AND NOT private AND tier='bottom'
-		 ORDER BY ctime ASC, channel_id ASC
-		 LIMIT 1`,
-		m.ShortHostID(),
-		team.ExportToDB(),
-		appDB,
-	).Scan(&oldest)
-	if err == pgx.ErrNoRows {
-		// A team with no public bottom-tier channel at all: whatever the
-		// caller is archiving, it is not the default one.
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return oldest == chid, nil
 }
 
 // checkNameBoxRole verifies the client sealed the channel name at the role the

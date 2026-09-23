@@ -474,48 +474,52 @@ own release. Note the collision design in §3.3 does **not** depend on closing
 it: archived names are reserved in every member's listing, not only in
 admins'.
 
-## 6. Decisions needed before building
+## 6. Decisions — RESOLVED 2026-09-22 (Stefan)
 
-- **Q1. Is an archived channel still readable by explicit channel id?**
-  §3.4 proposes yes. One line either way. *Product.*
-- **Q2. Does the app expose unarchive at MVP?** The server should support it
-  regardless (§3.3); this only asks whether the UI ships it, and therefore
-  whether the collision-check-on-revive lands now or later. *Product.*
-- **Q3. Ship fork-only at `@207`/`@208`, or wait on #351?** The precedent says
-  ship: private channels went fork-only at `@200+` after Max said "not on the
-  roadmap", and the renumber cost if upstream later adopts this is mechanical.
-  #351 has been open and unanswered for a week while the app work is blocked.
-  *Ours.*
-- **Q4. Does archiving a channel archive its threads?** `CHANNELS.md` §5.1
-  says *"its threads go with it"*. Threads are an app-layer concept the
-  realtime server knows nothing about, so this is the app's cascade, not the
-  server's — but it needs an owner before the app work starts. *App / Threads.*
-- **Q7. Should a channel box carry an authenticated purpose?**
-  `RTBoxRG` carries a role and a generation and nothing about what the box is
-  *for*, so the server cannot tell a description box from a name box and will
-  store either as `name_box` when the role matches — `checkNameBoxRole` is the
-  most it can do. A client then fails to derive `ChannelNameKey` for that row.
-  This is not new: the same hole exists at channel creation and predates this
-  work. What this PR changed is the blast radius — `listAllChannelsForTeam`
-  now skips a row it cannot decrypt instead of failing the whole listing, so
-  one bad box costs one channel rather than every channel in the team. Closing
-  the hole itself needs a purpose discriminator on the wire, which is a
-  protocol change and belongs with #351 rather than here. *Ours, deferred.*
-- **Q6. Is the default channel's structural identification good enough?**
-  `isDefaultChannel` takes the oldest public, bottom-tier channel, and that is
-  `#general` only if nothing public was created before it. The app creates it
-  on the team's first send, so in practice it is — but `foks rt new-channel`
-  can create a named public channel first, and then the server protects the
-  wrong one and lets the real default be archived. The client's check is
-  exact (it reads the name) and runs first, so this is the backstop being
-  approximate, not the rule. A precise fix needs a server-side default marker
-  set at creation, which is a schema and wire change; worth doing if the CLI
-  ever becomes something users drive. *Ours.*
-- **Q5. Does archiving a private channel close its members-only store?**
-  Archive leaves `channel_acl` untouched, so stored files stay reachable by
-  direct reference (§1). Leaving them open is right for a reversible hide and
-  keeps unarchive lossless; closing them would be a `kv-channel-acl` change
-  and would need its own inverse. *Product, with Stefan.*
+All seven are settled. The answer to Q2 settled Q1 and Q5 with it.
+
+- **Q2. Archive or delete, and is there an undo? — ARCHIVE, no undo, no
+  delete.** `CHANNELS.md` §5.1 offers **Archive** and nothing else: the word
+  "delete" appears only for in-message actions and for `#general` ("cannot be
+  deleted"), and "unarchive" appears nowhere in any blueprint. So the app
+  archives, never claims to delete, and ships no undo. The server keeps
+  `rtSetChannelArchived`'s target-state argument regardless — unarchive costs
+  one `Bool` and having it means the app can add the button later without a
+  wire change.
+- **Q1. Is an archived channel still readable by id? — YES, unchanged.**
+  Considered making messages inaccessible until revived. Not needed, and that
+  is a consequence of Q2: the UI says *archived*, not *deleted*, so "the room
+  is closed and hidden, the history is still there" is a true story. Hiding
+  the history would only be required if we told members it was gone.
+- **Q5. Does archiving close the members-only KV store? — NO, unchanged**,
+  for the same reason. It also keeps this change free of any `kv-channel-acl`
+  dependency, which matters for the upstream half: that store is fork-only and
+  will never be upstream, so making archive depend on it would have made the
+  feature unupstreamable.
+- **Q3. Ship fork-only, or wait on #351? — SHIP.** Done, at `@207`/`@208`.
+  #351 stays open; if upstream adopts a different shape we merge it into the
+  fork later and migrate.
+- **Q4. Do a channel's threads go with it? — YES, and it is the APP's
+  cascade.** `CHANNELS.md` §5.1: *"Its threads go with it."* The realtime
+  server has no concept of a thread, so it cannot and must not do this.
+  Recorded in `REVIEW-CHANNELS.md` so the Threads work has an owner before the
+  app work starts.
+- **Q6. Should the server protect the default channel? — NO. Removed.**
+  "`#general` is never archived" is a SECO product rule, not a FOKS one: the
+  server has no concept of a default channel, cannot read names to recognise
+  one, and another app on this server may want to archive its first channel.
+  The structural approximation it used (oldest public bottom-tier channel)
+  guessed wrong whenever anything public was created first — protecting the
+  wrong channel while leaving the real `#general` archivable. A rule enforced
+  approximately is worse than one not enforced at all. librt refuses by name,
+  which it can do exactly, and the server has no opinion. This also keeps a
+  SECO policy out of a general-purpose server, which the upstream half needs.
+- **Q7. Should a channel box carry an authenticated purpose? — LEAVE IT.**
+  `RTBoxRG` carries a role and a generation and nothing about purpose, so the
+  server cannot tell a description box from a name box. Pre-existing: channel
+  creation has always had it. This change shrank the blast radius from "one
+  bad box makes every channel in the team unlistable" to "one channel is
+  hidden". The fix is a protocol change and belongs upstream on its own.
 
 ## 7. Test plan
 
