@@ -77,8 +77,11 @@ callers, and the typed-message test from #341 is updated in the PR to match.
 | base-schema patch-record guard (test) | **nothing — ready to slice** | `server/sql/schema_patches_test.go` (fork PR #34). Upstream hit the identical miss on the no-push port (fixed one-line in `ed089bb` on `upstream-pr/no-push-channels`, no guard added), and the test reads only `SQL`/`Patches` plus `shared.SplitSQLStatements`, all of which exist upstream — `foks_users` (1–7) and `foks_server_config` (1–3) already pass. Branch it off `upstream/main` with the usual DCO signoff. |
 | snapshot staleness surfacing | **the cold-start PR landing** | `lcl.TeamMembership`/`TeamRoster` carry the verification time outward and the CLI renders it (`Verified` column, `Snapshot verified` footer). Split from the field itself so the cold-start PR stays about the trust model rather than about presentation. Postdates `SECO-UPSTREAM-rt-offline.md`, which does not mention `verifiedAt` at all. |
 
-That row names a real blocker: it is the fourth of one body of work deliberately
-split into a landing order. Nothing here is merely parked.
+**Snapshot staleness** names a real blocker: it is the fourth of one body of
+work deliberately split into a landing order. Nothing here is merely parked.
+
+(It read "that row" until 2026-09-23, from when this section held only that
+one row. Name the row if a third is ever added between them.)
 
 ### Not going upstream (for now)
 

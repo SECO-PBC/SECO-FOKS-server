@@ -665,7 +665,7 @@ entirely until the upstream PR was opened (see below).
 | RealTime RPC methods | `@0`–`@11` (`rtSetPushToken @11`) | `@0`–`@11` shared, fork block `@200`–`@206` | upstream **`@16`/`@17`**, fork **`@207`/`@208`** |
 | `RTChannelMetadata` fields | `@0`–`@13` (**`noPush @13` merged**, #365) | upstream's plus `private @20`, `noPush @21` | upstream **`@14`**, fork **`@22`** |
 | `foks_realtime` patch ids | p1–**p5**, where **p5 is no-push** | p1–p8, where **p5 is private channels** | upstream **p8**, fork **p9** |
-| `lib.status` codes, RT block | `@12000`–**`@12009`** (`RT_MSG_QUEUED @12008`, `RT_OUTBOX_FULL @12009`, both #359) | `@12000`–**`@12008`**, where **`@12008` is `RT_CHANNEL_ARCHIVED_ERROR`** | upstream **`@12010`**, fork `@12008` **and it is wrong** |
+| `lib.status` codes, RT block | `@12001`–**`@12009`** (`RT_MSG_QUEUED @12008`, `RT_OUTBOX_FULL @12009`, both #359) | `@12001`–**`@12008`**, where **`@12008` is `RT_CHANNEL_ARCHIVED_ERROR`** | upstream **`@12010`**, fork `@12008` **and it is wrong** |
 
 Four things in that table are easy to get wrong and were:
 
