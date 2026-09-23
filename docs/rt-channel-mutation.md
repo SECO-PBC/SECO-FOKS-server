@@ -365,19 +365,18 @@ existing RT block runs `@12001`–`@12007`.
   @5` / `Revoke @6` / `Members @7` precedent → `clientRTUpdateChannel @8`,
   `clientRTSetChannelArchived @9`, addressing the channel by
   `RTChannelSpecifier` like every other agent RT call.
-- **`#general` must be refused server-side for archive.** The blueprint says
-  it is never archived, and `#general` *can* be renamed. Today the only
-  `#general` guard is client-side (`minder.go:209`, at create). The server
-  cannot read names — so the client refuses by name, and the server
-  additionally refuses to archive the team's **oldest public, bottom-tier
-  channel** (lowest `ctime`), which `#general` is whenever the app created it —
-  it goes in on the team's first send, before any private or admin-tier
-  channel exists. It is **not** guaranteed: a public channel created before it
-  (`foks rt new-channel`) would take its place. See §6 Q6.
-  Restricting the query to those two properties is what keeps a private channel
-  created early in a team's life from being mistaken for the default one, which
-  an oldest-of-all-channels query would do. State the approximation rather than
-  pretending the server knows the name.
+- **`#general` is refused by the CLIENT, and only by the client.** The
+  blueprint says the default channel is never archived, and `#general` *can*
+  be renamed. librt refuses to archive a channel whose name is empty, which is
+  what the default channel carries — an exact check, because the client can
+  read the name.
+  **As built (§6 Q6): the server has no opinion.** An earlier version had it
+  refuse the team's oldest public bottom-tier channel, as an approximation of
+  "the default one". That was wrong twice over: it guessed wrong whenever
+  anything public was created before `#general` — protecting the wrong channel
+  while leaving the real one archivable — and "there is a default channel" is
+  a SECO product rule that a general-purpose realtime server should not be
+  carrying at all. Removed.
 
 ### 3.7 Two existing bugs sat on exactly this path — fixed first
 
@@ -422,7 +421,7 @@ addition. Every row must have a test (§7).
 | 12 | `rtChannelGrant/Revoke @200-201`, `rtChannelMembers @202` | grant/revoke **refused** on an archived channel; `Members` still readable | — | `TestArchivedRejectsGrant` |
 | 18 | Push cleanup on archive (`pushhold.go:releaseChannelHeld`, `push_outbox`) | held rows released, queued rows deleted, `'sending'` left alone (§3.4) | — | `TestArchiveReleasesHeldPushes`, `TestArchiveDropsQueuedPushes` |
 | 16 | **`rtUpdateChannel @207`** (new) | **permitted while archived** — renaming an archived channel is precisely how its reserved name is released (§3.3). Refusing it would strand the name forever | `accessMutate`: team admin-or-above; CAS on `seqno` | `TestRenameRequiresAdmin`, `TestRenameCasRace`, `TestRenameResealsAtTierRole`, `TestRenamedArchivedFreesTheName` |
-| 17 | **`rtSetChannelArchived @208`** (new) | permitted (it is the gate's own operation) | `accessMutate`; refuses the team's oldest channel | `TestArchiveRequiresAdmin`, `TestUnarchiveRestoresToInbox`, `TestCannotArchiveGeneral` |
+| 17 | **`rtSetChannelArchived @208`** (new) | permitted (it is the gate's own operation) | `accessMutate`. The server does **not** protect the default channel — that is librt's, by name (§3.6) | `TestArchiveRequiresAdmin`, `TestArchivedLeavesTheInbox`, `TestCannotArchiveDefaultChannel` (client-side refusal) |
 
 **Completeness.** The private-channel spec verified that exactly four non-test
 Go files touch these tables — `server/realtime/{channels,messages,inbox,fanin}.go`
@@ -440,7 +439,7 @@ its new count**, which is the mechanism that makes this list stay true.
 | Rename, edit description | Admins only | `role.IsAdminOrAbove()` |
 | Archive an **open** channel | Leaders and Stewards | `role.IsAdminOrAbove()` |
 | Archive a **private** channel | Leader only | `role.IsAdminOrAbove()` — see below |
-| Archive `#general` | Never | server refuses the oldest channel; client refuses by name |
+| Archive `#general` | Never | **client only** — librt refuses the empty name; the server has no concept of a default channel (§3.6, §6 Q6) |
 
 **Stewards and Leaders collapse to one role in FOKS.** There is no role
 between member and admin (`REVIEW-CHANNELS.md`, 09-15), so "Leaders and

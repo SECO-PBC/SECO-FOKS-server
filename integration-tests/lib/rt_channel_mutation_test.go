@@ -594,3 +594,82 @@ func TestRegrantDoesNotWasteInboxVersion(t *testing.T) {
 			"no row, leaving that member's inbox head permanently above anything "+
 			"their client can sync to")
 }
+
+// --- the gates archive puts on other paths -------------------------------
+
+// Reading an archived channel by explicit id still works (§6 Q1). Archive
+// hides a channel and closes it to new activity; it does not destroy it, and
+// the UI says "archived" rather than "deleted", so the history staying
+// readable is the honest behaviour. In practice no client reaches one, because
+// it is gone from the inbox.
+func TestArchivedThreadStillReadableById(t *testing.T) {
+	sc := setupMutScene(t)
+	_, err := sc.alice.minder.Send(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
+		sc.pubSpec(), []byte("before the archive"))
+	require.NoError(t, err)
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
+
+	msgs, err := sc.alice.minder.GetThreadRecentMsgs(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, sc.pubSpec(), 10)
+	require.NoError(t, err, "an archived channel is hidden, not destroyed")
+	require.Len(t, msgs, 1)
+	require.Equal(t, []byte("before the archive"), msgs[0].Body)
+}
+
+// Marking read through is permitted on an archived channel: it writes only the
+// caller's own row and cannot produce activity for anyone else. Refusing would
+// make a client that marks read as a pane closes throw errors for no gain.
+func TestArchivedAllowsReadThrough(t *testing.T) {
+	sc := setupMutScene(t)
+	res, err := sc.alice.minder.Send(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
+		sc.pubSpec(), []byte("read me"))
+	require.NoError(t, err)
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
+
+	require.NoError(t, sc.alice.minder.ReadThrough(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, sc.pubSpec(), res.Seq))
+}
+
+// Changing who is in a private channel is activity, so an archived one refuses
+// it. This is what keeps archive reversible: the ACL it restores is the ACL it
+// had.
+func TestArchivedRejectsGrant(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	spec := lcl.NewRTChannelSpecifierWithId(sc.chid)
+	require.NoError(t, sc.alice.minder.SetChannelArchived(sc.alice.m,
+		sc.teamCfg(), proto.RTAppID_Chat, spec, true))
+
+	err := sc.alice.minder.GrantChannelMember(sc.alice.m, sc.chid, sc.bob.u.uid, false)
+	require.Error(t, err)
+	require.IsType(t, core.RTChannelArchivedError{}, err)
+
+	// Unarchive and the same grant works, which is the point of refusing it.
+	require.NoError(t, sc.alice.minder.SetChannelArchived(sc.alice.m,
+		sc.teamCfg(), proto.RTAppID_Chat, spec, false))
+	require.NoError(t, sc.alice.minder.GrantChannelMember(
+		sc.alice.m, sc.chid, sc.bob.u.uid, false))
+}
+
+// Archiving discards the channel's undelivered push rows. A queued row would
+// otherwise fire after the room closed, buzzing members about a channel that
+// has just been shut.
+func TestArchiveDropsQueuedPushes(t *testing.T) {
+	sc := setupMutScene(t)
+	pending := func() int {
+		return sc.rtdbScalar(t, `
+			SELECT count(*) FROM push_outbox
+			WHERE short_host_id=$1 AND channel_id=$2 AND status IN ('held','queued')`,
+			sc.tew.MetaContext().ShortHostID(), sc.pubID.Short().Int64())
+	}
+	// bob's send queues a push for the other members.
+	_, err := sc.bob.minder.Send(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat,
+		sc.pubSpec(), []byte("buzz"))
+	require.NoError(t, err)
+	require.Positive(t, pending(), "a send should have queued push rows to drop")
+
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
+	require.Zero(t, pending(),
+		"archiving must discard the channel's undelivered pushes; a queued row "+
+			"would fire after the room closed, and a held one could never be "+
+			"released because nothing can write to the channel again")
+}
