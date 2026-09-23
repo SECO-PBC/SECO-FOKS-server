@@ -9,23 +9,34 @@ package lib
 // on an empty delta and PollInbox returning immediately, forever. No test
 // failed. The invariant it broke fits in one query.
 //
-// Written as a suite a test calls after whatever it just did, rather than as
+// Written as a suite a test runs after whatever it just did, rather than as
 // tests of their own, because the value is in running them at the end of
-// scenarios someone else wrote for another reason:
+// scenarios someone else wrote for another reason.
 //
-//	defer sc.requireRTInvariants(t)
-//
-// Wired once, in setupPrivScene's t.Cleanup, so EVERY test built on that scene
-// is covered rather than each remembering to opt in.
+// WHERE IT IS WIRED, exactly: setupMutScene's t.Cleanup, so every test on the
+// channel-mutation scene is covered without remembering to opt in. That is the
+// mutation tests and the concurrency test. It is NOT wired into
+// setupPrivScene, so the private-channel suite is not covered -- see the next
+// paragraph, and the note at the wiring site. Any other test can call
+// requireRTInvariants directly.
 //
 // Asserted against a BASELINE PLUS an allowance, not against zero. Every test
-// in this package shares one postgres, so a violation left by an earlier test
-// is not this test's fault; and one of these is violated on purpose, by the
-// revoke path, which bumps a member's inbox version without stamping a row so
-// their next sync is a full one. The scene counts those (privScene.revoke), so
-// a revoking test can still be checked and an ACCIDENTAL orphan on top of the
-// deliberate ones still fails. Without the count, the revoke path would be the
-// one place these invariants could not look.
+// in this package shares one postgres, so a violation an earlier test left is
+// not this test's fault. And one invariant is violated on purpose: the revoke
+// path bumps a member's inbox version without stamping a row, so their next
+// sync is a full one. privScene.revoke counts those, and the allowance lets an
+// ACCIDENTAL orphan on top of them still fail.
+//
+// THE COUNTER IS NOT ENOUGH TO COVER REVOKE, which is why the private-channel
+// suite stays out. It only sees revokes made through that helper, and several
+// tests call RevokeChannelMember directly; wiring the suite there failed three
+// tests on gaps that were deliberate. Closing it needs either revoke to stop
+// leaving the gap, or the orphan check to recognise a revoked user. Until then
+// the revoke path is the one place these invariants do not look -- worth
+// knowing before trusting a green run over it.
+//
+// Extending the net that far was still worth doing once: it is what found the
+// wasted inbox version in fanUserIntoChannel's re-grant path.
 
 import (
 	"testing"
