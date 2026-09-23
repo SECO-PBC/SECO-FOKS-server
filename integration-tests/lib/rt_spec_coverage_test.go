@@ -35,7 +35,13 @@ const specPath = "../../docs/rt-channel-mutation.md"
 
 // specTestNamePattern matches a Go test name as the spec writes it: in a table
 // cell, a bullet, or backticks.
-var specTestNamePattern = regexp.MustCompile(`\bTest[A-Z][A-Za-z0-9]{3,}\b`)
+//
+// Any length and underscores allowed, because the first version required at
+// least three characters after the capital and no underscore -- so TestFoo and
+// TestFoo_Bar, both valid Go test names, could be cited for tests that do not
+// exist and this guard would not notice. A guard with a hole exactly where a
+// name is short is not much of a guard.
+var specTestNamePattern = regexp.MustCompile(`\bTest[A-Z][A-Za-z0-9_]*\b`)
 
 // specTestNameExempt lists names that look like tests but are not, or are
 // tests that deliberately do not exist yet. An entry here is a claim someone
@@ -44,15 +50,11 @@ var specTestNameExempt = map[string]string{
 	// Prose, not test names.
 	"TestUser":  "the integration harness's user type, named in passing",
 	"TestHooks": "the MakeChannelTestHooks struct, named in passing",
-	"Tests":     "the plain English word",
 
 	// Named in the inventory but not written, each with a reason. Remove the
 	// entry when the test lands, or the row when the plan changes.
 	"TestGetChannelReportsArchived": "rtGetChannel is still NotImplementedError upstream and here; " +
 		"there is nothing to assert until it is built",
-	"TestArchiveReleasesHeldPushes": "covered in substance by TestArchiveDropsQueuedPushes, which counts " +
-		"'held' and 'queued' together; a held-specific test needs a push hold in place, which is " +
-		"pushhold.go's fixture rather than this one's",
 	"TestArchivedPrivateStorageStillReachable": "would pin §6 Q5 (an archived private channel's KV files " +
 		"stay reachable), but that store is the kv-store package's and this suite has no fixture for it",
 	"TestArchiveDoesNotBurnInboxVersions": "superseded by the invariant suite, which asserts the same " +

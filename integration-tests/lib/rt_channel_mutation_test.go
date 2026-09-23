@@ -650,26 +650,56 @@ func TestArchivedRejectsGrant(t *testing.T) {
 		sc.alice.m, sc.chid, sc.bob.u.uid, false))
 }
 
-// Archiving discards the channel's undelivered push rows. A queued row would
-// otherwise fire after the room closed, buzzing members about a channel that
-// has just been shut.
+// pendingPushes counts a channel's undelivered push rows of one status.
+func (s *mutScene) pendingPushes(t *testing.T, status string) int {
+	return s.rtdbScalar(t, `
+		SELECT count(*) FROM push_outbox
+		WHERE short_host_id=$1 AND channel_id=$2 AND status=$3`,
+		s.tew.MetaContext().ShortHostID(), s.pubID.Short().Int64(), status)
+}
+
+// Archiving discards the channel's queued push rows, which would otherwise
+// fire after the room closed and buzz members about a channel that has just
+// been shut.
 func TestArchiveDropsQueuedPushes(t *testing.T) {
 	sc := setupMutScene(t)
-	pending := func() int {
-		return sc.rtdbScalar(t, `
-			SELECT count(*) FROM push_outbox
-			WHERE short_host_id=$1 AND channel_id=$2 AND status IN ('held','queued')`,
-			sc.tew.MetaContext().ShortHostID(), sc.pubID.Short().Int64())
-	}
-	// bob's send queues a push for the other members.
 	_, err := sc.bob.minder.Send(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat,
 		sc.pubSpec(), []byte("buzz"))
 	require.NoError(t, err)
-	require.Positive(t, pending(), "a send should have queued push rows to drop")
+	require.Positive(t, sc.pendingPushes(t, "queued"),
+		"a send should have queued push rows to drop")
 
 	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
-	require.Zero(t, pending(),
-		"archiving must discard the channel's undelivered pushes; a queued row "+
-			"would fire after the room closed, and a held one could never be "+
-			"released because nothing can write to the channel again")
+	require.Zero(t, sc.pendingPushes(t, "queued"),
+		"archiving must discard the channel's queued pushes, or they fire after "+
+			"the room has closed")
+}
+
+// And its HELD rows, which matter more: only a push hold's holder may decide
+// one, and after the archive nothing can write to the channel again, so
+// nothing will ever release them. They would sit in push_outbox forever.
+//
+// Worth its own test rather than folding into the queued case: a send under a
+// hold produces held rows and a send without one produces queued rows, so a
+// single scenario cannot cover both, and counting the two together would let
+// either path regress unnoticed. An earlier version of this file claimed
+// exactly that coverage and did not have it.
+func TestArchiveDropsHeldPushes(t *testing.T) {
+	sc := setupMutScene(t)
+
+	// dara holds; bob's send is then written 'held' rather than 'queued'.
+	sc.setHold(t, sc.dara)
+	_, err := sc.bob.minder.Send(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat,
+		sc.pubSpec(), []byte("under the hold"))
+	require.NoError(t, err)
+	require.Positive(t, sc.pendingPushes(t, "held"),
+		"a send under a push hold should have written held rows")
+
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
+	require.Zero(t, sc.pendingPushes(t, "held"),
+		"archiving must discard the channel's held pushes: only the hold's "+
+			"holder may decide one, and nothing can write to an archived channel "+
+			"again, so nothing would ever release them")
+	require.Zero(t, sc.pendingPushes(t, "queued"),
+		"and archiving must not quietly release them into the queue instead")
 }

@@ -279,15 +279,23 @@ if the product wants archive to read as closer to deletion.
 of state would otherwise be stranded, and neither is hypothetical:
 
 - **Held rows.** Under a push hold (`pushhold.go`), a send writes
-  `push_outbox` rows with status `'held'`, which only the holder may release.
+  `push_outbox` rows with status `'held'`, which only the holder may decide.
   Archive the channel and nobody ever will: the rows sit `'held'` forever,
-  never delivered, never reaped. `RevokeChannelMember` already handles the
-  analogous case by calling `releaseChannelHeld(m, tx, chid)` when the holder
-  is revoked. **Archive calls the same helper**, in the same transaction.
-- **Queued rows.** Rows already `'queued'` for the channel will still fire,
-  buzzing members about a channel that has just closed. Delete the channel's
-  `status='queued'` rows in the archive transaction. `'sending'` rows are left
-  alone — the relay owns them, and racing it is worse than one late push.
+  never delivered, never reaped.
+- **Queued rows.** Rows already `'queued'` will still fire, buzzing members
+  about a channel that has just closed.
+
+**As built: both are DELETED**, by `dropChannelPushes` in the archive
+transaction. `'sending'` rows are left alone — the relay owns them, and racing
+it is worse than one late push.
+
+Deleting rather than releasing is the part worth stating, because
+`RevokeChannelMember` does the opposite: it calls `releaseChannelHeld`, moving
+held rows to `'queued'`, which is right there because the channel is still
+live and those members still want their notifications. Archive must not reuse
+that helper. Releasing a held row on archive would fire a notification for a
+room that has just closed — the exact thing deleting the queued rows is there
+to prevent.
 
 Unarchive does neither; there is nothing to restore, and a resurrected push
 would be a message from the past.
@@ -419,7 +427,7 @@ addition. Every row must have a test (§7).
 | 10 | `rtReadThrough @7` | **permitted** — it writes only the caller's own `user_channels` row and cannot produce activity for anyone else. Refusing it would make a client that marks read as a pane closes throw errors for no gain | — | `TestArchivedAllowsReadThrough` |
 | 11 | `rtNewChannel @0` | an archived channel **does** block its name, because it is still in the listing the collision map is built from (client-side, as ever) | — | `TestArchivedNameStaysReserved`, `TestRenamedArchivedFreesTheName` |
 | 12 | `rtChannelGrant/Revoke @200-201`, `rtChannelMembers @202` | grant/revoke **refused** on an archived channel; `Members` still readable | — | `TestArchivedRejectsGrant` |
-| 18 | Push cleanup on archive (`pushhold.go:releaseChannelHeld`, `push_outbox`) | held rows released, queued rows deleted, `'sending'` left alone (§3.4) | — | `TestArchiveReleasesHeldPushes`, `TestArchiveDropsQueuedPushes` |
+| 18 | Push cleanup on archive (`channels.go:dropChannelPushes`) | held AND queued rows **deleted**, `'sending'` left alone (§3.4). Not *released*: queuing a held row would fire a notification for a room that has just closed | — | `TestArchiveDropsHeldPushes`, `TestArchiveDropsQueuedPushes` |
 | 16 | **`rtUpdateChannel @207`** (new) | **permitted while archived** — renaming an archived channel is precisely how its reserved name is released (§3.3). Refusing it would strand the name forever | `accessMutate`: team admin-or-above; CAS on `seqno` | `TestRenameRequiresAdmin`, `TestRenameCasRace`, `TestRenameResealsAtTierRole`, `TestRenamedArchivedFreesTheName` |
 | 17 | **`rtSetChannelArchived @208`** (new) | permitted (it is the gate's own operation) | `accessMutate`. The server does **not** protect the default channel — that is librt's, by name (§3.6) | `TestArchiveRequiresAdmin`, `TestArchivedLeavesTheInbox`, `TestCannotArchiveDefaultChannel` (client-side refusal) |
 
