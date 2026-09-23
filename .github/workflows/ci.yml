@@ -13,18 +13,21 @@ concurrency:
 jobs:
   ci:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45 was right when this job was lint plus unit tests. It now also runs
+    # two integration steps that bring up containers, and a job killed at the
+    # cap fails the lib gate even when the tests themselves passed.
+    timeout-minutes: 75
     env:
       # Packages to lint + test. client/ is back in: the API drift that made it
       # untypecheckable after the first upstream merge is reconciled, and it is
       # where most of this fork's own changes live, so leaving it out meant our
       # own work was the only code CI never checked.
       #
-      # integration-tests/ stays out because it needs a live postgres and the
-      # rest of the server estate, which this workflow does not provision.
-      # Upstream runs plain `./...` here; matching that needs the services
-      # wired up first.
       GO_PKGS: "./server/... ./lib/... ./proto/... ./conf/... ./tools/... ./play/... ./client/..."
+      # Linted with everything else, but TESTED in its own steps below: these
+      # bring up containers, and a unit-test failure should report in seconds
+      # rather than behind several minutes of that.
+      LINT_PKGS: "./server/... ./lib/... ./proto/... ./conf/... ./tools/... ./play/... ./client/... ./integration-tests/..."
     steps:
       - uses: actions/checkout@v5
 
@@ -46,7 +49,26 @@ jobs:
           git config --global init.defaultBranch main
 
       - name: Lint (golangci-lint)
-        run: go tool golangci-lint run $GO_PKGS
+        run: go tool golangci-lint run $LINT_PKGS
 
-      - name: Test
+      - name: Test (unit)
         run: go test $GO_PKGS -count=1
+
+      # The integration suite brings up postgres itself, via testcontainers
+      # against the runner's own docker daemon (integration-tests/common/
+      # setup.go), so it needs no `services:` block -- only that nothing
+      # excludes it, which until now something did. Fork CI compiled these
+      # tests and never ran them, so the fork has merged integration tests
+      # that never passed at all; making lib a gate is what stops that.
+      - name: Test (integration, lib)
+        run: go test ./integration-tests/lib/... -count=1 -timeout 20m
+
+      # NOT a gate, deliberately. integration-tests/cli flakes on signup and
+      # provisioning (TestSignupAndSwitch, TestYubiProvision, TestSelfProvision,
+      # TestTeamLoaderPermissions) for reasons unrelated to any change under
+      # review -- upstream sees the same failures on its own PRs and merges
+      # through them. Running it keeps the output visible; gating on it would
+      # spend the merge signal on a known flake. Promote it once that is fixed.
+      - name: Test (integration, cli -- advisory)
+        continue-on-error: true
+        run: go test ./integration-tests/cli/... -count=1 -timeout 20m

@@ -53,6 +53,16 @@ const (
 	// too, and must: an admin's authority to revoke is useless if they cannot
 	// first see who is in the channel.
 	accessRoster
+	// accessMutate: change the channel's own metadata -- rename, edit
+	// description, archive, unarchive. Requires team admin-or-above, and is
+	// the one kind that passes the archived gate, since unarchiving would
+	// otherwise be unreachable.
+	//
+	// Deliberately NOT accessManage: that kind rejects a non-private channel
+	// outright ("channel is not private; it has no ACL"), and metadata
+	// mutation applies to every channel. Reusing it would silently make
+	// rename and archive private-only.
+	accessMutate
 )
 
 // managementKind reports whether this access is about the ACL rather than the
@@ -60,6 +70,16 @@ const (
 // able to moderate a private channel whose read role sits above their own.
 func (a accessKind) managementKind() bool {
 	return a == accessManage || a == accessRoster
+}
+
+// adminBypassesAcl reports whether a team admin may exercise this access on a
+// private channel they hold no ACL row for. It covers the ACL kinds (an admin
+// must be able to see and change who is in a channel they moderate) and
+// accessMutate (an admin archives or renames a channel without first joining
+// it). It deliberately does NOT cover reads or writes: an admin who wants to
+// read a private channel grants themselves a row, which its members can see.
+func (a accessKind) adminBypassesAcl() bool {
+	return a.managementKind() || a == accessMutate
 }
 
 // Values stored in channel_acl.acl_role.
@@ -80,6 +100,11 @@ type channelAuth struct {
 	// noPush excludes the channel from push_outbox fan-out on send
 	// (fork-only, dm-handshake-over-rt); inbox-version wakes unaffected.
 	noPush bool
+	// archivedAt is non-nil when the channel has been archived: closed to new
+	// activity, absent from the inbox, still present in the team's channel
+	// listing (which is what reserves its name). Fork-only; see
+	// docs/rt-channel-mutation.md.
+	archivedAt *time.Time
 
 	// lastMsgSeq is the channel's denormalized last message seq; NULL (nil)
 	// when the channel has no messages yet.
@@ -97,7 +122,7 @@ type channelAuth struct {
 
 // channelAuthCols is the column list authorizeChannel scans. Kept together so
 // the locking and non-locking variants can never drift.
-const channelAuthCols = `parent_team_id, app_id, tier, private, no_push,
+const channelAuthCols = `parent_team_id, app_id, tier, private, no_push, archived_at,
 	 read_role_type, read_role_viz_level,
 	 write_role_type, write_role_viz_level,
 	 last_msg_seq`
@@ -136,7 +161,7 @@ func authorizeChannel(
 		q += ` FOR UPDATE`
 	}
 	err := rtdb.QueryRow(m.Ctx(), q, m.ShortHostID(), channelID).Scan(
-		&teamBytes, &appRaw, &tierRaw, &ca.private, &ca.noPush,
+		&teamBytes, &appRaw, &tierRaw, &ca.private, &ca.noPush, &ca.archivedAt,
 		&rrt, &rvl, &wrt, &wvl, &ca.lastMsgSeq,
 	)
 	if err == pgx.ErrNoRows {
@@ -186,8 +211,26 @@ func authorizeChannel(
 		// not in -- Q1/Q2: leaders are transparently peers rather than
 		// invisible ones. Everyone else needs an ACL row, and gets the
 		// missing-channel error without one.
-		if !found && !(want.managementKind() && role.IsAdminOrAbove()) {
+		if !found && !(want.adminBypassesAcl() && role.IsAdminOrAbove()) {
 			return nil, core.RowNotFoundError{}
+		}
+	}
+
+	// 3b. Archived gate. An archived channel is closed to new activity: no
+	// sends, and no ACL changes, since both are activity in a room that has
+	// been closed. Reads by explicit channel id still work -- the channel is
+	// hidden, not destroyed, and in practice no client reaches one because the
+	// inbox drops it. accessMutate passes, or unarchive could never run, and
+	// rename must stay reachable because renaming an archived channel is how
+	// its reserved name is released.
+	//
+	// After the private gate, never before it: an archived-channel error for a
+	// private channel the caller is not in would disclose that the channel
+	// exists.
+	switch want {
+	case accessWrite, accessManage:
+		if err := archivedBlocks(ca.archivedAt); err != nil {
+			return nil, err
 		}
 	}
 
@@ -198,6 +241,14 @@ func authorizeChannel(
 	// row (or is an admin managing), so it cannot disclose a private channel.
 	if ca.tier == proto.RTChannelTier_Admin && !role.IsAdminOrAbove() {
 		return nil, core.PermissionError("user role too low for an admin-tier channel")
+	}
+
+	// 4b. Metadata mutation is admins only, matching the product rule that
+	// renaming, editing and archiving a channel are Leader/Steward actions
+	// (blueprints/channels/CHANNELS.md 5.1). Enforced here rather than only in
+	// the UI: a UI-only rule is not a rule.
+	if want == accessMutate && !role.IsAdminOrAbove() {
+		return nil, core.PermissionError("must be a team admin to change channel metadata")
 	}
 
 	// 5. Role gate, for reads and writes only.
@@ -227,8 +278,9 @@ func authorizeChannel(
 		if role.LessThan(*readRole) {
 			return nil, core.PermissionError("user role too low to read channel")
 		}
-	case accessManage, accessRoster:
-		// see above
+	case accessManage, accessRoster, accessMutate:
+		// see above -- and accessMutate for the same reason: an admin must be
+		// able to archive or rename a channel whose read role is above theirs.
 	}
 
 	// 6. ACL authority.
@@ -380,6 +432,35 @@ func dropChannelMember(
 	}
 	removed := tag.RowsAffected() > 0
 
+	// The inbox bump comes BEFORE the user_channels delete, and the order is a
+	// lock order rather than a preference: every other writer in this package
+	// takes user_inbox before the user_channels rows it touches (see
+	// channelMutator.finish). Deleting first would invert this against a
+	// concurrent channel mutation, which holds a member's user_inbox row and
+	// then updates that member's user_channels row.
+	//
+	// Bump, don't stamp: the revoked user has no user_channels row left to
+	// stamp, so this version is a deliberate gap. It is what makes their next
+	// sync return a head they haven't seen, and hence run the full sync in
+	// which the channel is simply absent. The client-side rule (drop the
+	// channel and its cached plaintext) is the follow-up client spec's; the
+	// server cannot enforce it.
+	if bumpInbox {
+		_, err = tx.Exec(
+			m.Ctx(),
+			`INSERT INTO user_inbox (short_host_id, uid, app_id, inbox_version, mtime)
+			 VALUES ($1, $2, $3, 1, NOW())
+			 ON CONFLICT (short_host_id, uid, app_id)
+			 DO UPDATE SET inbox_version = user_inbox.inbox_version + 1, mtime = NOW()`,
+			m.ShortHostID(),
+			uid.ExportToDB(),
+			appDB,
+		)
+		if err != nil {
+			return false, err
+		}
+	}
+
 	_, err = tx.Exec(
 		m.Ctx(),
 		`DELETE FROM user_channels
@@ -387,30 +468,6 @@ func dropChannelMember(
 		m.ShortHostID(),
 		channelID,
 		uid.ExportToDB(),
-	)
-	if err != nil {
-		return false, err
-	}
-
-	if !bumpInbox {
-		return removed, nil
-	}
-
-	// Bump, don't stamp: the revoked user has no user_channels row left to
-	// stamp, so this version is a deliberate gap. It is what makes their next
-	// sync return a head they haven't seen, and hence run the full sync in
-	// which the channel is simply absent. The client-side rule (drop the
-	// channel and its cached plaintext) is the follow-up client spec's; the
-	// server cannot enforce it.
-	_, err = tx.Exec(
-		m.Ctx(),
-		`INSERT INTO user_inbox (short_host_id, uid, app_id, inbox_version, mtime)
-		 VALUES ($1, $2, $3, 1, NOW())
-		 ON CONFLICT (short_host_id, uid, app_id)
-		 DO UPDATE SET inbox_version = user_inbox.inbox_version + 1, mtime = NOW()`,
-		m.ShortHostID(),
-		uid.ExportToDB(),
-		appDB,
 	)
 	if err != nil {
 		return false, err
@@ -579,59 +636,6 @@ func pruneStaleChannelMembers(
 	return nil
 }
 
-// touchChannelSet bumps the parent team's channel-set version and stamps the
-// channel at the new version, so the channel surfaces in the INCREMENTAL
-// channel listing.
-//
-// Needed because a grant is otherwise invisible to rtListAllChannelsForTeam: a
-// client sends its cached set version as `last`, ListAllChannels short-circuits
-// to an empty list when that equals the current version, and readAllChannels
-// filters on `updated_at_set_vers > last` -- a value written only at channel
-// creation. A freshly granted member would therefore never see the channel in
-// the list, and librt resolves channel names against exactly that list, so they
-// could not send to or read the channel by name at all. Bumping here is what
-// makes "the channel appears on their next sync" true for the listing as well
-// as for the inbox sync.
-//
-// A concurrent rtNewChannel loses its optimistic-concurrency check against this
-// bump and retries -- the same RTRaceError path two concurrent creates already
-// take.
-func touchChannelSet(
-	m shared.MetaContext,
-	tx pgx.Tx,
-	team proto.TeamID,
-	appDB string,
-	channelID int64,
-) error {
-	var vers int
-	err := tx.QueryRow(
-		m.Ctx(),
-		`UPDATE channel_sets SET vers = vers + 1, mtime = NOW()
-		 WHERE short_host_id=$1 AND parent_team_id=$2 AND app_id=$3
-		 RETURNING vers`,
-		m.ShortHostID(),
-		team.ExportToDB(),
-		appDB,
-	).Scan(&vers)
-	if err == pgx.ErrNoRows {
-		// No channel-set row means no channel was ever created under this
-		// (team, app), which contradicts the channel we just authorized.
-		return core.InternalError("no channel_sets row for a team that has channels")
-	}
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(
-		m.Ctx(),
-		`UPDATE channels SET updated_at_set_vers=$3, mtime=NOW()
-		 WHERE short_host_id=$1 AND channel_id=$2`,
-		m.ShortHostID(),
-		channelID,
-		vers,
-	)
-	return err
-}
-
 // GrantChannelMember adds (or re-grants) a user to a private channel's ACL and
 // fans them in, so the channel appears on their next sync. ACL row and
 // delivery row are written in one transaction: for a private channel the two
@@ -661,7 +665,12 @@ func GrantChannelMember(
 		rtdb,
 		"realtime.GrantChannelMember",
 		func(m shared.MetaContext, tx pgx.Tx) (func(shared.MetaContext), error) {
-			ca, err := authorizeChannel(m, tx, userdb, chid, accessManage, false)
+			// lock=true: without the channels row lock this transaction can
+			// read a live channel, pause, and commit ACL and delivery rows
+			// after a concurrent archive has committed archived_at -- past
+			// the gate that just let it through. Taking the lock serializes
+			// the two the way the send path already serializes against them.
+			ca, err := authorizeChannel(m, tx, userdb, chid, accessManage, true)
 			if err != nil {
 				return nil, err
 			}
@@ -756,8 +765,20 @@ func RevokeChannelMember(
 				// with no row falls out below as RowNotFound.
 				want = accessRoster
 			}
-			ca, err := authorizeChannel(m, tx, userdb, chid, want, false)
+			// lock=true for the same reason as GrantChannelMember: a revoke
+			// that read a live channel must not commit after an archive did.
+			ca, err := authorizeChannel(m, tx, userdb, chid, want, true)
 			if err != nil {
+				return nil, err
+			}
+			// Self-revoke reaches here at accessRoster, which the chokepoint's
+			// archived gate does not block -- reading the roster of an
+			// archived channel is fine. REMOVING yourself from one is not:
+			// archive is meant to preserve the ACL and delivery rows exactly,
+			// so that unarchiving restores the channel with its membership
+			// intact. Leaving a channel nobody can see or post in has no use
+			// that is worth breaking that.
+			if err := archivedBlocks(ca.archivedAt); err != nil {
 				return nil, err
 			}
 			appDB, err := ca.appID.ExportToDB()

@@ -276,6 +276,12 @@ func findMissingChannels(
 		 AND c.app_id=$2
 		 AND c.parent_team_id = ANY($3)
 		 AND NOT c.private
+		 -- Inventory row 9. An archived channel must never be fanned into:
+		 -- the fan-in runs on every sync whose membership marker moved, so
+		 -- without this it would re-create a user_channels row for every
+		 -- archived channel of every team, each costing an inbox-version
+		 -- allocation, for as long as the account exists.
+		 AND `+notArchived("c")+`
 		 AND NOT EXISTS (
 		    SELECT 1 FROM user_channels uc
 		    WHERE uc.short_host_id = c.short_host_id

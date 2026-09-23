@@ -1,0 +1,188 @@
+package lib
+
+// Realtime invariants, checkable after any operation.
+//
+// These are properties the realtime schema assumes everywhere and states
+// nowhere, so nothing notices when one stops holding. The unarchive bug is the
+// case in point: it allocated an inbox version that stamped no row, which left
+// every client's sync cursor permanently below the head -- SyncInbox stopping
+// on an empty delta and PollInbox returning immediately, forever. No test
+// failed. The invariant it broke fits in one query.
+//
+// Written as a suite a test runs after whatever it just did, rather than as
+// tests of their own, because the value is in running them at the end of
+// scenarios someone else wrote for another reason.
+//
+// WHERE IT IS WIRED, exactly: setupMutScene's t.Cleanup, so every test on the
+// channel-mutation scene is covered without remembering to opt in. That is the
+// mutation tests and the concurrency test. It is NOT wired into
+// setupPrivScene, so the private-channel suite is not covered -- see the next
+// paragraph, and the note at the wiring site. Any other test can call
+// requireRTInvariants directly.
+//
+// Asserted against a BASELINE PLUS an allowance, not against zero. Every test
+// in this package shares one postgres, so a violation an earlier test left is
+// not this test's fault. And one invariant is violated on purpose: the revoke
+// path bumps a member's inbox version without stamping a row, so their next
+// sync is a full one. privScene.revoke counts those, and the allowance lets an
+// ACCIDENTAL orphan on top of them still fail.
+//
+// THE COUNTER IS NOT ENOUGH TO COVER REVOKE, which is why the private-channel
+// suite stays out. It only sees revokes made through that helper, and several
+// tests call RevokeChannelMember directly; wiring the suite there failed three
+// tests on gaps that were deliberate. Closing it needs either revoke to stop
+// leaving the gap, or the orphan check to recognise a revoked user. Until then
+// the revoke path is the one place these invariants do not look -- worth
+// knowing before trusting a green run over it.
+//
+// Extending the net that far was still worth doing once: it is what found the
+// wasted inbox version in fanUserIntoChannel's re-grant path.
+
+import (
+	"testing"
+
+	"github.com/foks-proj/go-foks/server/shared"
+	"github.com/stretchr/testify/require"
+)
+
+// rtInvariantCounts counts each violation across the whole test database.
+// Whole-database on purpose: a mutation that corrupts a bystander channel's
+// rows is exactly what a per-channel assertion misses.
+func (s *privScene) rtInvariantCounts(t *testing.T) map[string]int {
+	t.Helper()
+	return map[string]int{
+		// Every inbox version is allocated by bumping user_inbox and is
+		// supposed to stamp exactly one user_channels row. A version that
+		// stamps nothing is invisible but not harmless: a client's cursor can
+		// only advance to a version it has seen on a row.
+		"orphan inbox versions": s.rtdbScalar(t, `
+			SELECT count(*) FROM user_inbox ui
+			WHERE ui.inbox_version > COALESCE(
+			    (SELECT max(uc.inbox_version) FROM user_channels uc
+			     WHERE uc.short_host_id = ui.short_host_id
+			       AND uc.uid = ui.uid
+			       AND uc.app_id = ui.app_id), 0)`),
+
+		// user_channels_inbox_idx is UNIQUE, so a violation means the index
+		// was dropped or recreated without it.
+		"duplicate inbox versions": s.rtdbScalar(t, `
+			SELECT count(*) FROM (
+			    SELECT short_host_id, uid, app_id, inbox_version
+			    FROM user_channels
+			    GROUP BY 1,2,3,4 HAVING count(*) > 1
+			) dup`),
+
+		"rows above their inbox head": s.rtdbScalar(t, `
+			SELECT count(*) FROM user_channels uc
+			WHERE uc.inbox_version > COALESCE(
+			    (SELECT ui.inbox_version FROM user_inbox ui
+			     WHERE ui.short_host_id = uc.short_host_id
+			       AND ui.uid = uc.uid
+			       AND ui.app_id = uc.app_id), 0)`),
+
+		"delivery rows with no channel": s.rtdbScalar(t, `
+			SELECT count(*) FROM user_channels uc
+			WHERE NOT EXISTS (
+			    SELECT 1 FROM channels c
+			    WHERE c.short_host_id = uc.short_host_id
+			      AND c.channel_id = uc.channel_id)`),
+
+		// The private-channel guarantee rests on these two being the same set:
+		// the send fan-out targets user_channels, so a delivery row without an
+		// ACL row is a non-member receiving a private channel's traffic.
+		"private delivery without ACL": s.rtdbScalar(t, `
+			SELECT count(*) FROM user_channels uc
+			JOIN channels c ON c.short_host_id = uc.short_host_id
+			                AND c.channel_id = uc.channel_id
+			WHERE c.private AND NOT EXISTS (
+			    SELECT 1 FROM channel_acl a
+			    WHERE a.short_host_id = uc.short_host_id
+			      AND a.channel_id = uc.channel_id AND a.uid = uc.uid)`),
+
+		"private ACL without delivery": s.rtdbScalar(t, `
+			SELECT count(*) FROM channel_acl a
+			WHERE NOT EXISTS (
+			    SELECT 1 FROM user_channels uc
+			    WHERE uc.short_host_id = a.short_host_id
+			      AND uc.channel_id = a.channel_id AND uc.uid = a.uid)`),
+	}
+}
+
+// rtInvariantWhy says what each violation costs. A count that moved from 3 to
+// 4 is not a debuggable message on its own.
+var rtInvariantWhy = map[string]string{
+	"orphan inbox versions": "A user_inbox head now sits above every version stamped on " +
+		"that user's channel rows. A version that stamps no row cannot be reached by a " +
+		"client's cursor, so head stays permanently above it: SyncInbox stops on an empty " +
+		"delta without advancing, and PollInbox returns instantly forever after. Something " +
+		"allocated an inbox version and skipped the write meant to use it.",
+	"duplicate inbox versions": "Two of a user's channel rows now share an inbox version. " +
+		"get_changed_threads pages by version, so a group split across a page boundary is " +
+		"skipped for good. user_channels_inbox_idx should make this impossible -- check it " +
+		"is still UNIQUE.",
+	"rows above their inbox head": "A channel row is stamped above its user's inbox head. " +
+		"The head is the allocator, so nothing should ever be stamped past it; a client " +
+		"syncing to the head would never see these rows.",
+	"delivery rows with no channel": "A delivery row points at a channel that does not " +
+		"exist, and the inbox sync joins these.",
+	"private delivery without ACL": "Someone holds a delivery row for a private channel " +
+		"they are not in. The send fan-out targets user_channels, so that is a private " +
+		"channel's traffic reaching a non-member -- the one thing the design must not do.",
+	"private ACL without delivery": "Someone is in a private channel's ACL but has no " +
+		"delivery row, so they receive nothing from it.",
+}
+
+// requireRTInvariants asserts that nothing the test just did made any
+// invariant worse than it was when the scene was built.
+func (s *privScene) requireRTInvariants(t *testing.T) {
+	t.Helper()
+	// Quiet once the test has already failed. This runs from t.Cleanup, so on
+	// a failing test it would otherwise add a second failure blaming the
+	// database for whatever wreckage the first one left -- and its queries can
+	// trip over that wreckage themselves. The first failure is the actionable
+	// one; these are a diagnostic for tests that would otherwise be green.
+	if t.Failed() {
+		return
+	}
+	require.NotNil(t, s.invBaseline,
+		"no invariant baseline: the scene was not built by setupPrivScene")
+	for name, now := range s.rtInvariantCounts(t) {
+		allowed := s.invBaseline[name] + s.invAllow[name]
+		if name == "orphan inbox versions" {
+			// Each revoke deliberately bumps without stamping; anything beyond
+			// that count is not deliberate.
+			allowed += s.deliberateOrphans
+		}
+		require.LessOrEqualf(t, now, allowed,
+			"invariant %q is at %d, above the %d this test may account for "+
+				"(%d at scene build, %d deliberate).\n\n%s",
+			name, now, allowed, s.invBaseline[name], allowed-s.invBaseline[name],
+			rtInvariantWhy[name])
+	}
+}
+
+// allowRTInvariant declares that this test knowingly adds n violations of one
+// invariant, so the check can still catch anything else it does.
+//
+// For tests that PLANT state the server would never write -- a user_channels
+// row at a version no allocator issued, say -- rather than for real behaviour.
+// A deliberate violation produced by production code belongs in the counters
+// above, not here.
+func (s *privScene) allowRTInvariant(name string, n int) {
+	if s.invAllow == nil {
+		s.invAllow = map[string]int{}
+	}
+	s.invAllow[name] += n
+}
+
+// rtdbScalar runs a one-value query against the realtime DB.
+func (s *privScene) rtdbScalar(t *testing.T, q string, args ...any) int {
+	t.Helper()
+	m := s.tew.MetaContext()
+	db, err := m.Db(shared.DbTypeRealTime)
+	require.NoError(t, err)
+	defer db.Release()
+	var n int
+	require.NoError(t, db.QueryRow(m.Ctx(), q, args...).Scan(&n))
+	return n
+}

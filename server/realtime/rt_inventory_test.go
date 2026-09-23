@@ -58,6 +58,17 @@ type rpcClassification struct {
 // rpcAccessClass classifies every method of the RealTime protocol. Adding an
 // RPC without adding an entry here fails this test -- which is the point.
 var rpcAccessClass = map[string]rpcClassification{
+	"rtUpdateChannel": {
+		channelWrite,
+		"TestRenameRequiresAdmin, TestRenameCasRace, TestRenameResealsAtTierRole, " +
+			"TestRenamedArchivedFreesTheName (row 16). Chokepoint at accessMutate, " +
+			"which requires team admin-or-above",
+	},
+	"rtSetChannelArchived": {
+		channelWrite,
+		"TestArchiveRequiresAdmin, TestArchivedLeavesTheInbox, " +
+			"TestCannotArchiveDefaultChannel (row 17). Chokepoint at accessMutate",
+	},
 	"rtNewChannel": {
 		channelWrite,
 		"TestPrivateCreateRequiresAdmin, TestPrivateCreateFansOutToCreatorOnly (row 11)",
@@ -224,13 +235,16 @@ var queryAllowlist = map[string]allowedQueries{
 		"which for a private channel equal its ACL (invariant asserted by " +
 		"TestPrivateAclEqualsUserChannels) and are re-validated against the team " +
 		"roster by pruneStaleChannelMembers immediately before this runs"},
-	"touchChannelSet":                     {2, "grant path; runs after authorizeChannel(accessManage) and touches only version bookkeeping"},
-	"channelMaker.insertChannel":          {1, "creation; runs after channelMaker.checkPerms -> authorizeChannelCreate"},
-	"fanUserIntoChannel":                  {1, "delivery-row write, reached from creation fan-out, grant, or the (private-excluding) fan-in"},
-	"channelMaker.fanoutToUser":           {1, "thin wrapper over fanUserIntoChannel, inside the creation transaction"},
-	"channelMaker.insertNewChannelSetRow": {1, "channel-set version bookkeeping; carries no channel identity to a caller"},
-	"channelMaker.updateChannelSet":       {1, "channel-set version bookkeeping; carries no channel identity to a caller"},
-	"readChannelSet":                      {1, "channel-set version only; no per-channel data"},
+	"touchChannelSet":                       {2, "grant and metadata-mutation paths; runs after authorizeChannel(accessManage or accessMutate) and touches only version bookkeeping"},
+	"channelMutator.casSeqno":               {1, "metadata mutation; runs after authorizeChannel(accessMutate), and writes only the row that call already authorized"},
+	"channelMutator.membersWithDeliveryRow": {1, "metadata mutation; reads the delivery rows of the already-authorized channel to avoid re-fanning a member who has one, and returns no channel identity"},
+	"channelMutator.stampMembers":           {2, "metadata mutation; re-stamps the delivery rows of the already-authorized channel so the change reaches members' inboxes. Reads no channel identity a member does not already hold"},
+	"channelMaker.insertChannel":            {1, "creation; runs after channelMaker.checkPerms -> authorizeChannelCreate"},
+	"fanUserIntoChannel":                    {2, "delivery-row write, reached from creation fan-out, grant, or the (private-excluding) fan-in; the second reference is its own existence check, which only decides whether to allocate an inbox version"},
+	"channelMaker.fanoutToUser":             {1, "thin wrapper over fanUserIntoChannel, inside the creation transaction"},
+	"channelMaker.insertNewChannelSetRow":   {1, "channel-set version bookkeeping; carries no channel identity to a caller"},
+	"channelMaker.updateChannelSet":         {1, "channel-set version bookkeeping; carries no channel identity to a caller"},
+	"readChannelSet":                        {1, "channel-set version only; no per-channel data"},
 
 	// --- reads that run after the chokepoint authorized the caller ---
 	"readThroughMarker.run": {3, "calls loadChannel -> authorizeChannel(accessRead) before anything else"},

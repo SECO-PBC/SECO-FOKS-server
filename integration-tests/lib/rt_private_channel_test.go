@@ -76,6 +76,18 @@ type privScene struct {
 
 	chid proto.RTChannelID
 	name proto.RTChannelName
+
+	// invBaseline is the invariant violation count when this scene was built;
+	// see rt_invariants_test.go.
+	invBaseline map[string]int
+	// deliberateOrphans counts inbox bumps this scene made on purpose without
+	// stamping a row -- one per revoke. Without it the invariant check cannot
+	// be used by any test that revokes; with it, an ACCIDENTAL orphan on top
+	// still fails.
+	deliberateOrphans int
+	// invAllow is per-invariant headroom a test declared for state it planted
+	// itself; see allowRTInvariant.
+	invAllow map[string]int
 }
 
 // newPrivActor builds an actor with caching disabled, so that every list and
@@ -132,6 +144,13 @@ func setupPrivScene(t *testing.T, skipChannel bool) *privScene {
 	require.NoError(t, err)
 	sc.teamID = teamID
 
+	// Baseline for the realtime invariants (rt_invariants_test.go). Taken
+	// here, because every test in this package shares one postgres and some
+	// violations are left behind legitimately by earlier tests -- notably the
+	// revoke path's deliberate "bump, don't stamp". The assertion is that a
+	// test did not make things worse, not that the database is pristine.
+	sc.invBaseline = sc.rtInvariantCounts(t)
+
 	if skipChannel {
 		return sc
 	}
@@ -180,6 +199,10 @@ func (s *privScene) grant(t *testing.T, by *privActor, to *privActor, owner bool
 
 func (s *privScene) revoke(t *testing.T, by *privActor, from *privActor) {
 	require.NoError(t, by.minder.RevokeChannelMember(by.m, s.chid, from.u.uid))
+	// dropChannelMember bumps the revoked member's inbox version without
+	// stamping a row, on purpose, so their next sync is a full one. Record it,
+	// or the invariant check would read a deliberate gap as a regression.
+	s.deliberateOrphans++
 }
 
 // send posts one message as `by` and returns its seq.
@@ -497,6 +520,13 @@ func TestPrivateChangedThreadsAfterRevoke(t *testing.T) {
 	// Belt and braces: even if a delivery row somehow survived, the sync
 	// re-checks the ACL. Put one back by hand and confirm the row alone does
 	// not resurrect the channel.
+	//
+	// The row is planted at a version no allocator ever issued, which is the
+	// point -- and which the invariant suite would otherwise flag as a channel
+	// row stamped above its user's inbox head. Declared, so the rest of the
+	// suite still applies to this test.
+	sc.allowRTInvariant("rows above their inbox head", 1)
+	sc.allowRTInvariant("private delivery without ACL", 1)
 	m := sc.tew.MetaContext()
 	db, err := m.Db(shared.DbTypeRealTime)
 	require.NoError(t, err)
@@ -865,11 +895,10 @@ func TestPrivateSameErrorAsMissingChannel(t *testing.T) {
 	require.Error(t, errPrivate)
 	require.Equal(t, errMissingThread, errPrivate,
 		"a private channel must be indistinguishable from one that does not exist")
-	errMissing := errMissingThread
 
 	errPrivate = sc.cleo.raw(t).RtReadThrough(sc.cleo.m.Ctx(),
 		rem.RTReadThroughArg{ChannelID: sc.chid, Seq: 1})
-	errMissing = sc.cleo.raw(t).RtReadThrough(sc.cleo.m.Ctx(),
+	errMissing := sc.cleo.raw(t).RtReadThrough(sc.cleo.m.Ctx(),
 		rem.RTReadThroughArg{ChannelID: *missing, Seq: 1})
 	require.Error(t, errPrivate)
 	require.Equal(t, errMissing, errPrivate)
