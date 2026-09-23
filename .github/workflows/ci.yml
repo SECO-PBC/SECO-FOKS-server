@@ -75,6 +75,7 @@ jobs:
       # fails, on different tests, with `dial tcp: connect: operation timed
       # out`. Promote it back to a gate once TestLocks is stable; the value of
       # running it was never in question, only of blocking merges on it.
+      # Tracked upstream as foks-proj/go-foks#377 (fork issues are off).
       - name: Test (integration, lib -- advisory)
         continue-on-error: true
         run: go test ./integration-tests/lib/... -count=1 -timeout 20m

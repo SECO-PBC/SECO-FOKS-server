@@ -91,7 +91,7 @@ KV-store shards **are** migrated automatically, like every other database: `patc
 **Do not try to confirm the rollout from the deploy output.** `run_patch` captures patch-db's output and logs only `kv-store: patched`, and patch-db itself prints nothing for a shard that had no pending patches (`PatchSummary.addPatches` skips it) — exiting with "no patches to apply" when every shard is already current. A silent shard and an up-to-date shard look identical. Ask the database instead:
 
 ```bash
-for d in $(docker compose exec -T postgresql psql -U foks -lqt | cut -d'|' -f1 | tr -d ' ' | grep '^foks_kv_store_'); do
+for d in $(docker compose exec -T postgresql psql -U foks -d postgres -lqt | cut -d'|' -f1 | tr -d ' ' | grep '^foks_kv_store_'); do
   echo -n "$d: "; docker compose exec -T postgresql psql -U foks -d "$d" -tAc 'SELECT id FROM schema_patches ORDER BY 1;'
 done
 ```
