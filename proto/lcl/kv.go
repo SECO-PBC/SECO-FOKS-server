@@ -2599,6 +2599,63 @@ func (c *ClientKVRestStopArg) Decode(dec rpc.Decoder) error {
 
 func (c *ClientKVRestStopArg) Bytes() []byte { return nil }
 
+type ClientKVChannelMkRootArg struct {
+	Cfg       KVConfig
+	ChannelID lib.RTChannelID
+	Path      lib.KVPath
+}
+type ClientKVChannelMkRootArgInternal__ struct {
+	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Cfg       *KVConfigInternal__
+	ChannelID *lib.RTChannelIDInternal__
+	Path      *lib.KVPathInternal__
+}
+
+func (c ClientKVChannelMkRootArgInternal__) Import() ClientKVChannelMkRootArg {
+	return ClientKVChannelMkRootArg{
+		Cfg: (func(x *KVConfigInternal__) (ret KVConfig) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(c.Cfg),
+		ChannelID: (func(x *lib.RTChannelIDInternal__) (ret lib.RTChannelID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(c.ChannelID),
+		Path: (func(x *lib.KVPathInternal__) (ret lib.KVPath) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(c.Path),
+	}
+}
+func (c ClientKVChannelMkRootArg) Export() *ClientKVChannelMkRootArgInternal__ {
+	return &ClientKVChannelMkRootArgInternal__{
+		Cfg:       c.Cfg.Export(),
+		ChannelID: c.ChannelID.Export(),
+		Path:      c.Path.Export(),
+	}
+}
+func (c *ClientKVChannelMkRootArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(c.Export())
+}
+
+func (c *ClientKVChannelMkRootArg) Decode(dec rpc.Decoder) error {
+	var tmp ClientKVChannelMkRootArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*c = tmp.Import()
+	return nil
+}
+
+func (c *ClientKVChannelMkRootArg) Bytes() []byte { return nil }
+
 type KVInterface interface {
 	ClientKVMkdir(context.Context, ClientKVMkdirArg) (lib.DirID, error)
 	ClientKVPutFirst(context.Context, ClientKVPutFirstArg) (lib.KVNodeID, error)
@@ -2615,6 +2672,7 @@ type KVInterface interface {
 	ClientKVUsage(context.Context, KVConfig) (lib.KVUsage, error)
 	ClientKVRestStart(context.Context, ClientKVRestStartArg) (KVRestListenInfo, error)
 	ClientKVRestStop(context.Context) error
+	ClientKVChannelMkRoot(context.Context, ClientKVChannelMkRootArg) (lib.DirID, error)
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h Header) error
 	MakeResHeader() Header
@@ -2972,6 +3030,27 @@ func (c KVClient) ClientKVRestStop(ctx context.Context) (err error) {
 			return
 		}
 	}
+	return
+}
+func (c KVClient) ClientKVChannelMkRoot(ctx context.Context, arg ClientKVChannelMkRootArg) (res lib.DirID, err error) {
+	warg := &rpc.DataWrap[Header, *ClientKVChannelMkRootArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[Header, lib.DirIDInternal__]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(KVProtocolID, 200, "KV.clientKVChannelMkRoot"), warg, &tmp, 0*time.Millisecond, kVErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	res = tmp.Data.Import()
 	return
 }
 func KVProtocol(i KVInterface) rpc.ProtocolV2 {
@@ -3407,6 +3486,35 @@ func KVProtocol(i KVInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "clientKVRestStop",
+			},
+			200: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[Header, *ClientKVChannelMkRootArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[Header, *ClientKVChannelMkRootArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[Header, *ClientKVChannelMkRootArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						tmp, err := i.ClientKVChannelMkRoot(ctx, (typedArg.Import()))
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[Header, *lib.DirIDInternal__]{
+							Data:   tmp.Export(),
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "clientKVChannelMkRoot",
 			},
 		},
 		WrapError: KVMakeGenericErrorWrapper(i.ErrorWrapper()),

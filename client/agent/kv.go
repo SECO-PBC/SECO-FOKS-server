@@ -39,6 +39,28 @@ func (c *AgentConn) ClientKVMkdir(ctx context.Context, arg lcl.ClientKVMkdirArg)
 	return *tmp, nil
 }
 
+// ClientKVChannelMkRoot creates a private channel's storage root (fork-only;
+// docs/kv-channel-acl.md §4.4). Not idempotent across calls: a second root
+// for the same channel is refused by the server.
+func (c *AgentConn) ClientKVChannelMkRoot(
+	ctx context.Context,
+	arg lcl.ClientKVChannelMkRootArg,
+) (
+	proto.DirID,
+	error,
+) {
+	var ret proto.DirID
+	m, tm, err := c.kvInit(ctx, arg.Cfg)
+	if err != nil {
+		return ret, err
+	}
+	tmp, err := tm.ChannelMkRoot(m, arg.Cfg, arg.ChannelID, arg.Path)
+	if err != nil {
+		return ret, err
+	}
+	return *tmp, nil
+}
+
 func (c *AgentConn) ClientKVPutFirst(
 	ctx context.Context,
 	arg lcl.ClientKVPutFirstArg,

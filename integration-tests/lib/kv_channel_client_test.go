@@ -52,6 +52,16 @@ func TestKvChannelClientEndToEnd(t *testing.T) {
 	_, err = kvA.ChannelMkRoot(mA, chanCfg, sc.chid, rootPath)
 	require.NoError(t, err)
 
+	// One root per channel, and a caller can tell: a second attempt, even at
+	// another path, fails with a recognisable error rather than silently
+	// making a second tree. (Callers such as the SECO daemon treat it as
+	// "the root exists".)
+	againRoot, err := core.RandomDomain()
+	require.NoError(t, err)
+	_, err = kvA.ChannelMkRoot(mA, chanCfg, sc.chid, proto.KVPath("/"+againRoot))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "channel already has a storage root")
+
 	// Mkdir cannot make the root: it creates and links in one walk, so the
 	// link is attempted before the directory is registered and containment
 	// refuses it. That ordering is why ChannelMkRoot exists.
