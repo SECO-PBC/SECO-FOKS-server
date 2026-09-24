@@ -165,12 +165,12 @@ type MakeChannelOpts struct {
 
 	// AllowDuplicateName skips the team-wide name-collision check and the
 	// refusal of the name "general", for a caller that identifies channels
-	// by id and treats names as display text (fork-only, see
-	// docs/rt-channel-mutation.md). Never for the empty name, which stays
-	// unique so that None-specifier lookups of the default channel resolve. Off by default, because callers that
-	// create a channel on demand -- the app's control channel, a DM team's
-	// nameless default channel -- rely on the collision check to create it
-	// exactly once.
+	// by id and treats names as display text (see docs/rt-channel-mutation.md;
+	// proposed upstream in #376). Never for the empty name, which stays unique
+	// so that None-specifier lookups of the default channel resolve. Off by
+	// default, because callers that create a channel on demand -- the app's
+	// control channel, a DM team's nameless default channel -- rely on the
+	// collision check to create it exactly once.
 	AllowDuplicateName bool
 }
 
