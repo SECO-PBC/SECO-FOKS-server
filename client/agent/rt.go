@@ -199,7 +199,11 @@ func (c *AgentConn) ClientRTMakeChannel(
 		nm,
 		arg.Desc,
 		arg.Cfg.Roles,
-		librt.MakeChannelOpts{NoPush: arg.NoPush, Private: arg.Private},
+		librt.MakeChannelOpts{
+			NoPush:             arg.NoPush,
+			Private:            arg.Private,
+			AllowDuplicateName: arg.AllowDuplicateName,
+		},
 		nil,
 	)
 	if err != nil {
@@ -302,7 +306,8 @@ func (c *AgentConn) ClientRTUpdateChannel(
 		return err
 	}
 	return minder.UpdateChannel(
-		m, arg.Cfg.Team, arg.Cfg.AppID, arg.Cfg.Channel, arg.Name, arg.Desc)
+		m, arg.Cfg.Team, arg.Cfg.AppID, arg.Cfg.Channel, arg.Name, arg.Desc,
+		arg.AllowDuplicateName)
 }
 
 // ClientRTSetChannelArchived archives or unarchives a channel. Admin-only,

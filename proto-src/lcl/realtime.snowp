@@ -161,7 +161,12 @@ protocol RealTime
          * or even see it. The creator is seeded as the list's owner.
          * librt.MakeChannelOpts.Private is the other half; see
          * docs/rt-private-channel-acl.md. */
-        private @3 : Bool
+        private @3 : Bool,
+        /* FORK-ONLY (channel mutation). Allow a name another channel of the
+         * tier already has, and the name "general": for a caller that
+         * identifies channels by id. librt.MakeChannelOpts.AllowDuplicateName
+         * is the other half. */
+        allowDuplicateName @4 : Bool
     ) -> lib.RTChannelID;
 
     clientRTListChannelsForTeam @1 (
@@ -209,7 +214,10 @@ protocol RealTime
     clientRTUpdateChannel @8 (
         cfg @0 : RTConfig,  /* cfg.channel selects the channel to update */
         name @1 : lib.RTChannelName,
-        desc @2 : lib.RTChannelDesc
+        desc @2 : lib.RTChannelDesc,
+        /* As on clientRTMakeChannel: skip the name-collision check and the
+         * "general" refusal. */
+        allowDuplicateName @3 : Bool
     );
 
     // Archive or unarchive a channel. Admins only (enforced server-side).

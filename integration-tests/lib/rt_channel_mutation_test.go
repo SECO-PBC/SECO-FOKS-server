@@ -23,6 +23,7 @@
 package lib
 
 import (
+	"github.com/foks-proj/go-foks/client/librt"
 	"sync"
 	"testing"
 
@@ -113,7 +114,7 @@ func (s *mutScene) rename(
 	t *testing.T, by *privActor, spec lcl.RTChannelSpecifier,
 	nm proto.RTChannelName, desc proto.RTChannelDesc,
 ) error {
-	return by.minder.UpdateChannel(by.m, s.teamCfg(), proto.RTAppID_Chat, spec, nm, desc)
+	return by.minder.UpdateChannel(by.m, s.teamCfg(), proto.RTAppID_Chat, spec, nm, desc, false)
 }
 
 func (s *mutScene) setArchived(
@@ -245,7 +246,7 @@ func TestRenameCasRace(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			errs[i] = actors[i].minder.UpdateChannel(actors[i].m, sc.teamCfg(),
-				proto.RTAppID_Chat, sc.pubSpec(), names[i], "")
+				proto.RTAppID_Chat, sc.pubSpec(), names[i], "", false)
 		}(i)
 	}
 	wg.Wait()
@@ -276,6 +277,58 @@ func TestRenameOntoExistingNameFails(t *testing.T) {
 	// Renaming a channel to the name it already has is a no-op, not a clash
 	// with itself.
 	require.NoError(t, sc.rename(t, sc.alice, sc.pubSpec(), sc.pubName, ""))
+}
+
+// AllowDuplicateName (fork-only): a caller that identifies channels by id may
+// reuse a name -- a live one, an archived one, or "general" -- on create and
+// on rename. Without the flag both still refuse, which the app's control
+// channel relies on to be created exactly once.
+func TestAllowDuplicateNameOnCreateAndRename(t *testing.T) {
+	sc := setupMutScene(t)
+	roles := proto.RolePairOpt{Read: &proto.DefaultRole, Write: &proto.DefaultRole}
+
+	// Without the flag: refused, as before.
+	_, err := sc.alice.minder.MakeChannel(
+		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, sc.pubName, "", roles)
+	require.IsType(t, core.RTChannelExistsError{}, err)
+
+	// With it: a second channel of the same name.
+	dup, err := sc.alice.minder.MakeChannelWithOpts(
+		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, sc.pubName, "", roles,
+		librt.MakeChannelOpts{AllowDuplicateName: true}, nil)
+	require.NoError(t, err)
+	require.False(t, dup.Eq(sc.pubID))
+
+	// "general" too, on create and on rename.
+	gen, err := sc.alice.minder.MakeChannelWithOpts(
+		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, proto.RTGeneralChannel, "", roles,
+		librt.MakeChannelOpts{AllowDuplicateName: true}, nil)
+	require.NoError(t, err)
+	require.Error(t, sc.rename(t, sc.alice, sc.specFor(*dup), proto.RTGeneralChannel, ""))
+	require.NoError(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, sc.specFor(*dup), proto.RTGeneralChannel, "", true))
+
+	// Renaming onto a live name: refused without the flag, allowed with it.
+	require.IsType(t, core.RTChannelExistsError{},
+		sc.rename(t, sc.alice, sc.specFor(*gen), sc.pubName, ""))
+	require.NoError(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, sc.specFor(*gen), sc.pubName, "", true))
+
+	// The empty name stays refused either way: None lookups resolve it.
+	require.Error(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, sc.specFor(*gen), "", "", true))
+
+	// …and stays unique on create: the flag never mints a second nameless
+	// channel.
+	_, err = sc.alice.minder.MakeChannel(
+		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, "", "", roles)
+	if err != nil {
+		require.IsType(t, core.RTChannelExistsError{}, err)
+	}
+	_, err = sc.alice.minder.MakeChannelWithOpts(
+		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, "", "", roles,
+		librt.MakeChannelOpts{AllowDuplicateName: true}, nil)
+	require.IsType(t, core.RTChannelExistsError{}, err)
 }
 
 // --- archive --------------------------------------------------------------

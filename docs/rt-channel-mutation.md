@@ -386,6 +386,19 @@ existing RT block runs `@12001`–`@12007`.
   a SECO product rule that a general-purpose realtime server should not be
   carrying at all. Removed.
 
+### 3.6.1 Opt-in duplicate names (fork-only, `seco.22`)
+
+**As built (2026-09-23).** The SECO app now identifies channels by id and treats names as display text: two channels may share a name, and an archived channel's name is free again. `MakeChannelOpts.AllowDuplicateName` and `UpdateChannel`'s `allowDuplicateName` argument (both crossing the agent RPC as `allowDuplicateName` on `clientRTMakeChannel @4` / `clientRTUpdateChannel @3`) skip:
+
+- the `{name, tier}` collision check;
+- the refusal of the name `general`.
+
+The empty name is never covered: `None`-specifier lookups resolve it, so it stays refused on update, and on create it keeps its collision check even with the flag set. Either would otherwise make a second nameless default channel.
+
+**Off by default, on purpose.** A caller that creates a channel on demand relies on the collision check to create it exactly once. Two such callers exist: the app's `seco-ctl` control channel, and a DM team's nameless default channel. Only the app's user-facing create and rename paths set the flag. Test: `TestAllowDuplicateNameOnCreateAndRename`.
+
+This changes §3.3 for callers that set the flag: for them an archived channel no longer reserves its name. Callers that don't set it keep §3.3 as written.
+
 ### 3.7 Two existing bugs sat on exactly this path — fixed first
 
 **As built: both are fixed**, in `318f2fb`, ahead of everything else on this
