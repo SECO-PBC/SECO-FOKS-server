@@ -1,7 +1,8 @@
 # Private-channel storage via a KV-store ACL (fork-only)
 
-**Status:** BUILT on `feat/kv-channel-acl` (fork PR #45); not yet on fork
-`main`. Drafted and implemented 2026-09-21. §§1–3 and §7 are the design and
+**Status:** BUILT and on fork `main` (fork PR #45, tagged `v0.1.9-seco.21`);
+the local agent RPC `clientKVChannelMkRoot` followed in `v0.1.9-seco.23` (§8.2).
+Drafted and implemented 2026-09-21. §§1–3 and §7 are the design and
 its rationale, and stay true of the code; §§4.3–4.5 record decisions and
 constraints found while building; §6 is the path inventory the guard in §9.4
 enforces; §11 tracks which slices landed.
@@ -530,6 +531,21 @@ appending after its own last number without colliding — see
 `proto-src/rem/realtime.snowp:278` and `rtChannelGrant @200`. Upstream's KVStore
 protocol currently ends at `selectVHost @18`, so `@19` is exactly the number
 upstream takes next. Use `@200`.
+
+**The local agent RPC (added for the SECO app, `v0.1.9-seco.23`).** Clients that
+reach KV only through the agent — the SECO daemon and the gomobile/sidecar
+bridge — cannot call `libkv.Minder.ChannelMkRoot` directly, so the local `KV`
+protocol exposes it:
+
+```
+clientKVChannelMkRoot @200 (cfg : KVConfig, channelID, path) -> lib.DirID
+```
+
+Same fork-only numbering (`@200`, local protocol ends at `clientKVRestStop @14`).
+It is a passthrough: `cfg.roles` set the root's roles, and a second root for the
+channel fails with "channel already has a storage root" (pinned by
+`TestKvChannelClientEndToEnd`). SECO's daemon is its only caller: it creates a
+private channel's librarian store once, treating that refusal as "exists".
 
 ### 8.3 The patch is the first one this database has ever had
 

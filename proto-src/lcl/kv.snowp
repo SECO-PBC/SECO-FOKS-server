@@ -267,4 +267,19 @@ protocol KV
 
     clientKVRestStop @14 (
     );
+
+    // Fork-only methods are numbered from @200, as in rem/kv.snowp, so
+    // upstream can keep appending without colliding.
+
+    // clientKVChannelMkRoot creates, registers and links the storage root of
+    // a private channel at path (libkv.Minder.ChannelMkRoot): the one way a
+    // channel-tagged directory hangs beneath untagged community storage. The
+    // caller must be on the channel's access list, and its ACL owner or a
+    // team admin-or-above. One root per channel: a second call fails with
+    // "channel already has a storage root". cfg.roles set the root's roles.
+    clientKVChannelMkRoot @200 (
+        cfg @0 : KVConfig,
+        channelID @1 : lib.RTChannelID,
+        path @2 : lib.KVPath
+    ) -> lib.DirID;
 }
