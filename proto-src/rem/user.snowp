@@ -265,4 +265,10 @@ protocol User
     ) -> YubiEncryptedManagementKey;
     getAllYubiManagementKeys @29 (
     ) -> List(YubiEncryptedManagementKey);
+
+    // Mint a standard single-use invite code against the caller's basket
+    // (docs/social_signup_spec.md). Fork-only methods are numbered from @200,
+    // so upstream can keep appending after @29 without colliding.
+    newInviteCode @200 (
+    ) -> InviteCode;
 }
