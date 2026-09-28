@@ -61,3 +61,24 @@ func TestSocialInviteWriteKeyCommitment(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, IsPermissionError(err))
 }
+
+func TestSocialInviteSeedAndIDStrings(t *testing.T) {
+	var seed proto.SocialInviteSeed
+	require.NoError(t, RandomFill(seed[:]))
+	str := ExportSocialInviteSeed(seed)
+	require.Len(t, str, 43)
+	require.NotContains(t, str, ".")
+	got, err := ImportSocialInviteSeed(str)
+	require.NoError(t, err)
+	require.Equal(t, seed, *got)
+	_, err = ImportSocialInviteSeed(str[:42])
+	require.Error(t, err)
+
+	id, err := DeriveSocialInviteID(seed)
+	require.NoError(t, err)
+	gotID, err := ImportSocialInviteID(ExportSocialInviteID(*id))
+	require.NoError(t, err)
+	require.Equal(t, *id, *gotID)
+	_, err = ImportSocialInviteID("abcd")
+	require.Error(t, err)
+}
