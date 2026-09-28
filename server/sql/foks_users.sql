@@ -1025,8 +1025,10 @@ CREATE TABLE social_invites (
     PRIMARY KEY(short_host_id, id),
     FOREIGN KEY(short_host_id, inviter) REFERENCES users(short_host_id, uid),
     FOREIGN KEY(short_host_id, team_id) REFERENCES teams(short_host_id, team_id),
+    /* The column list (PostgreSQL 15+) keeps short_host_id: a bare SET NULL
+       nulls every referencing column, and short_host_id is NOT NULL. */
     FOREIGN KEY(short_host_id, invite_code)
-        REFERENCES invite_codes(short_host_id, code) ON DELETE SET NULL
+        REFERENCES invite_codes(short_host_id, code) ON DELETE SET NULL (invite_code)
 );
 
 CREATE INDEX social_invites_inviter_idx
