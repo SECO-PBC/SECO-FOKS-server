@@ -117,6 +117,34 @@ func TestTeamClosedHostAddByUID(t *testing.T) {
 	require.True(t, found, "team not in the new member's membership chain")
 }
 
+// Naming the team's own host alongside the UID is still a local add.
+func TestTeamClosedHostAddByUIDAtLocalHost(t *testing.T) {
+	c := newClosedHostTeam(t)
+	bob := c.newUser(t, true)
+	host := proto.NewParsedHostnameWithFalse(c.alice.host)
+	require.NoError(t, c.add(t, lcl.FQPartyParsedAndRole{
+		Fqp: proto.FQPartyParsed{
+			Party: proto.NewParsedPartyWithFalse(bob.uid.ToPartyID()),
+			Host:  &host,
+		},
+	}))
+}
+
+func TestTeamClosedHostAddOtherHostRefused(t *testing.T) {
+	c := newClosedHostTeam(t)
+	bob := c.newUser(t, true)
+	other := c.tew.VHostMakeI(t, 4)
+	host := proto.NewParsedHostnameWithFalse(other.HostID.Id)
+	err := c.add(t, lcl.FQPartyParsedAndRole{
+		Fqp: proto.FQPartyParsed{
+			Party: proto.NewParsedPartyWithFalse(bob.uid.ToPartyID()),
+			Host:  &host,
+		},
+	})
+	require.Error(t, err)
+	require.IsType(t, core.HostMismatchError{}, err)
+}
+
 func TestTeamClosedHostAddNeedsGrant(t *testing.T) {
 	c := newClosedHostTeam(t)
 	bob := c.newUser(t, false)
