@@ -5,6 +5,8 @@ package core
 
 import (
 	"crypto/hmac"
+	"encoding/base64"
+	"encoding/hex"
 
 	proto "github.com/foks-proj/go-foks/proto/lib"
 )
@@ -81,4 +83,40 @@ func CheckSocialInviteWriteKey(
 		return PermissionError("bad social invite write key")
 	}
 	return nil
+}
+
+// ExportSocialInviteSeed encodes a seed for a link or a command line, as
+// unpadded base64url so it survives a URL fragment untouched.
+func ExportSocialInviteSeed(s proto.SocialInviteSeed) string {
+	return base64.RawURLEncoding.EncodeToString(s[:])
+}
+
+func ImportSocialInviteSeed(s string) (*proto.SocialInviteSeed, error) {
+	var ret proto.SocialInviteSeed
+	b, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) != len(ret) {
+		return nil, BadArgsError("social invite seed must be 32 bytes")
+	}
+	copy(ret[:], b)
+	return &ret, nil
+}
+
+func ExportSocialInviteID(id proto.SocialInviteID) string {
+	return hex.EncodeToString(id[:])
+}
+
+func ImportSocialInviteID(s string) (*proto.SocialInviteID, error) {
+	var ret proto.SocialInviteID
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) != len(ret) {
+		return nil, BadArgsError("social invite id must be 32 bytes")
+	}
+	copy(ret[:], b)
+	return &ret, nil
 }
