@@ -182,8 +182,16 @@ func (t *teamAdder) loadMembers(m MetaContext) error {
 
 func (t *teamAdder) post(m MetaContext) error {
 	tr := t.tr
+	host := t.hostID() // takes tr's lock
 	tr.Lock()
 	defer tr.Unlock()
+
+	// Adding a party that is already in the roster would silently rewrite
+	// its membership at dstRole (e.g. demote an owner), as with TeamAdmit.
+	err := checkAdmitteesNotAlreadyMembers(t.mrs, host, tr.ldr.rosterPost)
+	if err != nil {
+		return err
+	}
 
 	cfg, err := t.tm.loadConfig(m, nil)
 	if err != nil {

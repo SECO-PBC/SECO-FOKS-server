@@ -173,3 +173,37 @@ func TestTeamClosedHostAddTeamRefused(t *testing.T) {
 	require.Error(t, err)
 	require.IsType(t, core.PermissionError(""), err)
 }
+
+// Re-adding a member must not silently rewrite their membership at the
+// default role (which would demote an admin or owner).
+func TestTeamClosedHostReAddRefused(t *testing.T) {
+	c := newClosedHostTeam(t)
+	bob := c.newUser(t, true)
+	require.NoError(t, c.add(t, byUID(bob)))
+	err := c.add(t, byUID(bob))
+	require.Error(t, err)
+	require.IsType(t, core.TeamRosterError(""), err)
+}
+
+func TestTeamOpenHostReAddRefused(t *testing.T) {
+	tew := testEnvBeta(t)
+	vhost := tew.openVHost(t)
+	alice := tew.NewTestUserAtVHost(t, vhost)
+	bob := tew.NewTestUserAtVHost(t, vhost)
+	tew.DirectDoubleMerklePokeInTest(t)
+	tm := tew.makeTeamForOwner(t, alice)
+	tew.DirectDoubleMerklePokeInTest(t)
+
+	mc := tew.NewClientMetaContext(t, alice)
+	tmind, err := mc.TeamMinder()
+	require.NoError(t, err)
+	arg := lcl.TeamAddArg{
+		Team:    *tm.ToFQTeamParsed(t),
+		Members: []lcl.FQPartyParsedAndRole{toFQParsedPartyAndRole(bob)},
+	}
+	require.NoError(t, tmind.Add(mc, arg))
+	tew.DirectDoubleMerklePokeInTest(t)
+	err = tmind.Add(mc, arg)
+	require.Error(t, err)
+	require.IsType(t, core.TeamRosterError(""), err)
+}
