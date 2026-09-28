@@ -61,6 +61,17 @@ func (k *socialInviteKeys) open(msgs []rem.SocialInviteMsg) ([]lcl.SocialInviteL
 	return ret, nil
 }
 
+// openingTeam is the team named in the inviter's opening turn. The inviter
+// sealed it, so unlike the row's team column the host cannot change it.
+func openingTeam(msgs []lcl.SocialInviteLocalMsg) *proto.FQTeam {
+	for _, msg := range msgs {
+		if msg.Seq == 1 && msg.Sender == proto.SocialInviteParty_Inviter {
+			return msg.Team
+		}
+	}
+	return nil
+}
+
 func socialInviteClient(m MetaContext) (*UserContext, *rem.SocialInviteClient, error) {
 	au := m.G().ActiveUser()
 	if au == nil {
@@ -183,10 +194,14 @@ func SocialInviteList(m MetaContext) ([]lcl.SocialInviteLocalRow, error) {
 		if err != nil {
 			return nil, err
 		}
+		team := openingTeam(msgs)
+		if team == nil || !team.Team.Eq(row.Team) || !team.Host.Eq(au.HostID()) {
+			return nil, core.BadServerDataError("social invite team does not match its opening message")
+		}
 		ret = append(ret, lcl.SocialInviteLocalRow{
 			Id:    row.Id,
 			Seed:  seed,
-			Team:  proto.FQTeam{Team: row.Team, Host: au.HostID()},
+			Team:  *team,
 			State: row.State,
 			Msgs:  msgs,
 			Ctime: row.Ctime,
@@ -238,8 +253,14 @@ func SocialInviteReply(m MetaContext, arg lcl.SocialInviteReplyArg) error {
 	if err != nil {
 		return err
 	}
-	if len(view.Msgs) > 0 && view.Msgs[0].Team != nil {
-		team := *view.Msgs[0].Team
+	// Refuse a decided invitation here rather than at the host, so the grant
+	// below never reaches a team that has already declined or admitted.
+	switch view.State {
+	case proto.SocialInviteState_Open, proto.SocialInviteState_Replied, proto.SocialInviteState_AskAgain:
+	default:
+		return core.SocialInviteWrongStateError{}
+	}
+	if team := openingTeam(view.Msgs); team != nil {
 		if !team.Host.Eq(au.HostID()) {
 			return core.HostMismatchError{}
 		}

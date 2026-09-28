@@ -15,11 +15,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Social invite tests (docs/social_signup_spec.md). There is no client
-// implementation yet, so the tests play both parties with lib/core crypto
-// directly: Alice derives the keys off a random seed, seals the exchange,
-// and self-boxes the seed to her PUK; Bob rederives the same keys from the
-// seed alone.
+// Social invite server tests (docs/social_signup_spec.md). They drive the rem
+// protocols directly, below the client (client/libclient/social_invite.go),
+// playing both parties with lib/core crypto: Alice derives the keys off a
+// random seed, seals the exchange, and self-boxes the seed to her PUK; Bob
+// rederives the same keys from the seed alone.
 
 type socialInviteKit struct {
 	seed proto.SocialInviteSeed
