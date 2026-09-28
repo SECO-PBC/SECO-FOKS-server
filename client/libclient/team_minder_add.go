@@ -19,6 +19,11 @@ type teamAdder struct {
 	arg     lcl.TeamAddArg
 	hepks   *core.HEPKSet
 	dstRole proto.Role
+
+	// On a host with closed user viewership, users are loaded on the team's
+	// behalf, which the server allows only if the user granted the team a
+	// local view permission (e.g. step 5 of docs/social_signup_spec.md).
+	closedView bool
 }
 
 func (t *teamAdder) hostID() proto.HostID {
@@ -35,19 +40,16 @@ func newTeamAdder(tm *TeamMinder, tr *TeamRecord, tok *rem.TeamBearerToken, arg 
 	}
 }
 
-func (t *TeamMinder) requireOpenViewership(m MetaContext) error {
+func (t *TeamMinder) hasOpenUserViewership(m MetaContext) (bool, error) {
 	ucli, err := t.au.UserClient(m)
 	if err != nil {
-		return err
+		return false, err
 	}
 	cfg, err := ucli.GetHostConfig(m.Ctx())
 	if err != nil {
-		return err
+		return false, err
 	}
-	if cfg.Viewership.User != proto.ViewershipMode_Open {
-		return core.PermissionError("host does not allow open viewership; must use 3-way invitation flow")
-	}
-	return nil
+	return cfg.Viewership.User == proto.ViewershipMode_Open, nil
 }
 
 func (t *teamAdder) loadMember(m MetaContext, u lcl.FQPartyParsedAndRole) error {
@@ -64,8 +66,12 @@ func (t *teamAdder) loadMember(m MetaContext, u lcl.FQPartyParsedAndRole) error 
 		return err
 	}
 	switch {
+	case user != nil && t.closedView:
+		return t.loadUserAsTeam(m, *user, *rk)
 	case user != nil:
 		return t.loadUser(m, *user, *rk)
+	case team != nil && t.closedView:
+		return core.PermissionError("host does not allow open viewership; must use 3-way invitation flow")
 	case team != nil:
 		return t.loadTeam(m, *team, *rk)
 	default:
@@ -107,6 +113,39 @@ func (t *teamAdder) loadUser(m MetaContext, u lib.FQUserParsed, srcRole core.Rol
 	if err != nil {
 		return err
 	}
+	return t.addUser(uw, srcRole)
+}
+
+// loadUserAsTeam loads a local user on the team's behalf, as the team inbox
+// does for a joiner. Closed viewership refuses username resolution, so the
+// user must be named by UID.
+func (t *teamAdder) loadUserAsTeam(m MetaContext, u lib.FQUserParsed, srcRole core.RoleKey) error {
+	isName, err := u.User.GetS()
+	if err != nil {
+		return err
+	}
+	if isName {
+		return core.BadArgsError("host has closed viewership; add users by UID")
+	}
+	if u.Host != nil {
+		return core.BadArgsError("host has closed viewership; only local users can be added")
+	}
+	tok := t.tr.ldr.Tok()
+	if tok == nil {
+		return core.InternalError("no team view token")
+	}
+	uw, err := LoadUser(m, LoadUserArg{
+		Uid:               u.User.False(),
+		LoadMode:          LoadModeOthers,
+		TeamVOBearerToken: tok,
+	})
+	if err != nil {
+		return err
+	}
+	return t.addUser(uw, srcRole)
+}
+
+func (t *teamAdder) addUser(uw *UserWrapper, srcRole core.RoleKey) error {
 	if !uw.fqu.HostID.Eq(t.hostID()) {
 		return core.HostMismatchError{}
 	}
@@ -158,6 +197,12 @@ func (t *teamAdder) post(m MetaContext) error {
 	ed.cfg = cfg
 	ed.testOpts = t.tm.teamEditorTestOpts()
 
+	// The server inserts these only on open hosts. On a closed host each
+	// added user already granted the team view permission, which is how
+	// loadUserAsTeam was able to load them.
+	if t.closedView {
+		return ed.Run(m)
+	}
 	for _, mr := range t.mrs {
 		pid, err := mr.Member.Id.Entity.ToPartyID()
 		if err != nil {
@@ -194,7 +239,7 @@ func (t *teamAdder) run(m MetaContext) error {
 
 func (t *TeamMinder) Add(m MetaContext, arg lcl.TeamAddArg) error {
 
-	err := t.requireOpenViewership(m)
+	open, err := t.hasOpenUserViewership(m)
 	if err != nil {
 		return err
 	}
@@ -205,6 +250,7 @@ func (t *TeamMinder) Add(m MetaContext, arg lcl.TeamAddArg) error {
 		LoadTeamOpts{Refresh: true},
 		func(m MetaContext, tr *TeamRecord, tok *rem.TeamBearerToken) error {
 			adder := newTeamAdder(t, tr, tok, arg)
+			adder.closedView = !open
 			return adder.run(m)
 		},
 	)
