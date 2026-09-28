@@ -118,27 +118,38 @@ func (t *teamAdder) loadUser(m MetaContext, u lib.FQUserParsed, srcRole core.Rol
 
 // loadUserAsTeam loads a local user on the team's behalf, as the team inbox
 // does for a joiner. Closed viewership refuses username resolution, so the
-// user must be named by UID.
+// user must be named by UID. A host may be named, but it must be the team's.
 func (t *teamAdder) loadUserAsTeam(m MetaContext, u lib.FQUserParsed, srcRole core.RoleKey) error {
-	isName, err := u.User.GetS()
+	arg, err := loadUserArgFromFQUserParsed(u)
 	if err != nil {
 		return err
 	}
-	if isName {
+	if arg.Username != "" {
 		return core.BadArgsError("host has closed viewership; add users by UID")
 	}
-	if u.Host != nil {
-		return core.BadArgsError("host has closed viewership; only local users can be added")
+	if arg.Host != nil {
+		hid := arg.Host.HostID
+		if hid.IsZero() {
+			prb, err := m.ProbeByAddr(arg.Host.Addr, 0)
+			if err != nil {
+				return err
+			}
+			hid = prb.Chain().HostID()
+		}
+		if !hid.Eq(t.hostID()) {
+			return core.HostMismatchError{}
+		}
+		// A named host sends the loader down its remote path, which wants a
+		// permission token rather than the team's view token.
+		arg.Host = nil
 	}
 	tok := t.tr.ldr.Tok()
 	if tok == nil {
 		return core.InternalError("no team view token")
 	}
-	uw, err := LoadUser(m, LoadUserArg{
-		Uid:               u.User.False(),
-		LoadMode:          LoadModeOthers,
-		TeamVOBearerToken: tok,
-	})
+	arg.LoadMode = LoadModeOthers
+	arg.TeamVOBearerToken = tok
+	uw, err := LoadUser(m, arg)
 	if err != nil {
 		return err
 	}
