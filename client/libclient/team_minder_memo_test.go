@@ -12,8 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPersistTeamNameLookupsNoPoisonOnWriteFailure pins the regression the
-// review fix addressed: the in-memory memo (persistedNames) must record a name
+// TestPersistTeamNameLookupsMemoWaitsForWrite: the in-memory memo (persistedNames) must record a name
 // as persisted only AFTER the DB write lands, never before. Recording it first
 // makes one transient write failure permanent -- every later call skips
 // exactly the rows that never reached disk, and cold-start offline name
@@ -21,7 +20,7 @@ import (
 //
 // A working soft DB is opened and then its handle is closed, so the write
 // fails the way a transient DB fault would. The memo must stay empty.
-func TestPersistTeamNameLookupsNoPoisonOnWriteFailure(t *testing.T) {
+func TestPersistTeamNameLookupsMemoWaitsForWrite(t *testing.T) {
 	ctx := context.Background()
 	g := NewGlobalContext()
 	g.Cfg().TestSetHomeCLIFlag(t.TempDir())

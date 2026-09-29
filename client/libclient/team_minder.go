@@ -385,8 +385,9 @@ func (t *TeamMinder) getTeamWithRefresh(
 	tr := get()
 	// An offline-born record is a stopgap (no membership loader, no member
 	// CryptoPartier); a requested refresh must try to replace it with a full
-	// exploration, so a transient outage cannot poison the team past
-	// reconnect. It survives only while the server stays unreachable.
+	// exploration, so a transient outage does not leave the team on the
+	// stopgap record after reconnect. It survives only while the server stays
+	// unreachable.
 	if (tr == nil || !tr.offlineAt.IsZero()) && opts != nil && opts.Refresh {
 		err := t.ExploreAndIndex(m, opts)
 		switch {
