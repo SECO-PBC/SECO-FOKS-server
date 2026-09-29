@@ -4,6 +4,9 @@
 package lib
 
 import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"testing"
 	"time"
@@ -393,4 +396,106 @@ func TestUserSnapshotVerifiedAt(t *testing.T) {
 	age, known := cached.VerifiedAge(m.G().Now())
 	require.True(t, known)
 	require.GreaterOrEqual(t, age, time.Duration(0))
+}
+
+// snapshotSoftDB reads the logical contents of the client's soft database:
+// every scoped row and global key, with values and timestamps. mtime is
+// included deliberately -- rewriting a row with identical bytes is still a
+// write, and the rule being checked forbids the offline path from writing at
+// all, not merely from changing anything.
+func snapshotSoftDB(t *testing.T, m libclient.MetaContext) string {
+	path, err := m.G().Cfg().DbFile(libclient.DbTypeSoft)
+	require.NoError(t, err)
+	db, err := sql.Open("sqlite3", path)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	h := sha256.New()
+	scan := func(q string) {
+		rows, err := db.Query(q)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, rows.Close()) }()
+		cols, err := rows.Columns()
+		require.NoError(t, err)
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			require.NoError(t, rows.Scan(ptrs...))
+			fmt.Fprintf(h, "%v|", vals)
+		}
+		require.NoError(t, rows.Err())
+	}
+	scan(`SELECT scope_id, typ, key, val, ctime, mtime FROM scoped_data
+	      ORDER BY scope_id, typ, key`)
+	scan(`SELECT key, val, ctime, mtime FROM global_kv ORDER BY key`)
+	scan(`SELECT scope_id, typ, val, ctime, mtime FROM scoped_counters
+	      ORDER BY scope_id, typ`)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// TestOfflineReadsWriteNothing pins the rule the whole design rests on: an
+// offline load re-serves what a verified load already accepted, and never adds
+// to local state. Every other guarantee here is downstream of that -- if the
+// offline path could write, it would be a way to introduce data nothing
+// verified, and "served from cache" would stop meaning "was verified once".
+//
+// Nothing else checks this. It holds today because saveState is reachable only
+// from the online run and LoadTeamFromCache does not call it, which is a
+// property of who calls whom, so a refactor could dissolve it in silence. This
+// compares the database either side of a batch of offline reads instead of
+// trusting that arrangement to survive.
+func TestOfflineReadsWriteNothing(t *testing.T) {
+	tew := testEnvBeta(t)
+	bluey := tew.NewTestUser(t)
+	tew.DirectDoubleMerklePokeInTest(t)
+
+	home := t.TempDir()
+	warmM := tew.NewClientMetaContextAtHome(t, bluey, home)
+	au := warmM.G().ActiveUser()
+	_, err := au.RefreshPUKs(warmM)
+	require.NoError(t, err)
+	host, err := au.HostID().StringErr()
+	require.NoError(t, err)
+
+	warm := libclient.NewTeamMinder(au)
+	nm := randomTeamname(t)
+	_, err = warm.Create(warmM, nm)
+	require.NoError(t, err)
+	tew.DirectDoubleMerklePokeInTest(t)
+
+	parsed, err := core.ParseFQTeam(proto.FQTeamString(string(nm) + "@" + host))
+	require.NoError(t, err)
+	_, err = warm.LoadTeam(warmM, team.WrapNamed(*parsed), libclient.LoadTeamOpts{})
+	require.NoError(t, err)
+
+	// Cold start over the same database, with no network.
+	coldM := tew.NewClientMetaContextAtHome(t, bluey, home)
+	coldM.G().SetNetworkConditioner(core.CatastrophicNetworkConditions{On: true})
+	coldAu := coldM.G().ActiveUser()
+	offline := libclient.NewTeamMinder(coldAu)
+
+	before := snapshotSoftDB(t, coldM)
+
+	// Every offline read path this document describes. Refresh forces the
+	// exploration attempt whose transport failure engages the snapshot
+	// fallback; without it a fresh minder has no record to serve at all.
+	tw, err := offline.LoadTeam(coldM, team.WrapNamed(*parsed), libclient.LoadTeamOpts{Refresh: true})
+	require.NoError(t, err)
+	require.False(t, tw.VerifiedAt().IsZero())
+
+	_, err = offline.ResolveAndReindex(coldM, team.WrapNamed(*parsed), nil)
+	require.NoError(t, err)
+
+	_, err = libclient.LoadMeFromCache(coldM, coldAu)
+	require.NoError(t, err)
+
+	roster, err := tw.ExportToRoster()
+	require.NoError(t, err)
+	require.NotNil(t, roster)
+
+	require.Equal(t, before, snapshotSoftDB(t, coldM),
+		"an offline read must not write to local state")
 }
