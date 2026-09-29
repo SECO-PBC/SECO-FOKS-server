@@ -25,6 +25,9 @@ enum DataType {
     UsernameLookup @15;
     UsernameCacheEntry @16; // soft-state UID -> username memo; see libclient.UsernameLoader
     TeamnameCacheEntry @17; // soft-state TeamID -> teamname memo; see libclient.TeamnameLoader
+    HostPublicZone @18;    // verified public zone cached per host, for offline starts
+    UserCertChain @19;     // issued client-cert chain cached per (user, key), for offline starts
+    TeamNameLookup @20;    // FQTeamString -> FQTeam; offline name resolution (see TeamMinder)
 
     KVRealm @65;
     KVNSRoot @66;
@@ -44,9 +47,6 @@ enum DataType {
     RTOutboxEntry @102;    // one queued/failed outgoing message, keyed by msgID
     RTOutboxIndex @103;    // singleton index of outbox entries; see librt outbox
     RTReadThroughPending @104; // singleton set of read-marks queued while offline
-    HostPublicZone @105;   // verified public zone cached per host, for offline starts
-    UserCertChain @106;    // issued client-cert chain cached per (user, key), for offline starts
-    TeamNameLookup @107;   // FQTeamString -> FQTeam; offline name resolution (see TeamMinder)
 }
 
 // The client-cert chain the reg server issued for one of the user's keys

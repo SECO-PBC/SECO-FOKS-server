@@ -136,11 +136,11 @@ Each layer caches only material a verified load produced, in the client's soft
 
 | Layer | Local state | Offline entry point |
 |---|---|---|
-| Host identity | `HostPublicZone @105` — the public zone, cached after signature verification | probe rehydrates when a network probe fails on transport |
-| Transport | `UserCertChain @106` — the reg-issued client-cert chain, public material only, per key | mTLS clients construct offline; an expired chain fails the handshake, which reads as offline |
+| Host identity | `HostPublicZone @18` — the public zone, cached after signature verification | probe rehydrates when a network probe fails on transport |
+| Transport | `UserCertChain @19` — the reg-issued client-cert chain, public material only, per key | mTLS clients construct offline; an expired chain fails the handshake, which reads as offline |
 | User | `UserSigchainState @9` plus locally decryptable PUK parcels | `LoadMeFromCache`; `PopulateWithDevkey` falls back to it |
 | Team | `TeamChainState @13` — keyring, roster, historical senders, name | `LoadTeamFromCache`; `TeamLoader.Run` falls back on transport failure |
-| Team names | `TeamNameLookup @107` — `FQTeamString` → `FQTeam`, written through on every exploration and load | `resolveTeamNamedFromDB`, consulted only when exploration is impossible |
+| Team names | `TeamNameLookup @20` — `FQTeamString` → `FQTeam`, written through on every exploration and load | `resolveTeamNamedFromDB`, consulted only when exploration is impossible |
 | Freshness | `TeamChainState.verifiedAt @15` | stamped on every successful online load; never by an offline one |
 
 Supporting behaviour: the chain loader does not retry transport failures on the

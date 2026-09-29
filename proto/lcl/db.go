@@ -66,6 +66,9 @@ const (
 	DataType_UsernameLookup       DataType = 15
 	DataType_UsernameCacheEntry   DataType = 16
 	DataType_TeamnameCacheEntry   DataType = 17
+	DataType_HostPublicZone       DataType = 18
+	DataType_UserCertChain        DataType = 19
+	DataType_TeamNameLookup       DataType = 20
 	DataType_KVRealm              DataType = 65
 	DataType_KVNSRoot             DataType = 66
 	DataType_KVDir                DataType = 67
@@ -83,9 +86,6 @@ const (
 	DataType_RTOutboxEntry        DataType = 102
 	DataType_RTOutboxIndex        DataType = 103
 	DataType_RTReadThroughPending DataType = 104
-	DataType_HostPublicZone       DataType = 105
-	DataType_UserCertChain        DataType = 106
-	DataType_TeamNameLookup       DataType = 107
 )
 
 var DataTypeMap = map[string]DataType{
@@ -106,6 +106,9 @@ var DataTypeMap = map[string]DataType{
 	"UsernameLookup":       15,
 	"UsernameCacheEntry":   16,
 	"TeamnameCacheEntry":   17,
+	"HostPublicZone":       18,
+	"UserCertChain":        19,
+	"TeamNameLookup":       20,
 	"KVRealm":              65,
 	"KVNSRoot":             66,
 	"KVDir":                67,
@@ -123,9 +126,6 @@ var DataTypeMap = map[string]DataType{
 	"RTOutboxEntry":        102,
 	"RTOutboxIndex":        103,
 	"RTReadThroughPending": 104,
-	"HostPublicZone":       105,
-	"UserCertChain":        106,
-	"TeamNameLookup":       107,
 }
 var DataTypeRevMap = map[DataType]string{
 	0:   "None",
@@ -145,6 +145,9 @@ var DataTypeRevMap = map[DataType]string{
 	15:  "UsernameLookup",
 	16:  "UsernameCacheEntry",
 	17:  "TeamnameCacheEntry",
+	18:  "HostPublicZone",
+	19:  "UserCertChain",
+	20:  "TeamNameLookup",
 	65:  "KVRealm",
 	66:  "KVNSRoot",
 	67:  "KVDir",
@@ -162,9 +165,6 @@ var DataTypeRevMap = map[DataType]string{
 	102: "RTOutboxEntry",
 	103: "RTOutboxIndex",
 	104: "RTReadThroughPending",
-	105: "HostPublicZone",
-	106: "UserCertChain",
-	107: "TeamNameLookup",
 }
 
 type DataTypeInternal__ DataType
