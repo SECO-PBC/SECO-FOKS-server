@@ -233,8 +233,17 @@ removal MAC (`team_minder_edit.go:565`).
     fetch (`server/engine/team_admin.go:963`);
   - **a demotion to `m/0`** boxes that member's key.
 
-  Pre-existing members are therefore covered by the opt-in link itself. There
-  is no window in which a Steward cannot remove one.
+  Pre-existing members are therefore covered by the opt-in link itself. The
+  server stores the link and its boxes in one transaction, so an interrupted
+  opt-in leaves either both or neither. There is no window in which a Steward
+  cannot remove a pre-existing member.
+
+  **With own-invitees (§5.8), SECO never needs these fill-in boxes for
+  Steward removals.** A Steward can remove only members they added, and each
+  of their adds boxes its own key. The fill-in exists for upstream, where a
+  Steward may remove any plain member. The fork keeps it anyway, because the
+  invariant is one rule for every team, and dropping it would make a
+  fork-only difference in shared code.
 - **Fetch:** a new RPC returns `rk_delegate` to a logged-in caller whose
   current role is at or above the floor, only for members at `m/0` or below,
   and only boxes for the current floor role. Admins keep the existing token
