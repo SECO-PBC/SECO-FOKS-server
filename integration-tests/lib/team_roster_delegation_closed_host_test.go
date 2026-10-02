@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/foks-proj/go-foks/client/libclient"
+	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/stretchr/testify/require"
@@ -17,7 +18,7 @@ import (
 // tests use an open vhost, and the closed-host add tests add as an admin, so
 // neither covers a delegate adding by UID through the team's view token.
 
-// closedHostAddAs adds member by UID to c's team as actor, at dstRole when set.
+// addAs adds member by UID to c's team as actor, at dstRole when set.
 func (c *closedHostTeam) addAs(t *testing.T, actor *TestUser, member *TestUser, dstRole *proto.Role) error {
 	mc, tm := memberMinder(t, c.tew, actor)
 	err := tm.Add(mc, lcl.TeamAddArg{
@@ -31,20 +32,27 @@ func (c *closedHostTeam) addAs(t *testing.T, actor *TestUser, member *TestUser, 
 	return err
 }
 
-// rosterHas reports whether viewer, loading the team fresh, sees member in
-// the roster at role.
-func (c *closedHostTeam) rosterHas(t *testing.T, viewer *TestUser, member *TestUser, role proto.Role) bool {
+// rosterRole is member's role in the roster viewer sees when loading the
+// team fresh, or nil when member is not on it.
+func (c *closedHostTeam) rosterRole(t *testing.T, viewer *TestUser, member *TestUser) *proto.Role {
 	mc, tm := memberMinder(t, c.tew, viewer)
 	roster, err := tm.ListTeamRoster(mc, *c.tm.ToFQTeamParsed(t))
 	require.NoError(t, err)
 	for _, m := range roster.Members {
 		if m.Mem.Fqp.Party.Eq(member.uid.ToPartyID()) {
-			eq, err := m.DstRole.Eq(role)
-			require.NoError(t, err)
-			return eq
+			return &m.DstRole
 		}
 	}
-	return false
+	return nil
+}
+
+// requireRole asserts viewer sees member on the roster at role.
+func (c *closedHostTeam) requireRole(t *testing.T, viewer *TestUser, member *TestUser, role proto.Role) {
+	got := c.rosterRole(t, viewer, member)
+	require.NotNil(t, got, "member not on the roster")
+	eq, err := got.Eq(role)
+	require.NoError(t, err)
+	require.True(t, eq, "member at %v, want %v", *got, role)
 }
 
 // The owner promotes a plain member to the floor and sets the floor in one
@@ -82,7 +90,16 @@ func TestDelegateAddsByUIDOnClosedHost(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NotNil(t, tr)
-	require.True(t, c.rosterHas(t, c.alice, newbie, proto.DefaultRole))
+	c.requireRole(t, c.alice, newbie, proto.DefaultRole)
+
+	// Closed viewership still holds for a delegate: someone who never
+	// granted the team a view permission cannot be added.
+	stranger := c.newUser(t, false)
+	err = c.addAs(t, delg, stranger, nil)
+	require.Error(t, err)
+	var cle core.ChainLoaderError
+	require.ErrorAs(t, err, &cle)
+	require.ErrorIs(t, cle.Err, core.PermissionError("no view permission"))
 
 	md, tmd := memberMinder(t, c.tew, delg)
 	err = tmd.TeamChangeRoles(md, lcl.TeamChangeRolesArg{
@@ -91,7 +108,7 @@ func TestDelegateAddsByUIDOnClosedHost(t *testing.T) {
 	})
 	require.NoError(t, err)
 	c.tew.DirectDoubleMerklePokeInTest(t)
-	require.False(t, c.rosterHas(t, c.alice, newbie, proto.DefaultRole))
+	require.Nil(t, c.rosterRole(t, c.alice, newbie))
 }
 
 // The owner demotes an admin to the floor in the same link that sets the
@@ -119,11 +136,20 @@ func TestAdminDemotedToFloorOnClosedHost(t *testing.T) {
 	// A change made after the demotion is visible to the demoted member.
 	carol := c.newUser(t, true)
 	require.NoError(t, c.addAs(t, c.alice, carol, nil))
-	require.True(t, c.rosterHas(t, leo, carol, proto.DefaultRole))
-	require.True(t, c.rosterHas(t, leo, leo, proto.NewRoleWithMember(100)))
+	c.requireRole(t, leo, carol, proto.DefaultRole)
+	c.requireRole(t, leo, leo, proto.NewRoleWithMember(100))
 
-	// And the demoted member can act as a delegate.
+	// The demoted member can act as a delegate...
 	dave := c.newUser(t, true)
 	require.NoError(t, c.addAs(t, leo, dave, nil))
-	require.True(t, c.rosterHas(t, c.alice, dave, proto.DefaultRole))
+	c.requireRole(t, c.alice, dave, proto.DefaultRole)
+
+	// ...but no longer as an admin: a role change they sign is refused.
+	ml, tml := memberMinder(t, c.tew, leo)
+	err = tml.TeamChangeRoles(ml, lcl.TeamChangeRolesArg{
+		Team:    *c.tm.ToFQTeamParsed(t),
+		Changes: []lcl.RoleChange{c.tm.uidChange(t, carol, "m/100")},
+	})
+	require.Error(t, err)
+	c.requireRole(t, c.alice, carol, proto.DefaultRole)
 }
