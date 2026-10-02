@@ -314,7 +314,8 @@ team : {
     // Allows links that set a delegation floor. Default false.
     roster_delegation : true,
 
-    // Role names, passed to clients by GetTeamConfig; FOKS never checks them.
+    // Role names, passed to clients by GetTeamConfig while roster_delegation
+    // is on; FOKS never checks them.
     role_labels : {
         steward : "m/100",
     },
@@ -331,14 +332,17 @@ team : {
 ```
 
 - `roster_delegation` is the one switch: turn it on for staging when ready.
-- `GetTeamConfig` (`server/engine/team_admin.go:1070`) returns `role_labels`
+- `GetTeamConfig` (`server/engine/team_admin.go:1206`) returns `role_labels`
   and `floor_actions` as new trailing fields of `TeamConfig`. Older clients
   ignore them (tested, §6). Clients use them for display only; the server
   enforces.
 - `role_labels` are sent only while `roster_delegation` is on. A labelled
   role can't be given out while the switch is off (setting the floor is
   refused), so a client can read "no labels" as "no delegated roles on this
-  host" and hide them, without a separate field for the switch.
+  host" and hide them, without a separate field for the switch. A client
+  that reads the config through libclient's `TeamMinder.loadConfig` gets a
+  copy cached for the life of the process, so it sees the switch flip only
+  after a restart.
 - **Why the floor and not a fixed role:** the config applies to every team on
   the host. A fixed `m/100` would stop plain members of a DM team from
   creating the DM's channel. Tying the actions to the team's own floor
