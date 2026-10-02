@@ -56,6 +56,10 @@ type TeamEditor struct {
 	rtps    []RemoteTokenPackage
 	cmd     []proto.ChangeMetadata
 
+	// Removal keys re-boxed for the delegation floor, owed by a link that
+	// sets the floor or demotes a member to m/0 or below (buildDelegateFills).
+	delegateFills []rem.TeamDelegateRemovalKeyFill
+
 	// testOpts bundles test-only overrides; production code leaves it nil.
 	testOpts *teamEditorTestOpts
 
@@ -502,12 +506,68 @@ func (t *TeamEditor) makeChangeMap(m MetaContext) error {
 	return nil
 }
 
+// postDelegationFloor is the team's delegation floor once this link is in:
+// the one this link's metadata sets, if any, else the loaded team's.
+func (t *TeamEditor) postDelegationFloor() (*core.RoleKey, error) {
+	for _, md := range t.cmd {
+		typ, err := md.GetT()
+		if err != nil {
+			return nil, err
+		}
+		if typ == proto.ChangeType_RosterDelegationFloor {
+			flr := md.Rosterdelegationfloor()
+			return team.RosterDelegationFloorActive(&flr)
+		}
+	}
+	if t.tw == nil {
+		return nil, nil
+	}
+	return team.RosterDelegationFloorActive(t.tw.RosterDelegationFloor())
+}
+
+// floorBoxer returns a boxer for the delegation floor role's PTK: the new
+// key if this very link creates or rotates it (the first-delegate link),
+// else the current public key from the team chain.
+func (t *TeamEditor) floorBoxer(m MetaContext, floor core.RoleKey) (*core.SPSBoxer, error) {
+	for _, ptk := range t.newPtks {
+		rk, err := core.ImportRole(ptk.GetRole())
+		if err != nil {
+			return nil, err
+		}
+		if rk.Eq(floor) {
+			return core.PublicizeToSPSBoxer(ptk, t.cp.FQParty())
+		}
+	}
+	if t.tw == nil {
+		return nil, core.KeyNotFoundError{Which: "delegation floor PTK"}
+	}
+	sps, err := t.tw.KeyRing().CurrentPublicSuiteAtRole(floor)
+	if err != nil {
+		return nil, err
+	}
+	if sps == nil {
+		return nil, core.KeyNotFoundError{Which: "delegation floor PTK"}
+	}
+	return &core.SPSBoxer{SharedPublicSuite: *sps, Parent: t.cp.FQParty()}, nil
+}
+
 func (t *TeamEditor) makeRemovalKeys(m MetaContext) error {
 
 	var removalKeys []rem.TeamRemovalBoxData
 	admin, err := t.newAdminBoxer(m)
 	if err != nil {
 		return err
+	}
+	floor, err := t.postDelegationFloor()
+	if err != nil {
+		return err
+	}
+	var delegate *core.SPSBoxer
+	if floor != nil {
+		delegate, err = t.floorBoxer(m, *floor)
+		if err != nil {
+			return err
+		}
 	}
 
 	for _, newMem := range t.sched.Additions {
@@ -519,10 +579,13 @@ func (t *TeamEditor) makeRemovalKeys(m MetaContext) error {
 		if err != nil {
 			return err
 		}
+		// The delegate box is only required for plain members, but boxing
+		// for every addition in a floor team is harmless and simpler.
 		box, key, err := team.NewBoxedTeamRemovalKey(
 			t.signPriv,
 			admin,
 			&kandr.key,
+			delegate,
 			rem.TeamRemovalKeyMetadata{
 				Tm:      t.fqTeam(),
 				Member:  *party,
@@ -588,18 +651,39 @@ func (t *TeamEditor) prepareRemoval(
 	if err != nil {
 		return nil, err
 	}
-	arg := rem.LoadRemovalKeyBoxForTeamAdminArg{
-		Tok:     *t.tok,
-		Member:  *fqparty,
-		SrcRole: mid.SrcRole.Export(),
-	}
-	cli, err := t.teamAdminClient(m)
-	if err != nil {
-		return nil, err
-	}
-	box, err := cli.LoadRemovalKeyBoxForTeamAdmin(m.Ctx(), arg)
-	if err != nil {
-		return nil, err
+	var box proto.TeamRemovalKeyBox
+	if t.tok != nil {
+		cli, err := t.teamAdminClient(m)
+		if err != nil {
+			return nil, err
+		}
+		box, err = cli.LoadRemovalKeyBoxForTeamAdmin(m.Ctx(), rem.LoadRemovalKeyBoxForTeamAdminArg{
+			Tok:     *t.tok,
+			Member:  *fqparty,
+			SrcRole: mid.SrcRole.Export(),
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// A delegated remover has no admin token; the server hands out the
+		// delegate box on the strength of their roster role.
+		au, err := t.activeUser(m)
+		if err != nil {
+			return nil, err
+		}
+		mcli, err := au.TeamMemberClient(m)
+		if err != nil {
+			return nil, err
+		}
+		box, err = mcli.LoadDelegatedRemovalKeyBox(m.Ctx(), rem.LoadDelegatedRemovalKeyBoxArg{
+			Team:    t.fqTeam().Team,
+			Member:  *fqparty,
+			SrcRole: mid.SrcRole.Export(),
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	rk, err := core.ImportRole(box.EncKey.Role)
 	if err != nil {
@@ -659,9 +743,6 @@ func (t *TeamEditor) prepareAllRemovals(m MetaContext) error {
 
 	if len(t.sched.Removals) == 0 {
 		return nil
-	}
-	if t.tok == nil {
-		return core.InternalError("no token, which is needed to load removal keys")
 	}
 	var rks []rem.TeamRemovalAndComm
 	for _, r := range t.sched.Removals {
@@ -728,6 +809,120 @@ func (t *TeamEditor) boxAllRemoteMemberViewTokens(m MetaContext) error {
 	return nil
 }
 
+// buildDelegateFills re-boxes existing members' removal keys for the floor
+// role, where this link owes them: every current plain member when the
+// link sets or changes the floor, and the member in question when the link
+// demotes someone to m/0 or below in a floor team. Only an admin can owe
+// fills -- delegated signers can neither set the floor nor demote -- and
+// only an admin can open the rk_team boxes they are built from.
+func (t *TeamEditor) buildDelegateFills(m MetaContext) error {
+	floor, err := t.postDelegationFloor()
+	if err != nil {
+		return err
+	}
+	if floor == nil || t.tok == nil || t.tw == nil {
+		return nil
+	}
+
+	linkSetsFloor := false
+	for _, md := range t.cmd {
+		typ, err := md.GetT()
+		if err != nil {
+			return err
+		}
+		if typ == proto.ChangeType_RosterDelegationFloor {
+			linkSetsFloor = true
+		}
+	}
+
+	var raws []rem.TeamDelegateRemovalKeyFill
+	cli, err := t.teamAdminClient(m)
+	if err != nil {
+		return err
+	}
+	if linkSetsFloor {
+		raws, err = cli.LoadRemovalKeysForDelegation(m.Ctx(), *t.tok)
+		if err != nil {
+			return err
+		}
+	} else {
+		// Demotions to m/0 or below of members already in the roster.
+		plainCeiling := core.RoleKey{Typ: proto.RoleType_MEMBER, Lev: 0}
+		for _, chng := range t.changes {
+			dst, err := core.ImportRole(chng.DstRole)
+			if err != nil {
+				return err
+			}
+			if dst.Typ != proto.RoleType_MEMBER || plainCeiling.LessThan(*dst) {
+				continue
+			}
+			mid, err := team.MemberRoleToMemberID(&chng, t.cp.FQParty().Host)
+			if err != nil {
+				return err
+			}
+			if _, existing := t.pre.MemberInfoFor(*mid); !existing {
+				continue // an addition: makeRemovalKeys boxed it already
+			}
+			fqp, err := mid.Fqe.Unfix().FQParty()
+			if err != nil {
+				return err
+			}
+			box, err := cli.LoadRemovalKeyBoxForTeamAdmin(m.Ctx(), rem.LoadRemovalKeyBoxForTeamAdminArg{
+				Tok:     *t.tok,
+				Member:  *fqp,
+				SrcRole: mid.SrcRole.Export(),
+			})
+			if err != nil {
+				return err
+			}
+			raws = append(raws, rem.TeamDelegateRemovalKeyFill{
+				Member:  *fqp,
+				SrcRole: mid.SrcRole.Export(),
+				Box:     box,
+			})
+		}
+	}
+	if len(raws) == 0 {
+		return nil
+	}
+
+	boxer, err := t.floorBoxer(m, *floor)
+	if err != nil {
+		return err
+	}
+	for _, raw := range raws {
+		rkRole, err := core.ImportRole(raw.Box.EncKey.Role)
+		if err != nil {
+			return err
+		}
+		dec := t.tw.KeyRing().PrivateKeyForRoleAt(*rkRole, raw.Box.EncKey.Gen)
+		if dec == nil {
+			return core.KeyNotFoundError{Which: "PTK for removal key box"}
+		}
+		var payload rem.TeamRemovalKeyBoxPayload
+		_, err = dec.UnboxFor(&payload, raw.Box.Box, nil)
+		if err != nil {
+			return err
+		}
+		if !t.fqTeam().Eq(payload.Md.Tm) {
+			return core.ValidationError("team mismatch in removal key unbox")
+		}
+		if !raw.Member.Eq(payload.Md.Member) {
+			return core.ValidationError("member mismatch in removal key unbox")
+		}
+		newBox, err := team.BoxRemovalKeyForReceiver(t.signPriv, boxer, payload.Md, &payload.Key)
+		if err != nil {
+			return err
+		}
+		t.delegateFills = append(t.delegateFills, rem.TeamDelegateRemovalKeyFill{
+			Member:  raw.Member,
+			SrcRole: raw.SrcRole,
+			Box:     *newBox,
+		})
+	}
+	return nil
+}
+
 func (t *TeamEditor) post(m MetaContext) error {
 	arg := rem.EditTeamArg{
 		Link:             *t.mlr.Link,
@@ -738,6 +933,8 @@ func (t *TeamEditor) post(m MetaContext) error {
 			RemovalKeys:            t.removalKeys,
 			Removals:               t.removals,
 			NewKeyOnRotate:         t.newKeyOnRotate,
+
+			DelegateRemovalKeyFills: t.delegateFills,
 		},
 		Tok: t.tok,
 	}
@@ -866,6 +1063,11 @@ func (t *TeamEditor) Run(m MetaContext) error {
 	// needs to be done prior to makeTeamLink, since we added the removal key commitments, which then
 	// get signed into the link.
 	err = t.makeRemovalKeys(m)
+	if err != nil {
+		return err
+	}
+
+	err = t.buildDelegateFills(m)
 	if err != nil {
 		return err
 	}

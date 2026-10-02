@@ -62,7 +62,7 @@ func TestAdminBoxerFromPublicKeys(t *testing.T) {
 		memberRcvr, err := core.PublicizeToSPSBoxer(sender, bella.FQUser().FQParty())
 		require.NoError(t, err)
 		teamRcvr := &core.SPSBoxer{SharedPublicSuite: *pub, Parent: tm.FQTeam(t).FQParty()}
-		box, key, err := team.NewBoxedTeamRemovalKey(sender, teamRcvr, memberRcvr,
+		box, key, err := team.NewBoxedTeamRemovalKey(sender, teamRcvr, memberRcvr, nil,
 			rem.TeamRemovalKeyMetadata{
 				Tm:      tm.FQTeam(t),
 				Member:  bella.FQUser().FQParty(),
