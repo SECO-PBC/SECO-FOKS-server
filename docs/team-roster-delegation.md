@@ -535,11 +535,8 @@ Branch each upstream PR from `upstream/main`, stacked where noted.
 ## 11. Open questions
 
 - **Not this change:** the per-community "who may add to a private channel"
-  policy (`CHANNELS.md` 3.1) is not enforced by the server, which allows the
+  policy is not enforced by the server, which allows the
   channel owner or an admin. It is worth its own change.
 - **Follow-up:** should a Steward be allowed to process the `TeamLeaveSelf` of
   a member they added? It would need the server or chain to read the member's
   own membership chain, which has not been checked.
-- **Upstream:** does the maintainer accept a member-signed roster change at
-  all? No issue has been opened. The plan is to propose working code
-  (PRs 1–4).
