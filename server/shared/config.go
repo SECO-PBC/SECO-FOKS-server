@@ -185,6 +185,13 @@ type TeamConfigger interface {
 	// floor. While false (the default), the server refuses them, so a host
 	// operator decides when teams may start using delegation at all.
 	RosterDelegation() bool
+	// RoleLabels names roles for clients ("delegate" = m/100). Served
+	// verbatim by GetTeamConfig; the server never checks them.
+	RoleLabels() (map[string]proto.Role, error)
+	// FloorActions lists the actions that, in a team with a delegation
+	// floor, require at least the floor role. Admins always pass, and
+	// teams without a floor keep each action's built-in rule.
+	FloorActions() []string
 }
 
 type DefaultAutocertServiceConfig struct{}
@@ -364,6 +371,10 @@ type DefaultTeamConfig struct{}
 
 func (d DefaultTeamConfig) MaxRoles() uint         { return 0x10 }
 func (d DefaultTeamConfig) RosterDelegation() bool { return false }
+func (d DefaultTeamConfig) RoleLabels() (map[string]proto.Role, error) {
+	return nil, nil
+}
+func (d DefaultTeamConfig) FloorActions() []string { return nil }
 
 var _ TeamConfigger = DefaultTeamConfig{}
 

@@ -4197,12 +4197,64 @@ func (t *TeamVOBearerTokenReqAndRole) Decode(dec rpc.Decoder) error {
 
 func (t *TeamVOBearerTokenReqAndRole) Bytes() []byte { return nil }
 
+type RoleLabel struct {
+	Name string
+	Role lib.Role
+}
+type RoleLabelInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Name    *string
+	Role    *lib.RoleInternal__
+}
+
+func (r RoleLabelInternal__) Import() RoleLabel {
+	return RoleLabel{
+		Name: (func(x *string) (ret string) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Name),
+		Role: (func(x *lib.RoleInternal__) (ret lib.Role) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Role),
+	}
+}
+func (r RoleLabel) Export() *RoleLabelInternal__ {
+	return &RoleLabelInternal__{
+		Name: &r.Name,
+		Role: r.Role.Export(),
+	}
+}
+func (r *RoleLabel) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RoleLabel) Decode(dec rpc.Decoder) error {
+	var tmp RoleLabelInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RoleLabel) Bytes() []byte { return nil }
+
 type TeamConfig struct {
-	MaxRoles uint64
+	MaxRoles     uint64
+	RoleLabels   []RoleLabel
+	FloorActions []string
 }
 type TeamConfigInternal__ struct {
-	_struct  struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	MaxRoles *uint64
+	_struct      struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	MaxRoles     *uint64
+	RoleLabels   *[](*RoleLabelInternal__)
+	FloorActions *[](string)
 }
 
 func (t TeamConfigInternal__) Import() TeamConfig {
@@ -4213,11 +4265,62 @@ func (t TeamConfigInternal__) Import() TeamConfig {
 			}
 			return *x
 		})(t.MaxRoles),
+		RoleLabels: (func(x *[](*RoleLabelInternal__)) (ret []RoleLabel) {
+			if x == nil || len(*x) == 0 {
+				return nil
+			}
+			ret = make([]RoleLabel, len(*x))
+			for k, v := range *x {
+				if v == nil {
+					continue
+				}
+				ret[k] = (func(x *RoleLabelInternal__) (ret RoleLabel) {
+					if x == nil {
+						return ret
+					}
+					return x.Import()
+				})(v)
+			}
+			return ret
+		})(t.RoleLabels),
+		FloorActions: (func(x *[](string)) (ret []string) {
+			if x == nil || len(*x) == 0 {
+				return nil
+			}
+			ret = make([]string, len(*x))
+			for k, v := range *x {
+				ret[k] = (func(x *string) (ret string) {
+					if x == nil {
+						return ret
+					}
+					return *x
+				})(&v)
+			}
+			return ret
+		})(t.FloorActions),
 	}
 }
 func (t TeamConfig) Export() *TeamConfigInternal__ {
 	return &TeamConfigInternal__{
 		MaxRoles: &t.MaxRoles,
+		RoleLabels: (func(x []RoleLabel) *[](*RoleLabelInternal__) {
+			if len(x) == 0 {
+				return nil
+			}
+			ret := make([](*RoleLabelInternal__), len(x))
+			for k, v := range x {
+				ret[k] = v.Export()
+			}
+			return &ret
+		})(t.RoleLabels),
+		FloorActions: (func(x []string) *[](string) {
+			if len(x) == 0 {
+				return nil
+			}
+			ret := make([](string), len(x))
+			copy(ret, x)
+			return &ret
+		})(t.FloorActions),
 	}
 }
 func (t *TeamConfig) Encode(enc rpc.Encoder) error {

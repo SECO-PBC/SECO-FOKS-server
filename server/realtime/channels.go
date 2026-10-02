@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/foks-proj/go-foks/lib/core"
+	"github.com/foks-proj/go-foks/lib/team"
 	"github.com/foks-proj/go-foks/server/shared"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -475,6 +476,28 @@ func (c *channelMaker) checkPerms(m shared.MetaContext) error {
 	}
 	if c.md.Tier == proto.RTChannelTier_Admin && !c.dstRole.IsAdminOrAbove() {
 		return core.PermissionError("user role too low to make an admin tier channel")
+	}
+	// In a team with a roster delegation floor, the host can require the
+	// floor role for channel creation (rt.channel.create_open). Teams
+	// without a floor keep the rule above: any member whose role clears
+	// the channel's own roles.
+	tcfg, err := m.G().Config().TeamConfig(m.Ctx())
+	if err != nil {
+		return err
+	}
+	fa := tcfg.FloorActions()
+	if len(fa) > 0 {
+		flr, err := shared.LoadRosterDelegationFloor(m, c.userdb, c.md.ParentTeam)
+		if err != nil {
+			return err
+		}
+		floor, err := team.RosterDelegationFloorActive(flr)
+		if err != nil {
+			return err
+		}
+		if floorActionGated(fa, FloorActionChannelCreateOpen, floor, *c.dstRole) {
+			return core.PermissionError("channel creation requires the team's roster delegation floor role")
+		}
 	}
 	// Inventory row 11: only admins/leaders may create a private channel (Q2b).
 	return authorizeChannelCreate(c.dstRole, c.md.Private)
