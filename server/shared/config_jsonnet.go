@@ -206,7 +206,10 @@ type CKSConfigJSON struct {
 }
 
 type TeamConfigJSON struct {
-	MaxRoles_ uint `json:"max_roles"`
+	MaxRoles_         uint              `json:"max_roles"`
+	RosterDelegation_ bool              `json:"roster_delegation"`
+	RoleLabels_       map[string]string `json:"role_labels"`
+	FloorActions_     []string          `json:"floor_actions"`
 }
 
 type PKIXConfigJSON struct {
@@ -922,6 +925,35 @@ func (t *TeamConfigJSON) MaxRoles() uint {
 		return DefaultTeamConfig{}.MaxRoles()
 	}
 	return t.MaxRoles_
+}
+
+func (t *TeamConfigJSON) RosterDelegation() bool {
+	if t == nil {
+		return DefaultTeamConfig{}.RosterDelegation()
+	}
+	return t.RosterDelegation_
+}
+
+func (t *TeamConfigJSON) RoleLabels() (map[string]proto.Role, error) {
+	if t == nil || len(t.RoleLabels_) == 0 {
+		return nil, nil
+	}
+	ret := make(map[string]proto.Role, len(t.RoleLabels_))
+	for name, rs := range t.RoleLabels_ {
+		role, err := proto.RoleString(rs).Parse()
+		if err != nil {
+			return nil, err
+		}
+		ret[name] = *role
+	}
+	return ret, nil
+}
+
+func (t *TeamConfigJSON) FloorActions() []string {
+	if t == nil {
+		return nil
+	}
+	return t.FloorActions_
 }
 
 func (c *ConfigJSonnet) TeamConfig(ctx context.Context) (TeamConfigger, error) {

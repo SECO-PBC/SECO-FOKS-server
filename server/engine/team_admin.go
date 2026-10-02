@@ -6,6 +6,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/lib/team"
@@ -39,6 +40,10 @@ type teamEditor struct {
 	prev      *proto.BaseChainer
 	res       rem.EditTeamRes
 	tokTeamID *proto.TeamID
+
+	// The link signer's role in the PRE-link roster (nil when not a member,
+	// or on team create, where the signer is the founding owner).
+	signerPreRole *core.RoleKey
 }
 
 type teamCreatorNameArg struct {
@@ -366,6 +371,85 @@ func (c *teamEditor) checkAndInsertRemovals(
 	)
 }
 
+// insertRosterDelegationFloor stores the floor when this link carries one.
+// It runs after insertPTKs so that the key check below sees keys this link
+// itself creates. The link-open code already validated the value (member
+// role at viz level >= 1, or NONE).
+func (c *teamEditor) insertRosterDelegationFloor(
+	m shared.MetaContext,
+) error {
+	flr := c.openres.RosterDelegationFloor
+	if flr == nil {
+		return nil
+	}
+	if c.teamID.IsAdHocTeam() {
+		return core.TeamError("ad-hoc teams cannot have a roster delegation floor")
+	}
+	tcfg, err := m.G().Config().TeamConfig(m.Ctx())
+	if err != nil {
+		return err
+	}
+	if !tcfg.RosterDelegation() {
+		return core.PermissionError("roster delegation is not enabled on this host")
+	}
+	active, err := team.RosterDelegationFloorActive(flr)
+	if err != nil {
+		return err
+	}
+	if active != nil {
+		// A floor nobody can ever act at is a footgun, so require the floor
+		// role to have a PTK once this link is in: someone holds the role,
+		// or this same link grants it.
+		ok, err := shared.TeamHasPTKAtRole(m, c.tx, c.teamID, *flr)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return core.TeamError("roster delegation floor role has no PTK; grant the role in or before the link that sets the floor")
+		}
+	}
+	return shared.InsertRosterDelegationFloor(m, c.tx, c.teamID, c.seqno, *flr)
+}
+
+// processDelegateRemovalKeys runs last in a link's processing, once the
+// roster rows, removal-key rows and removals are all in: it applies any
+// delegate-box fills the link carried, then checks the floor-team
+// invariant -- every active plain member has a delegate box for the
+// current floor role. Teams without an active floor skip all of it, and
+// may not send fills.
+func (c *teamEditor) processDelegateRemovalKeys(
+	m shared.MetaContext,
+) error {
+	flr, err := shared.LoadRosterDelegationFloor(m, c.tx, c.teamID)
+	if err != nil {
+		return err
+	}
+	floor, err := team.RosterDelegationFloorActive(flr)
+	if err != nil {
+		return err
+	}
+	fills := c.arg.Obd.DelegateRemovalKeyFills
+	if floor == nil {
+		if len(fills) > 0 {
+			return core.TeamError("delegate removal key fills on a team with no delegation floor")
+		}
+		return nil
+	}
+	// Only the links that can owe fills (floor changes and demotions) are
+	// admin-signed, so a delegated signer never sends any; refusing theirs
+	// keeps a member below admin from overwriting valid delegate boxes.
+	if len(fills) > 0 && c.signerPreRole != nil && !c.signerPreRole.Typ.IsAdminOrAbove() {
+		return core.PermissionError("only an admin may send delegate removal key fills")
+	}
+	for _, fill := range fills {
+		err = shared.StoreDelegateRemovalKeyFill(m, c.tx, c.teamID, fill, *floor)
+		if err != nil {
+			return err
+		}
+	}
+	return shared.CheckDelegateRemovalKeyCoverage(m, c.tx, c.teamID, *floor)
+}
+
 func (c *teamEditor) checkMemberIndexRangesAgainstTeam(
 	m shared.MetaContext,
 ) error {
@@ -583,7 +667,17 @@ func (c *teamEditor) openLink(m shared.MetaContext) (*team.OpenTeamLinkRes, erro
 		return nil, err
 	}
 
-	res, err := team.OpenTeamLink(&c.arg.Link, hepks, &c.teamID, m.HostID().Id, roster)
+	// The floor in force before this link, from the server's own copy; it
+	// is read in the same transaction (and under the same team lock) as the
+	// roster, so a racing floor change serializes with this link.
+	floor, err := shared.LoadRosterDelegationFloor(m, c.tx, c.teamID)
+	if err != nil {
+		return nil, err
+	}
+	res, err := team.OpenTeamLink(&c.arg.Link, hepks, &c.teamID, m.HostID().Id, roster, floor)
+	if err == nil && roster != nil && res != nil {
+		c.signerPreRole, err = roster.RoleOfSigner(*res.Gc.Signer.KeyOwner, m.HostID().Id)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -716,6 +810,11 @@ func (c *teamEditor) runEditCommon(m shared.MetaContext) error {
 		return err
 	}
 
+	err = c.insertRosterDelegationFloor(m)
+	if err != nil {
+		return err
+	}
+
 	err = c.insertLocalViewPermission(m)
 	if err != nil {
 		return err
@@ -747,6 +846,17 @@ func (c *teamEditor) runEditCommon(m shared.MetaContext) error {
 	}
 
 	err = c.checkAndInsertRemovals(m)
+	if err != nil {
+		return err
+	}
+
+	err = c.processDelegateRemovalKeys(m)
+	if err != nil {
+		return err
+	}
+
+	// fork-only: delegated removers may only remove members they added.
+	err = c.checkDelegatedRemovalsOwnAdds(m)
 	if err != nil {
 		return err
 	}
@@ -979,6 +1089,32 @@ func (u *UserClientConn) LoadRemovalKeyBoxForTeamAdmin(
 	return ret, err
 }
 
+func (u *UserClientConn) LoadRemovalKeysForDelegation(
+	ctx context.Context,
+	tok rem.TeamBearerToken,
+) (
+	[]rem.TeamDelegateRemovalKeyFill,
+	error,
+) {
+	var ret []rem.TeamDelegateRemovalKeyFill
+	err := inTeamRoleContext(ctx, u, tok,
+		func(m shared.MetaContext, tid proto.TeamID, r proto.Role) error {
+			err := r.AssertAdminOrAbove(core.PermissionError("only admins can bulk-load removal keys"))
+			if err != nil {
+				return err
+			}
+			db, err := m.Db(shared.DbTypeUsers)
+			if err != nil {
+				return err
+			}
+			defer db.Release()
+			ret, err = shared.LoadRemovalKeysForDelegation(m, db, tid)
+			return err
+		},
+	)
+	return ret, err
+}
+
 func (u *UserClientConn) PostTeamRemoval(
 	ctx context.Context,
 	arg rem.PostTeamRemovalArg,
@@ -1075,6 +1211,19 @@ func (u *UserClientConn) GetTeamConfig(ctx context.Context) (rem.TeamConfig, err
 		return ret, err
 	}
 	ret.MaxRoles = uint64(tcfg.MaxRoles())
+	labels, err := tcfg.RoleLabels()
+	if err != nil {
+		return ret, err
+	}
+	names := make([]string, 0, len(labels))
+	for name := range labels {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		ret.RoleLabels = append(ret.RoleLabels, rem.RoleLabel{Name: name, Role: labels[name]})
+	}
+	ret.FloorActions = tcfg.FloorActions()
 	return ret, nil
 }
 

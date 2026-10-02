@@ -74,6 +74,20 @@ struct TeamRemovalBoxData {
     team @1 : lib.TeamRemovalKeyBox;
     member @2 : lib.TeamRemovalKeyBox;
     md @3 : TeamRemovalKeyMetadata;
+    // When the team has a roster delegation floor, the same key boxed for
+    // the floor role's PTK, so members at or above the floor can build the
+    // removal MAC without the admin PTK.
+    delegate @4 : Option(lib.TeamRemovalKeyBox);
+}
+
+// A removal key re-boxed for the floor role of a team that is turning on
+// (or changing) roster delegation: one per member the link owes a box for.
+// In loadRemovalKeysForDelegation results, box is the rk_team box instead,
+// for the admin to open and re-box.
+struct TeamDelegateRemovalKeyFill {
+    member @0 : lib.FQParty;
+    srcRole @1 : lib.Role;
+    box @2 : lib.TeamRemovalKeyBox;
 }
 
 struct TeamRemoval {
@@ -128,6 +142,12 @@ struct OffchainBoxData {
     // uploaded will be encrypted with a sender that's the new generation.
     // Mark that here.
     newKeyOnRotate @6 : lib.EntityID;
+
+    // Removal keys re-boxed for the delegation floor role, for members who
+    // predate it: sent with the link that sets or changes the floor (and
+    // with one that demotes a member to m/0 or below). The server requires
+    // every plain member of a floor team to have one.
+    delegateRemovalKeyFills @7 : List(TeamDelegateRemovalKeyFill);
 }
 
 protocol TeamLoader errors lib.Status @0xf9128579 {
@@ -194,6 +214,16 @@ protocol TeamMember errors lib.Status @0xbda3b9d3 {
         p @0 : GrantLocalViewPermissionPayload,
         sig @1 : SharedKeySig
     ) -> lib.PermissionToken;
+
+    // Fetch the delegate box of one member's removal key. For logged-in
+    // members at or above the team's delegation floor, and only for members
+    // at m/0 or below; there is no bearer token for non-admins, so the
+    // caller's role is read from the roster.
+    loadDelegatedRemovalKeyBox @3 (
+        team @0 : lib.TeamID,
+        member @1 : lib.FQParty,
+        srcRole @2 : lib.Role
+    ) -> lib.TeamRemovalKeyBox;
 }
 
 struct LocalPartyRole {
@@ -323,8 +353,21 @@ struct TeamVOBearerTokenReqAndRole {
     role @1 : lib.Role;
 }
 
+// A display name the host gives a role, e.g. "delegate" = m/100. The server
+// never checks these; clients use them to know which role to show, assign,
+// or set as a team's delegation floor.
+struct RoleLabel {
+    name @0 : Text;
+    role @1 : lib.Role;
+}
+
 struct TeamConfig {
     maxRoles @0 : Uint; // max number of roles a team can have
+    roleLabels @1 : List(RoleLabel);
+    // Actions that, in a team with a roster delegation floor, require at
+    // least the floor role (admins always pass). Teams without a floor
+    // keep each action's built-in rule.
+    floorActions @2 : List(Text);
 }
 
 // Used for creation of adhoc and real teams; no
@@ -436,6 +479,14 @@ protocol TeamAdmin errors lib.Status @0xdbe1ddbe {
     createTeamAdHoc @15 (
         carg @0 : CreateTeamCommonArg
     );
+
+    // The rk_team boxes of every current plain member (m/0 or below), for
+    // the admin who is about to set or change the delegation floor: they
+    // open each one and send the key back re-boxed for the floor role, in
+    // the same link (OffchainBoxData.delegateRemovalKeyFills).
+    loadRemovalKeysForDelegation @16 (
+        tok @0 : TeamBearerToken
+    ) -> List(TeamDelegateRemovalKeyFill);
 }
 
 protocol TeamGuest errors lib.Status @0xf6d7585c {

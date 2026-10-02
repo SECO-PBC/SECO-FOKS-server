@@ -43,3 +43,27 @@ func (u *UserClientConn) GrantLocalViewPermissionForTeam(
 }
 
 var _ rem.TeamMemberInterface = (*UserClientConn)(nil)
+
+// LoadDelegatedRemovalKeyBox hands a member at or above the team's roster
+// delegation floor the delegate box of one plain member's removal key. The
+// caller is the logged-in user; every check is against the current roster.
+func (u *UserClientConn) LoadDelegatedRemovalKeyBox(
+	ctx context.Context,
+	arg rem.LoadDelegatedRemovalKeyBoxArg,
+) (
+	proto.TeamRemovalKeyBox,
+	error,
+) {
+	var ret proto.TeamRemovalKeyBox
+	m := shared.NewMetaContextConn(ctx, u)
+	db, err := m.Db(shared.DbTypeUsers)
+	if err != nil {
+		return ret, err
+	}
+	defer db.Release()
+	box, err := shared.LoadDelegatedRemovalKeyBox(m, db, arg.Team, m.UID(), arg.Member, arg.SrcRole)
+	if err != nil {
+		return ret, err
+	}
+	return *box, nil
+}

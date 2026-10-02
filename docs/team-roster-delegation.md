@@ -1,8 +1,16 @@
 # Delegated roster management (the Steward role)
 
-**Status:** DRAFT, 2026-10-01. Design agreed by Stefan; reviewed against the
-code on 2026-09-30 and 2026-10-01 (claims marked *verified* or *not yet
-tested*). Not yet implemented.
+**Status:** BUILT, 2026-10-02 (this PR). Design agreed by Stefan; reviewed
+against the code 2026-09-30/10-01. §10's PRs 1-2 are proposed upstream as
+[#382](https://github.com/foks-proj/go-foks/pull/382) and
+[#383](https://github.com/foks-proj/go-foks/pull/383); PRs 3-5 are built and
+queued (`SECO-UPSTREAM.md`); F1 and F2 are in this fork PR. Upstream-facing
+code and PRs say "delegate", never Steward or SECO. Both items marked *not
+yet tested* below are now pinned by tests (`TestAdminBoxerFromPublicKeys`;
+`TestDelegateOpensOldGenerationDelegateBox`). §5.8 was decided YES
+(own-invitees, 2026-10-01), which narrows upstream's removal semantics in
+the fork; the end-to-end and old-generation tests carried from the upstream
+series change expectations here accordingly.
 **Scope:** FOKS only, server and client library. Built in the fork first,
 then proposed upstream as the separate PRs in §10. Only the pieces marked
 *fork-only* stay here. This document is fork-local, because it names SECO

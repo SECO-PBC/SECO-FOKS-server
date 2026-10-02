@@ -1227,8 +1227,10 @@ func insertRemovalKey(
 	q := `INSERT INTO team_removal_keys
 			(short_host_id, team_id, member_id, member_host_id, create_seqno,
 				src_role_type, src_viz_level,
-				rk_comm, rk_member, rk_team, ctime)
-		VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`
+				rk_comm, rk_member, rk_team,
+				rk_delegate, rk_delegate_role_type, rk_delegate_viz_level,
+				ctime)
+		VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())`
 
 	mbox, err := core.EncodeToBytes(&rk.Member)
 	if err != nil {
@@ -1237,6 +1239,20 @@ func insertRemovalKey(
 	tbox, err := core.EncodeToBytes(&rk.Team)
 	if err != nil {
 		return err
+	}
+	var dbox []byte
+	var drt, dvl *int
+	if rk.Delegate != nil {
+		dbox, err = core.EncodeToBytes(rk.Delegate)
+		if err != nil {
+			return err
+		}
+		drk, err := core.ImportRole(rk.Delegate.EncKey.Role)
+		if err != nil {
+			return err
+		}
+		t, l := int(drk.Typ), int(drk.Lev)
+		drt, dvl = &t, &l
 	}
 	srk, err := core.ImportRole(rk.Md.SrcRole)
 	if err != nil {
@@ -1255,6 +1271,9 @@ func insertRemovalKey(
 		rk.Comm.ExportToDB(),
 		mbox,
 		tbox,
+		dbox,
+		drt,
+		dvl,
 	)
 	if err != nil {
 		return err
@@ -2202,6 +2221,384 @@ func LoadMemberLoadFloor(
 		return nil, err
 	}
 	return proto.ImportRoleFromDB(rk, vl)
+}
+
+// InsertRosterDelegationFloor records the floor a team chain link set (or,
+// with a NONE role, cleared). One row per link; the effective floor is the
+// row with the highest seqno.
+func InsertRosterDelegationFloor(
+	m MetaContext,
+	tx pgx.Tx,
+	teamID proto.TeamID,
+	seqno proto.Seqno,
+	role proto.Role,
+) error {
+	rk, vl, err := role.ExportToDB()
+	if err != nil {
+		return err
+	}
+	tag, err := tx.Exec(m.Ctx(),
+		`INSERT INTO team_roster_delegation_floor
+		 (short_host_id, team_id, seqno, role_type, viz_level, ctime)
+		 VALUES($1, $2, $3, $4, $5, NOW())`,
+		m.ShortHostID().ExportToDB(),
+		teamID.ExportToDB(),
+		int(seqno),
+		rk,
+		vl,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return core.InsertError("team_roster_delegation_floor")
+	}
+	return nil
+}
+
+// LoadRosterDelegationFloor returns the team's current roster delegation
+// floor, or nil if no link ever set one. A non-nil NONE role means the last
+// link turned delegation off; team.RosterDelegationFloorActive folds the
+// nil and NONE cases together.
+func LoadRosterDelegationFloor(
+	m MetaContext,
+	rq Querier,
+	teamID proto.TeamID,
+) (
+	*proto.Role,
+	error,
+) {
+	var rk, vl int
+	err := rq.QueryRow(m.Ctx(),
+		`SELECT role_type, viz_level FROM team_roster_delegation_floor
+		 WHERE short_host_id=$1 AND team_id=$2
+		 ORDER BY seqno DESC LIMIT 1`,
+		m.ShortHostID().ExportToDB(),
+		teamID.ExportToDB(),
+	).Scan(&rk, &vl)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// ImportRoleFromDB refuses NONE, which for this table is the stored
+	// "delegation turned off" marker, so handle it here.
+	if proto.RoleType(rk) == proto.RoleType_NONE && vl == 0 {
+		none := proto.NewRoleDefault(proto.RoleType_NONE)
+		return &none, nil
+	}
+	return proto.ImportRoleFromDB(rk, vl)
+}
+
+// TeamHasPTKAtRole says whether the team has ever had a PTK at the given
+// role; once created a role key is rotated but never dropped, so this is
+// also "does the team have a current PTK at the role".
+func TeamHasPTKAtRole(
+	m MetaContext,
+	rq Querier,
+	teamID proto.TeamID,
+	role proto.Role,
+) (
+	bool,
+	error,
+) {
+	rk, vl, err := role.ExportToDB()
+	if err != nil {
+		return false, err
+	}
+	var one int
+	err = rq.QueryRow(m.Ctx(),
+		`SELECT 1 FROM shared_keys
+		 WHERE short_host_id=$1 AND entity_id=$2
+		 AND role_type=$3 AND viz_level=$4
+		 LIMIT 1`,
+		m.ShortHostID().ExportToDB(),
+		teamID.ExportToDB(),
+		rk,
+		vl,
+	).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// StoreDelegateRemovalKeyFill attaches a delegate box to a member's current
+// removal-key row (the one with no removal recorded). The box must be for
+// the given floor role; the row's duplicate role columns are what the
+// coverage check in CheckDelegateRemovalKeyCoverage reads.
+func StoreDelegateRemovalKeyFill(
+	m MetaContext,
+	tx pgx.Tx,
+	teamID proto.TeamID,
+	fill rem.TeamDelegateRemovalKeyFill,
+	floor core.RoleKey,
+) error {
+	brk, err := core.ImportRole(fill.Box.EncKey.Role)
+	if err != nil {
+		return err
+	}
+	if !brk.Eq(floor) {
+		return core.TeamError("delegate removal key box is not for the delegation floor role")
+	}
+	srk, err := core.ImportRole(fill.SrcRole)
+	if err != nil {
+		return err
+	}
+	dbox, err := core.EncodeToBytes(&fill.Box)
+	if err != nil {
+		return err
+	}
+	tag, err := tx.Exec(m.Ctx(),
+		`UPDATE team_removal_keys
+		 SET rk_delegate=$1, rk_delegate_role_type=$2, rk_delegate_viz_level=$3
+		 WHERE short_host_id=$4 AND team_id=$5
+		 AND member_id=$6 AND member_host_id=$7
+		 AND src_role_type=$8 AND src_viz_level=$9
+		 AND rk_removal IS NULL`,
+		dbox,
+		int(floor.Typ),
+		int(floor.Lev),
+		m.ShortHostID().ExportToDB(),
+		teamID.ExportToDB(),
+		fill.Member.Party.ExportToDB(),
+		ExportHostInScope(m, fill.Member.Host),
+		int(srk.Typ),
+		int(srk.Lev),
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return core.TeamError("delegate removal key fill matched no member")
+	}
+	return nil
+}
+
+// CheckDelegateRemovalKeyCoverage enforces the floor-team invariant after a
+// link's rows are all in: every active plain member (m/0 or below) has a
+// delegate box for the current floor role on their current removal-key row.
+// It runs only for teams with an active floor, so teams without one pay
+// nothing.
+func CheckDelegateRemovalKeyCoverage(
+	m MetaContext,
+	tx pgx.Tx,
+	teamID proto.TeamID,
+	floor core.RoleKey,
+) error {
+	var n int
+	err := tx.QueryRow(m.Ctx(),
+		`SELECT COUNT(*) FROM team_members tm
+		 WHERE tm.short_host_id=$1 AND tm.team_id=$2 AND tm.active=TRUE
+		 AND tm.dst_role_type=$3 AND tm.dst_viz_level <= 0
+		 AND NOT EXISTS (
+		    SELECT 1 FROM team_removal_keys rk
+		    WHERE rk.short_host_id=tm.short_host_id AND rk.team_id=tm.team_id
+		    AND rk.member_id=tm.member_id AND rk.member_host_id=tm.member_host_id
+		    AND rk.src_role_type=tm.src_role_type AND rk.src_viz_level=tm.src_viz_level
+		    AND rk.rk_removal IS NULL
+		    AND rk.rk_delegate IS NOT NULL
+		    AND rk.rk_delegate_role_type=$4 AND rk.rk_delegate_viz_level=$5
+		 )`,
+		m.ShortHostID().ExportToDB(),
+		teamID.ExportToDB(),
+		int(proto.RoleType_MEMBER),
+		int(floor.Typ),
+		int(floor.Lev),
+	).Scan(&n)
+	if err != nil {
+		return err
+	}
+	if n != 0 {
+		return core.TeamError("every plain member of a team with a delegation floor needs a removal key boxed for the floor role; include the fills with this link")
+	}
+	return nil
+}
+
+// LoadRemovalKeysForDelegation returns the rk_team box of every active
+// plain member, for the admin who is about to set or change the floor.
+func LoadRemovalKeysForDelegation(
+	m MetaContext,
+	rq Querier,
+	teamID proto.TeamID,
+) (
+	[]rem.TeamDelegateRemovalKeyFill,
+	error,
+) {
+	rows, err := rq.Query(m.Ctx(),
+		`SELECT rk.member_id, rk.member_host_id, rk.src_role_type, rk.src_viz_level, rk.rk_team
+		 FROM team_members tm
+		 JOIN team_removal_keys rk ON (
+		    rk.short_host_id=tm.short_host_id AND rk.team_id=tm.team_id
+		    AND rk.member_id=tm.member_id AND rk.member_host_id=tm.member_host_id
+		    AND rk.src_role_type=tm.src_role_type AND rk.src_viz_level=tm.src_viz_level
+		    AND rk.rk_removal IS NULL)
+		 WHERE tm.short_host_id=$1 AND tm.team_id=$2 AND tm.active=TRUE
+		 AND tm.dst_role_type=$3 AND tm.dst_viz_level <= 0`,
+		m.ShortHostID().ExportToDB(),
+		teamID.ExportToDB(),
+		int(proto.RoleType_MEMBER),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ret []rem.TeamDelegateRemovalKeyFill
+	for rows.Next() {
+		var mid, mhid, raw []byte
+		var rt, vl int
+		err = rows.Scan(&mid, &mhid, &rt, &vl, &raw)
+		if err != nil {
+			return nil, err
+		}
+		fill, err := importDelegationFillRow(m, mid, mhid, rt, vl, raw)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, *fill)
+	}
+	return ret, rows.Err()
+}
+
+func importDelegationFillRow(
+	m MetaContext,
+	mid []byte,
+	mhid []byte,
+	rt int,
+	vl int,
+	raw []byte,
+) (
+	*rem.TeamDelegateRemovalKeyFill,
+	error,
+) {
+	var pid proto.PartyID
+	err := pid.ImportFromDB(mid)
+	if err != nil {
+		return nil, err
+	}
+	hid, err := ImportHostInScope(mhid)
+	if err != nil {
+		return nil, err
+	}
+	if hid == nil {
+		tmp := m.HostID().Id
+		hid = &tmp
+	}
+	role, err := proto.ImportRoleFromDB(rt, vl)
+	if err != nil {
+		return nil, err
+	}
+	var box proto.TeamRemovalKeyBox
+	err = core.DecodeFromBytes(&box, raw)
+	if err != nil {
+		return nil, err
+	}
+	return &rem.TeamDelegateRemovalKeyFill{
+		Member:  proto.FQParty{Party: pid, Host: *hid},
+		SrcRole: *role,
+		Box:     box,
+	}, nil
+}
+
+// LoadDelegatedRemovalKeyBox serves a delegate box to a logged-in caller:
+// the team must have an active floor, the caller an active role at or
+// above it, and the target an active role at m/0 or below. The caller's
+// role comes from the roster, not from a token; non-admins have none.
+func LoadDelegatedRemovalKeyBox(
+	m MetaContext,
+	rq Querier,
+	teamID proto.TeamID,
+	caller proto.UID,
+	member proto.FQParty,
+	srcRole proto.Role,
+) (
+	*proto.TeamRemovalKeyBox,
+	error,
+) {
+	flr, err := LoadRosterDelegationFloor(m, rq, teamID)
+	if err != nil {
+		return nil, err
+	}
+	floor, err := team.RosterDelegationFloorActive(flr)
+	if err != nil {
+		return nil, err
+	}
+	if floor == nil {
+		return nil, core.PermissionError("team does not delegate roster changes")
+	}
+	var crt, cvl int
+	err = rq.QueryRow(m.Ctx(),
+		`SELECT dst_role_type, dst_viz_level FROM team_members
+		 WHERE short_host_id=$1 AND team_id=$2 AND member_id=$3 AND active=TRUE`,
+		m.ShortHostID().ExportToDB(),
+		teamID.ExportToDB(),
+		caller.ExportToDB(),
+	).Scan(&crt, &cvl)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, core.PermissionError("caller is not an active team member")
+	}
+	if err != nil {
+		return nil, err
+	}
+	callerRole, err := core.ImportRoleKeyFromDB(crt, cvl)
+	if err != nil {
+		return nil, err
+	}
+	if callerRole.LessThan(*floor) {
+		return nil, core.PermissionError("caller is below the team's roster delegation floor")
+	}
+	srk, err := core.ImportRole(srcRole)
+	if err != nil {
+		return nil, err
+	}
+	var raw []byte
+	var trt, tvl int
+	err = rq.QueryRow(m.Ctx(),
+		`SELECT rk.rk_delegate, tm.dst_role_type, tm.dst_viz_level
+		 FROM team_members tm
+		 JOIN team_removal_keys rk ON (
+		    rk.short_host_id=tm.short_host_id AND rk.team_id=tm.team_id
+		    AND rk.member_id=tm.member_id AND rk.member_host_id=tm.member_host_id
+		    AND rk.src_role_type=tm.src_role_type AND rk.src_viz_level=tm.src_viz_level
+		    AND rk.rk_removal IS NULL)
+		 WHERE tm.short_host_id=$1 AND tm.team_id=$2
+		 AND tm.member_id=$3 AND tm.member_host_id=$4
+		 AND tm.src_role_type=$5 AND tm.src_viz_level=$6
+		 AND tm.active=TRUE
+		 AND rk.rk_delegate IS NOT NULL
+		 AND rk.rk_delegate_role_type=$7 AND rk.rk_delegate_viz_level=$8`,
+		m.ShortHostID().ExportToDB(),
+		teamID.ExportToDB(),
+		member.Party.ExportToDB(),
+		ExportHostInScope(m, member.Host),
+		int(srk.Typ),
+		int(srk.Lev),
+		int(floor.Typ),
+		int(floor.Lev),
+	).Scan(&raw, &trt, &tvl)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, core.NotFoundError("delegate removal key box")
+	}
+	if err != nil {
+		return nil, err
+	}
+	target, err := core.ImportRoleKeyFromDB(trt, tvl)
+	if err != nil {
+		return nil, err
+	}
+	if plainCeiling := (core.RoleKey{Typ: proto.RoleType_MEMBER, Lev: 0}); plainCeiling.LessThan(*target) {
+		return nil, core.PermissionError("member is above m/0; only an admin may remove them")
+	}
+	var box proto.TeamRemovalKeyBox
+	err = core.DecodeFromBytes(&box, raw)
+	if err != nil {
+		return nil, err
+	}
+	return &box, nil
 }
 
 type AdHocTeamNamesManager struct {

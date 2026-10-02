@@ -145,15 +145,18 @@ type TeamLoader struct {
 	allMerkleLeaves []proto.MerkleLeaf
 	sctlsc          *proto.TreeLocationCommitment
 	memberLoadFloor *proto.Role
-	tncs            []proto.Commitment // team name commitments
-	tnseq           proto.NameSeqno
-	removalKey      *rem.TeamRemovalKey
-	rosterDetails   map[proto.FQEntityFixed][](*rosterPackage)
-	canLoadMembers  bool
-	openView        bool
-	hepks           *core.HEPKSet
-	indexRange      *core.RationalRange
-	histSend        HistoricalSenders
+
+	// Latest roster delegation floor seen in the chain; nil or NONE = off.
+	rosterDelegationFloor *proto.Role
+	tncs                  []proto.Commitment // team name commitments
+	tnseq                 proto.NameSeqno
+	removalKey            *rem.TeamRemovalKey
+	rosterDetails         map[proto.FQEntityFixed][](*rosterPackage)
+	canLoadMembers        bool
+	openView              bool
+	hepks                 *core.HEPKSet
+	indexRange            *core.RationalRange
+	histSend              HistoricalSenders
 }
 
 type TeamWrapper struct {
@@ -182,21 +185,16 @@ func (t *TeamWrapper) VOBearerToken() *rem.TeamVOBearerToken { return t.voTok }
 func (t *TeamWrapper) Hostname() proto.Hostname              { return t.hostname }
 func (t *TeamWrapper) Name() proto.NameUtf8                  { return t.prot.Name.B.NameUtf8 }
 func (t *TeamWrapper) TeamMemberKeys(r core.RoleKey) (*proto.TeamMemberKeys, *proto.HEPK, error) {
-	ptk := t.ptks.CurrentPublicKeyAtRole(r)
-	if ptk == nil {
-		return nil, nil, nil
-	}
-	fp := ptk.Sk.HepkFp
-	hepk, ok := t.ptks.hepks.Lookup(&fp)
-	if !ok {
-		return nil, nil, core.KeyNotFoundError{Which: "hepk"}
+	sps, err := t.ptks.CurrentPublicSuiteAtRole(r)
+	if err != nil || sps == nil {
+		return nil, nil, err
 	}
 	return &proto.TeamMemberKeys{
-		VerifyKey: ptk.Sk.VerifyKey,
-		HepkFp:    fp,
-		Gen:       ptk.Sk.Gen,
+		VerifyKey: sps.VerifyKey,
+		HepkFp:    sps.HepkFp,
+		Gen:       sps.Gen,
 		Tir:       &t.prot.Tir,
-	}, hepk.Obj(), nil
+	}, &sps.HEPK, nil
 }
 
 func (t *TeamWrapper) CheckTeamIndexRange(targetTeam core.RationalRange, tirInJoinReq *proto.RationalRange) error {
@@ -409,6 +407,13 @@ func (l *TeamWrapper) SeedCommitment() *proto.TreeLocationCommitment {
 
 func (l *TeamWrapper) MemberLoadFloor() proto.Role {
 	return l.prot.MemberLoadFloor.WithDefaultMemberLoadFloor()
+}
+
+// RosterDelegationFloor returns the team's stored roster delegation floor,
+// or nil if none was ever set. A NONE value also means delegation is off;
+// team.RosterDelegationFloorActive folds the two cases together.
+func (l *TeamWrapper) RosterDelegationFloor() *proto.Role {
+	return l.prot.RosterDelegationFloor
 }
 
 func (l *TeamLoader) Tok() *rem.TeamVOBearerToken {
@@ -932,6 +937,7 @@ func (l *TeamLoader) loadExistingTeam(m MetaContext) error {
 		l.preload = nil
 		l.sctlsc = &l.existing.Sctlsc
 		l.memberLoadFloor = l.existing.MemberLoadFloor
+		l.rosterDelegationFloor = l.existing.RosterDelegationFloor
 
 		err := loadHEPKs()
 		if err != nil {
@@ -969,6 +975,7 @@ func (l *TeamLoader) loadExistingTeam(m MetaContext) error {
 	l.histSend.Load(ret.HistoricalSenders)
 	l.sctlsc = &ret.Sctlsc
 	l.memberLoadFloor = ret.MemberLoadFloor
+	l.rosterDelegationFloor = ret.RosterDelegationFloor
 
 	err = loadHEPKs()
 	if err != nil {
@@ -1039,12 +1046,18 @@ func (l *TeamLoader) checkMerkleRoot(m MetaContext) error {
 
 func (l *TeamLoader) openLinks(m MetaContext) error {
 	roster := l.rosterPre
+	// The floor in force before each link: seeded from cached chain state,
+	// advanced whenever a link changes it, exactly like the roster itself.
+	floor := l.rosterDelegationFloor
 	for n, link := range l.raw.Links {
-		otlr, err := team.OpenTeamLink(&link, l.hepks, &l.Arg.Team.Team, l.Arg.Team.Host, roster)
+		otlr, err := team.OpenTeamLink(&link, l.hepks, &l.Arg.Team.Team, l.Arg.Team.Host, roster, floor)
 		if err != nil {
 			return core.ChainLoaderError{Err: core.CLOpenLinkError{Err: err, N: n}}
 		}
 		roster = otlr.RosterPost
+		if otlr.RosterDelegationFloor != nil {
+			floor = otlr.RosterDelegationFloor
+		}
 		l.otlrs = append(l.otlrs, *otlr)
 	}
 	l.rosterPost = roster
@@ -1121,6 +1134,9 @@ func (l *TeamLoader) playLinkEldest(m MetaContext, link *proto.LinkOuter, otlr t
 	}
 	l.sctlsc = &res.Stltc
 	l.memberLoadFloor = res.MemberLoadFloor
+	if res.RosterDelegationFloor != nil {
+		l.rosterDelegationFloor = res.RosterDelegationFloor
+	}
 
 	return nil
 }
@@ -1199,6 +1215,12 @@ func (l *TeamLoader) playLink(m MetaContext, link *proto.LinkOuter, otlr team.Op
 	err = l.addIndexRange(otlr.Range, otlr.Gc.Chainer.Base.Seqno)
 	if err != nil {
 		return err
+	}
+
+	// A later link may set or clear the roster delegation floor; the latest
+	// one in the chain wins.
+	if otlr.RosterDelegationFloor != nil {
+		l.rosterDelegationFloor = otlr.RosterDelegationFloor
 	}
 
 	// and done, most of the work was done in the Roster system...
@@ -1994,6 +2016,8 @@ func (l *TeamLoader) saveState(m MetaContext) error {
 		Tir:               ir,
 		HistoricalSenders: l.histSend.Export(),
 		MemberLoadFloor:   l.memberLoadFloor,
+
+		RosterDelegationFloor: l.rosterDelegationFloor,
 	}
 	if l.sctlsc == nil {
 		return core.InternalError("no 'sctlsc' set; it should be set in save(); refusing to save")

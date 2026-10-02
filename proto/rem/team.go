@@ -796,17 +796,19 @@ func (t *TeamRemovalMACPayload) GetTypeUniqueID() rpc.TypeUniqueID {
 func (t *TeamRemovalMACPayload) Bytes() []byte { return nil }
 
 type TeamRemovalBoxData struct {
-	Comm   lib.KeyCommitment
-	Team   lib.TeamRemovalKeyBox
-	Member lib.TeamRemovalKeyBox
-	Md     TeamRemovalKeyMetadata
+	Comm     lib.KeyCommitment
+	Team     lib.TeamRemovalKeyBox
+	Member   lib.TeamRemovalKeyBox
+	Md       TeamRemovalKeyMetadata
+	Delegate *lib.TeamRemovalKeyBox
 }
 type TeamRemovalBoxDataInternal__ struct {
-	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Comm    *lib.KeyCommitmentInternal__
-	Team    *lib.TeamRemovalKeyBoxInternal__
-	Member  *lib.TeamRemovalKeyBoxInternal__
-	Md      *TeamRemovalKeyMetadataInternal__
+	_struct  struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Comm     *lib.KeyCommitmentInternal__
+	Team     *lib.TeamRemovalKeyBoxInternal__
+	Member   *lib.TeamRemovalKeyBoxInternal__
+	Md       *TeamRemovalKeyMetadataInternal__
+	Delegate *lib.TeamRemovalKeyBoxInternal__
 }
 
 func (t TeamRemovalBoxDataInternal__) Import() TeamRemovalBoxData {
@@ -835,6 +837,18 @@ func (t TeamRemovalBoxDataInternal__) Import() TeamRemovalBoxData {
 			}
 			return x.Import()
 		})(t.Md),
+		Delegate: (func(x *lib.TeamRemovalKeyBoxInternal__) *lib.TeamRemovalKeyBox {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *lib.TeamRemovalKeyBoxInternal__) (ret lib.TeamRemovalKeyBox) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(t.Delegate),
 	}
 }
 func (t TeamRemovalBoxData) Export() *TeamRemovalBoxDataInternal__ {
@@ -843,6 +857,12 @@ func (t TeamRemovalBoxData) Export() *TeamRemovalBoxDataInternal__ {
 		Team:   t.Team.Export(),
 		Member: t.Member.Export(),
 		Md:     t.Md.Export(),
+		Delegate: (func(x *lib.TeamRemovalKeyBox) *lib.TeamRemovalKeyBoxInternal__ {
+			if x == nil {
+				return nil
+			}
+			return (*x).Export()
+		})(t.Delegate),
 	}
 }
 func (t *TeamRemovalBoxData) Encode(enc rpc.Encoder) error {
@@ -860,6 +880,63 @@ func (t *TeamRemovalBoxData) Decode(dec rpc.Decoder) error {
 }
 
 func (t *TeamRemovalBoxData) Bytes() []byte { return nil }
+
+type TeamDelegateRemovalKeyFill struct {
+	Member  lib.FQParty
+	SrcRole lib.Role
+	Box     lib.TeamRemovalKeyBox
+}
+type TeamDelegateRemovalKeyFillInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Member  *lib.FQPartyInternal__
+	SrcRole *lib.RoleInternal__
+	Box     *lib.TeamRemovalKeyBoxInternal__
+}
+
+func (t TeamDelegateRemovalKeyFillInternal__) Import() TeamDelegateRemovalKeyFill {
+	return TeamDelegateRemovalKeyFill{
+		Member: (func(x *lib.FQPartyInternal__) (ret lib.FQParty) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(t.Member),
+		SrcRole: (func(x *lib.RoleInternal__) (ret lib.Role) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(t.SrcRole),
+		Box: (func(x *lib.TeamRemovalKeyBoxInternal__) (ret lib.TeamRemovalKeyBox) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(t.Box),
+	}
+}
+func (t TeamDelegateRemovalKeyFill) Export() *TeamDelegateRemovalKeyFillInternal__ {
+	return &TeamDelegateRemovalKeyFillInternal__{
+		Member:  t.Member.Export(),
+		SrcRole: t.SrcRole.Export(),
+		Box:     t.Box.Export(),
+	}
+}
+func (t *TeamDelegateRemovalKeyFill) Encode(enc rpc.Encoder) error {
+	return enc.Encode(t.Export())
+}
+
+func (t *TeamDelegateRemovalKeyFill) Decode(dec rpc.Decoder) error {
+	var tmp TeamDelegateRemovalKeyFillInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*t = tmp.Import()
+	return nil
+}
+
+func (t *TeamDelegateRemovalKeyFill) Bytes() []byte { return nil }
 
 type TeamRemoval struct {
 	Mac     lib.HMAC
@@ -1333,23 +1410,25 @@ func (t *TeamRemovalAndComm) Decode(dec rpc.Decoder) error {
 func (t *TeamRemovalAndComm) Bytes() []byte { return nil }
 
 type OffchainBoxData struct {
-	PtkBoxes               lib.SharedKeyBoxSet
-	SeedChain              []lib.SeedChainBox
-	RemoteMemberViewTokens []lib.TeamRemoteMemberViewToken
-	RemovalKeys            []TeamRemovalBoxData
-	Removals               []TeamRemovalAndComm
-	Hepks                  lib.HEPKSet
-	NewKeyOnRotate         lib.EntityID
+	PtkBoxes                lib.SharedKeyBoxSet
+	SeedChain               []lib.SeedChainBox
+	RemoteMemberViewTokens  []lib.TeamRemoteMemberViewToken
+	RemovalKeys             []TeamRemovalBoxData
+	Removals                []TeamRemovalAndComm
+	Hepks                   lib.HEPKSet
+	NewKeyOnRotate          lib.EntityID
+	DelegateRemovalKeyFills []TeamDelegateRemovalKeyFill
 }
 type OffchainBoxDataInternal__ struct {
-	_struct                struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	PtkBoxes               *lib.SharedKeyBoxSetInternal__
-	SeedChain              *[](*lib.SeedChainBoxInternal__)
-	RemoteMemberViewTokens *[](*lib.TeamRemoteMemberViewTokenInternal__)
-	RemovalKeys            *[](*TeamRemovalBoxDataInternal__)
-	Removals               *[](*TeamRemovalAndCommInternal__)
-	Hepks                  *lib.HEPKSetInternal__
-	NewKeyOnRotate         *lib.EntityIDInternal__
+	_struct                 struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	PtkBoxes                *lib.SharedKeyBoxSetInternal__
+	SeedChain               *[](*lib.SeedChainBoxInternal__)
+	RemoteMemberViewTokens  *[](*lib.TeamRemoteMemberViewTokenInternal__)
+	RemovalKeys             *[](*TeamRemovalBoxDataInternal__)
+	Removals                *[](*TeamRemovalAndCommInternal__)
+	Hepks                   *lib.HEPKSetInternal__
+	NewKeyOnRotate          *lib.EntityIDInternal__
+	DelegateRemovalKeyFills *[](*TeamDelegateRemovalKeyFillInternal__)
 }
 
 func (o OffchainBoxDataInternal__) Import() OffchainBoxData {
@@ -1444,6 +1523,24 @@ func (o OffchainBoxDataInternal__) Import() OffchainBoxData {
 			}
 			return x.Import()
 		})(o.NewKeyOnRotate),
+		DelegateRemovalKeyFills: (func(x *[](*TeamDelegateRemovalKeyFillInternal__)) (ret []TeamDelegateRemovalKeyFill) {
+			if x == nil || len(*x) == 0 {
+				return nil
+			}
+			ret = make([]TeamDelegateRemovalKeyFill, len(*x))
+			for k, v := range *x {
+				if v == nil {
+					continue
+				}
+				ret[k] = (func(x *TeamDelegateRemovalKeyFillInternal__) (ret TeamDelegateRemovalKeyFill) {
+					if x == nil {
+						return ret
+					}
+					return x.Import()
+				})(v)
+			}
+			return ret
+		})(o.DelegateRemovalKeyFills),
 	}
 }
 func (o OffchainBoxData) Export() *OffchainBoxDataInternal__ {
@@ -1491,6 +1588,16 @@ func (o OffchainBoxData) Export() *OffchainBoxDataInternal__ {
 		})(o.Removals),
 		Hepks:          o.Hepks.Export(),
 		NewKeyOnRotate: o.NewKeyOnRotate.Export(),
+		DelegateRemovalKeyFills: (func(x []TeamDelegateRemovalKeyFill) *[](*TeamDelegateRemovalKeyFillInternal__) {
+			if len(x) == 0 {
+				return nil
+			}
+			ret := make([](*TeamDelegateRemovalKeyFillInternal__), len(x))
+			for k, v := range x {
+				ret[k] = v.Export()
+			}
+			return &ret
+		})(o.DelegateRemovalKeyFills),
 	}
 }
 func (o *OffchainBoxData) Encode(enc rpc.Encoder) error {
@@ -2480,10 +2587,68 @@ func (g *GrantLocalViewPermissionForTeamArg) Decode(dec rpc.Decoder) error {
 
 func (g *GrantLocalViewPermissionForTeamArg) Bytes() []byte { return nil }
 
+type LoadDelegatedRemovalKeyBoxArg struct {
+	Team    lib.TeamID
+	Member  lib.FQParty
+	SrcRole lib.Role
+}
+type LoadDelegatedRemovalKeyBoxArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Team    *lib.TeamIDInternal__
+	Member  *lib.FQPartyInternal__
+	SrcRole *lib.RoleInternal__
+}
+
+func (l LoadDelegatedRemovalKeyBoxArgInternal__) Import() LoadDelegatedRemovalKeyBoxArg {
+	return LoadDelegatedRemovalKeyBoxArg{
+		Team: (func(x *lib.TeamIDInternal__) (ret lib.TeamID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(l.Team),
+		Member: (func(x *lib.FQPartyInternal__) (ret lib.FQParty) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(l.Member),
+		SrcRole: (func(x *lib.RoleInternal__) (ret lib.Role) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(l.SrcRole),
+	}
+}
+func (l LoadDelegatedRemovalKeyBoxArg) Export() *LoadDelegatedRemovalKeyBoxArgInternal__ {
+	return &LoadDelegatedRemovalKeyBoxArgInternal__{
+		Team:    l.Team.Export(),
+		Member:  l.Member.Export(),
+		SrcRole: l.SrcRole.Export(),
+	}
+}
+func (l *LoadDelegatedRemovalKeyBoxArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(l.Export())
+}
+
+func (l *LoadDelegatedRemovalKeyBoxArg) Decode(dec rpc.Decoder) error {
+	var tmp LoadDelegatedRemovalKeyBoxArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*l = tmp.Import()
+	return nil
+}
+
+func (l *LoadDelegatedRemovalKeyBoxArg) Bytes() []byte { return nil }
+
 type TeamMemberInterface interface {
 	AcceptInviteLocal(context.Context, AcceptInviteLocalArg) (lib.TeamRSVPLocal, error)
 	GrantRemoteViewPermissionForTeam(context.Context, GrantRemoteViewPermissionForTeamArg) (lib.PermissionToken, error)
 	GrantLocalViewPermissionForTeam(context.Context, GrantLocalViewPermissionForTeamArg) (lib.PermissionToken, error)
+	LoadDelegatedRemovalKeyBox(context.Context, LoadDelegatedRemovalKeyBoxArg) (lib.TeamRemovalKeyBox, error)
 	ErrorWrapper() func(error) lib.Status
 }
 
@@ -2549,6 +2714,16 @@ func (c TeamMemberClient) GrantLocalViewPermissionForTeam(ctx context.Context, a
 	warg := arg.Export()
 	var tmp lib.PermissionTokenInternal__
 	err = c.Cli.Call2(ctx, rpc.NewMethodV2(TeamMemberProtocolID, 2, "TeamMember.grantLocalViewPermissionForTeam"), warg, &tmp, 0*time.Millisecond, teamMemberErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	res = tmp.Import()
+	return
+}
+func (c TeamMemberClient) LoadDelegatedRemovalKeyBox(ctx context.Context, arg LoadDelegatedRemovalKeyBoxArg) (res lib.TeamRemovalKeyBox, err error) {
+	warg := arg.Export()
+	var tmp lib.TeamRemovalKeyBoxInternal__
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(TeamMemberProtocolID, 3, "TeamMember.loadDelegatedRemovalKeyBox"), warg, &tmp, 0*time.Millisecond, teamMemberErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
 	if err != nil {
 		return
 	}
@@ -2622,6 +2797,27 @@ func TeamMemberProtocol(i TeamMemberInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "grantLocalViewPermissionForTeam",
+			},
+			3: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret LoadDelegatedRemovalKeyBoxArgInternal__
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedArg, ok := args.(*LoadDelegatedRemovalKeyBoxArgInternal__)
+						if !ok {
+							err := rpc.NewTypeError((*LoadDelegatedRemovalKeyBoxArgInternal__)(nil), args)
+							return nil, err
+						}
+						tmp, err := i.LoadDelegatedRemovalKeyBox(ctx, (typedArg.Import()))
+						if err != nil {
+							return nil, err
+						}
+						return tmp.Export(), nil
+					},
+				},
+				Name: "loadDelegatedRemovalKeyBox",
 			},
 		},
 		WrapError: TeamMemberMakeGenericErrorWrapper(i.ErrorWrapper()),
@@ -4001,12 +4197,64 @@ func (t *TeamVOBearerTokenReqAndRole) Decode(dec rpc.Decoder) error {
 
 func (t *TeamVOBearerTokenReqAndRole) Bytes() []byte { return nil }
 
+type RoleLabel struct {
+	Name string
+	Role lib.Role
+}
+type RoleLabelInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Name    *string
+	Role    *lib.RoleInternal__
+}
+
+func (r RoleLabelInternal__) Import() RoleLabel {
+	return RoleLabel{
+		Name: (func(x *string) (ret string) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Name),
+		Role: (func(x *lib.RoleInternal__) (ret lib.Role) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Role),
+	}
+}
+func (r RoleLabel) Export() *RoleLabelInternal__ {
+	return &RoleLabelInternal__{
+		Name: &r.Name,
+		Role: r.Role.Export(),
+	}
+}
+func (r *RoleLabel) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RoleLabel) Decode(dec rpc.Decoder) error {
+	var tmp RoleLabelInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RoleLabel) Bytes() []byte { return nil }
+
 type TeamConfig struct {
-	MaxRoles uint64
+	MaxRoles     uint64
+	RoleLabels   []RoleLabel
+	FloorActions []string
 }
 type TeamConfigInternal__ struct {
-	_struct  struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	MaxRoles *uint64
+	_struct      struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	MaxRoles     *uint64
+	RoleLabels   *[](*RoleLabelInternal__)
+	FloorActions *[](string)
 }
 
 func (t TeamConfigInternal__) Import() TeamConfig {
@@ -4017,11 +4265,62 @@ func (t TeamConfigInternal__) Import() TeamConfig {
 			}
 			return *x
 		})(t.MaxRoles),
+		RoleLabels: (func(x *[](*RoleLabelInternal__)) (ret []RoleLabel) {
+			if x == nil || len(*x) == 0 {
+				return nil
+			}
+			ret = make([]RoleLabel, len(*x))
+			for k, v := range *x {
+				if v == nil {
+					continue
+				}
+				ret[k] = (func(x *RoleLabelInternal__) (ret RoleLabel) {
+					if x == nil {
+						return ret
+					}
+					return x.Import()
+				})(v)
+			}
+			return ret
+		})(t.RoleLabels),
+		FloorActions: (func(x *[](string)) (ret []string) {
+			if x == nil || len(*x) == 0 {
+				return nil
+			}
+			ret = make([]string, len(*x))
+			for k, v := range *x {
+				ret[k] = (func(x *string) (ret string) {
+					if x == nil {
+						return ret
+					}
+					return *x
+				})(&v)
+			}
+			return ret
+		})(t.FloorActions),
 	}
 }
 func (t TeamConfig) Export() *TeamConfigInternal__ {
 	return &TeamConfigInternal__{
 		MaxRoles: &t.MaxRoles,
+		RoleLabels: (func(x []RoleLabel) *[](*RoleLabelInternal__) {
+			if len(x) == 0 {
+				return nil
+			}
+			ret := make([](*RoleLabelInternal__), len(x))
+			for k, v := range x {
+				ret[k] = v.Export()
+			}
+			return &ret
+		})(t.RoleLabels),
+		FloorActions: (func(x []string) *[](string) {
+			if len(x) == 0 {
+				return nil
+			}
+			ret := make([](string), len(x))
+			copy(ret, x)
+			return &ret
+		})(t.FloorActions),
 	}
 }
 func (t *TeamConfig) Encode(enc rpc.Encoder) error {
@@ -4935,6 +5234,45 @@ func (c *CreateTeamAdHocArg) Decode(dec rpc.Decoder) error {
 
 func (c *CreateTeamAdHocArg) Bytes() []byte { return nil }
 
+type LoadRemovalKeysForDelegationArg struct {
+	Tok TeamBearerToken
+}
+type LoadRemovalKeysForDelegationArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Tok     *TeamBearerTokenInternal__
+}
+
+func (l LoadRemovalKeysForDelegationArgInternal__) Import() LoadRemovalKeysForDelegationArg {
+	return LoadRemovalKeysForDelegationArg{
+		Tok: (func(x *TeamBearerTokenInternal__) (ret TeamBearerToken) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(l.Tok),
+	}
+}
+func (l LoadRemovalKeysForDelegationArg) Export() *LoadRemovalKeysForDelegationArgInternal__ {
+	return &LoadRemovalKeysForDelegationArgInternal__{
+		Tok: l.Tok.Export(),
+	}
+}
+func (l *LoadRemovalKeysForDelegationArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(l.Export())
+}
+
+func (l *LoadRemovalKeysForDelegationArg) Decode(dec rpc.Decoder) error {
+	var tmp LoadRemovalKeysForDelegationArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*l = tmp.Import()
+	return nil
+}
+
+func (l *LoadRemovalKeysForDelegationArg) Bytes() []byte { return nil }
+
 type TeamAdminInterface interface {
 	ReserveTeamname(context.Context, lib.Name) (ReserveNameRes, error)
 	CreateTeam(context.Context, CreateTeamArg) error
@@ -4952,6 +5290,7 @@ type TeamAdminInterface interface {
 	RejectJoinReq(context.Context, RejectJoinReqArg) error
 	GetTeamConfig(context.Context) (TeamConfig, error)
 	CreateTeamAdHoc(context.Context, CreateTeamCommonArg) error
+	LoadRemovalKeysForDelegation(context.Context, TeamBearerToken) ([]TeamDelegateRemovalKeyFill, error)
 	ErrorWrapper() func(error) lib.Status
 }
 
@@ -5167,6 +5506,36 @@ func (c TeamAdminClient) CreateTeamAdHoc(ctx context.Context, carg CreateTeamCom
 	if err != nil {
 		return
 	}
+	return
+}
+func (c TeamAdminClient) LoadRemovalKeysForDelegation(ctx context.Context, tok TeamBearerToken) (res []TeamDelegateRemovalKeyFill, err error) {
+	arg := LoadRemovalKeysForDelegationArg{
+		Tok: tok,
+	}
+	warg := arg.Export()
+	var tmp [](*TeamDelegateRemovalKeyFillInternal__)
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(TeamAdminProtocolID, 16, "TeamAdmin.loadRemovalKeysForDelegation"), warg, &tmp, 0*time.Millisecond, teamAdminErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	res = (func(x *[](*TeamDelegateRemovalKeyFillInternal__)) (ret []TeamDelegateRemovalKeyFill) {
+		if x == nil || len(*x) == 0 {
+			return nil
+		}
+		ret = make([]TeamDelegateRemovalKeyFill, len(*x))
+		for k, v := range *x {
+			if v == nil {
+				continue
+			}
+			ret[k] = (func(x *TeamDelegateRemovalKeyFillInternal__) (ret TeamDelegateRemovalKeyFill) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(v)
+		}
+		return ret
+	})(&tmp)
 	return
 }
 func TeamAdminProtocol(i TeamAdminInterface) rpc.ProtocolV2 {
@@ -5519,6 +5888,37 @@ func TeamAdminProtocol(i TeamAdminInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "createTeamAdHoc",
+			},
+			16: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret LoadRemovalKeysForDelegationArgInternal__
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedArg, ok := args.(*LoadRemovalKeysForDelegationArgInternal__)
+						if !ok {
+							err := rpc.NewTypeError((*LoadRemovalKeysForDelegationArgInternal__)(nil), args)
+							return nil, err
+						}
+						tmp, err := i.LoadRemovalKeysForDelegation(ctx, (typedArg.Import()).Tok)
+						if err != nil {
+							return nil, err
+						}
+						lst := (func(x []TeamDelegateRemovalKeyFill) *[](*TeamDelegateRemovalKeyFillInternal__) {
+							if len(x) == 0 {
+								return nil
+							}
+							ret := make([](*TeamDelegateRemovalKeyFillInternal__), len(x))
+							for k, v := range x {
+								ret[k] = v.Export()
+							}
+							return &ret
+						})(tmp)
+						return lst, nil
+					},
+				},
+				Name: "loadRemovalKeysForDelegation",
 			},
 		},
 		WrapError: TeamAdminMakeGenericErrorWrapper(i.ErrorWrapper()),

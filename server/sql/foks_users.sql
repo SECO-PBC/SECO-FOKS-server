@@ -259,6 +259,11 @@ CREATE TABLE team_removal_keys (
     rk_member BYTEA NOT NULL, /* removal key boxed for the team member */
     rk_team BYTEA NOT NULL, /* removal key boxed for the team admins */
     rk_removal BYTEA, /* removal of the user, MAC'ed with the removal key */
+    /* Roster delegation: the key boxed for the floor role's PTK, with the
+       floor role it was boxed for. NULL for teams without a floor. */
+    rk_delegate BYTEA,
+    rk_delegate_role_type SMALLINT,
+    rk_delegate_viz_level SMALLINT,
     ctime TIMESTAMP NOT NULL,
     PRIMARY KEY(short_host_id, team_id, member_id, member_host_id, src_role_type, src_viz_level, create_seqno)
 );
@@ -948,6 +953,22 @@ CREATE TABLE team_member_load_floor (
     FOREIGN KEY (short_host_id, team_id) REFERENCES teams(short_host_id, team_id)
 );
 
+
+CREATE TABLE team_roster_delegation_floor (
+    short_host_id SMALLINT NOT NULL,
+    team_id BYTEA NOT NULL,
+
+    -- The seqno of the team chain link that set this floor. The effective
+    -- floor is the row with the highest seqno; a NONE role there means
+    -- delegation was turned off.
+    seqno INTEGER NOT NULL,
+
+    role_type SMALLINT NOT NULL,
+    viz_level SMALLINT NOT NULL,
+
+    ctime TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY(short_host_id, team_id, seqno)
+);
 CREATE TABLE log_send (
     short_host_id SMALLINT NOT NULL,
     id BYTEA NOT NULL, /* a random 16-byte ID */
@@ -1057,3 +1078,5 @@ INSERT INTO schema_patches (id, ctime) VALUES (5, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (6, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (7, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (8, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (9, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (10, NOW());

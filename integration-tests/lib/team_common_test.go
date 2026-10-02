@@ -34,6 +34,11 @@ type teamObj struct {
 	removalKeys    map[team.MemberID]rem.TeamRemovalKey
 	hepks          *core.HEPKSet
 	tir            *core.RationalRange
+
+	// When set, makeChangesFull boxes every new member's removal key for
+	// this role too, and admin-signed links re-fill the delegate boxes of
+	// all pre-existing plain members (as real clients do).
+	delegationFloor *core.RoleKey
 }
 
 // teamMinderFor builds a TeamMinder for u. Chain posts need the merkle tree to
@@ -382,6 +387,7 @@ func (te *TestEnvWrapper) makeTeamForOwnerEvil(t *testing.T, u *TestUser, opts m
 		puk,
 		ownerPtkPub,
 		mePub,
+		nil,
 		rem.TeamRemovalKeyMetadata{
 			Tm:      fqt,
 			Member:  u.FQUser().FQParty(),
@@ -580,6 +586,7 @@ func (te *TestEnvWrapper) makeTeamForOwner(t *testing.T, u *TestUser) *teamObj {
 		&puk,
 		ownerPtkPub,
 		mePub,
+		nil,
 		rem.TeamRemovalKeyMetadata{
 			Tm:      fqt,
 			Member:  u.FQUser().FQParty(),
@@ -685,6 +692,8 @@ type makeChangesKnobs struct {
 	treeRoot         *proto.TreeRoot
 	md               []proto.ChangeMetadata
 	insLocalPermsFor []proto.PartyID
+	skipDelegate     bool // build no delegate boxes or fills, to test the server invariant
+	extraFills       []rem.TeamDelegateRemovalKeyFill
 }
 
 func (tm *teamObj) makeChanges(
@@ -896,6 +905,20 @@ func (tm *teamObj) makeChangesFull(
 	newAdminPtkPub, err := core.PublicizeToSPSBoxer(newAdminPtk, tm.FQTeam(t).FQParty())
 	require.NoError(t, err)
 
+	var delegatePub *core.SPSBoxer
+	if tm.delegationFloor != nil && !knobs.skipDelegate {
+		fptk, ok := newPtkMap[*tm.delegationFloor]
+		if !ok {
+			fptk, ok = tm.ptks[*tm.delegationFloor]
+		}
+		// A floor role without a PTK cannot be boxed for; send the link
+		// bare and let the server be the judge (it refuses such floors).
+		if ok {
+			delegatePub, err = core.PublicizeToSPSBoxer(fptk, tm.FQTeam(t).FQParty())
+			require.NoError(t, err)
+		}
+	}
+
 	var removalKeyBoxes []rem.TeamRemovalBoxData
 
 	for i, newMem := range sched.Additions {
@@ -908,6 +931,7 @@ func (tm *teamObj) makeChangesFull(
 			mtlPuk,
 			newAdminPtkPub,
 			&keyAndRole.key,
+			delegatePub,
 			rem.TeamRemovalKeyMetadata{
 				Tm:      tm.FQTeam(t),
 				Member:  *party,
@@ -957,6 +981,48 @@ func (tm *teamObj) makeChangesFull(
 		removals = append(removals, removal)
 	}
 
+	var fills []rem.TeamDelegateRemovalKeyFill
+	if delegatePub != nil {
+		signerRole, err := tm.roster.RoleOfSigner(u.uid.ToOwnerKeyOwner(), u.host)
+		require.NoError(t, err)
+		if signerRole != nil && signerRole.Typ.IsAdminOrAbove() {
+			removed := make(map[team.MemberID]bool)
+			for _, r := range sched.Removals {
+				removed[r] = true
+			}
+			plainCeiling := core.RoleKey{Typ: proto.RoleType_MEMBER, Lev: 0}
+			members, unlock := tm.roster.BorrowMembers()
+			for mid, mi := range members {
+				if removed[mid] || mi.Role.Typ != proto.RoleType_MEMBER || plainCeiling.LessThan(mi.Role) {
+					continue
+				}
+				key, ok := tm.removalKeys[mid]
+				if !ok {
+					continue
+				}
+				party, err := mid.Fqe.Unfix().FQParty()
+				require.NoError(t, err)
+				box, err := team.BoxRemovalKeyForReceiver(mtlPuk, delegatePub,
+					rem.TeamRemovalKeyMetadata{
+						Tm:      tm.FQTeam(t),
+						Member:  *party,
+						SrcRole: mid.SrcRole.Export(),
+						Dst: proto.RoleAndSeqno{
+							Seqno: mi.Seqno,
+							Role:  mi.Role.Export(),
+						},
+					}, &key)
+				require.NoError(t, err)
+				fills = append(fills, rem.TeamDelegateRemovalKeyFill{
+					Member:  *party,
+					SrcRole: mid.SrcRole.Export(),
+					Box:     *box,
+				})
+			}
+			unlock()
+		}
+	}
+
 	arg := rem.EditTeamArg{
 		Link: *mlr.Link,
 		Obd: rem.OffchainBoxData{
@@ -966,6 +1032,8 @@ func (tm *teamObj) makeChangesFull(
 			RemovalKeys:            removalKeyBoxes,
 			Removals:               removals,
 			Hepks:                  tm.hepks.Export(),
+
+			DelegateRemovalKeyFills: append(fills, knobs.extraFills...),
 		},
 		NextTreeLocation: *mlr.NextTreeLocation,
 		InsLocalPermsFor: knobs.insLocalPermsFor,

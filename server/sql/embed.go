@@ -62,6 +62,12 @@ var usersPatch7 string
 //go:embed patches/foks_users/p8.sql
 var usersPatch8 string
 
+//go:embed patches/foks_users/p9.sql
+var usersPatch9 string
+
+//go:embed patches/foks_users/p10.sql
+var usersPatch10 string
+
 //go:embed patches/foks_server_config/p1.sql
 var serverConfigPatch1 string
 
@@ -103,14 +109,16 @@ var kvStorePatch1 string
 
 var Patches = map[string]map[int]string{
 	"foks_users": {
-		1: usersPatch1,
-		2: usersPatch2,
-		3: usersPatch3,
-		4: usersPatch4,
-		5: usersPatch5,
-		6: usersPatch6,
-		7: usersPatch7,
-		8: usersPatch8,
+		1:  usersPatch1,
+		2:  usersPatch2,
+		3:  usersPatch3,
+		4:  usersPatch4,
+		5:  usersPatch5,
+		6:  usersPatch6,
+		7:  usersPatch7,
+		8:  usersPatch8,
+		9:  usersPatch9,
+		10: usersPatch10,
 	},
 	"foks_server_config": {
 		1: serverConfigPatch1,

@@ -21,6 +21,11 @@ type OpenTeamLinkRes struct {
 	Sched      KeySchedule
 	Tnc        *proto.Commitment
 	Range      *core.RationalRange
+
+	// RosterDelegationFloor is set when this link carries a
+	// ChangeType_RosterDelegationFloor entry; the team's effective floor is
+	// the last one in the chain. nil means this link does not change it.
+	RosterDelegationFloor *proto.Role
 }
 
 type OpenEldestRes struct {
@@ -41,7 +46,7 @@ func OpenEldestLink(
 	*OpenEldestRes,
 	error,
 ) {
-	otlr, err := OpenTeamLink(link, hepks, nil, hostID, nil)
+	otlr, err := OpenTeamLink(link, hepks, nil, hostID, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -221,12 +226,18 @@ func ExtractTeamAndSeqno(
 	return &tid, gc.Chainer.Base.Seqno, nil
 }
 
+// OpenTeamLink opens one team chain link against the pre-link roster.
+// priorFloor is the team's roster delegation floor in force BEFORE this
+// link (nil = off): callers replaying a chain pass the latest floor they
+// have seen so far, and the server passes its stored copy. It decides
+// whether a non-admin signer may pass the roster checks.
 func OpenTeamLink(
 	link *proto.LinkOuter,
 	hepks *core.HEPKSet,
 	team *proto.TeamID,
 	hostID proto.HostID,
 	rPre *Roster,
+	priorFloor *proto.Role,
 ) (
 	*OpenTeamLinkRes,
 	error,
@@ -289,16 +300,13 @@ func OpenTeamLink(
 		}
 	}
 
-	// Given the current roster, the signer ID, and the changes, compute
-	// the new roster, the rekey schedule. Also check the changes for sanity.
-	rPost, sched, err := rPre.Gameplan(*gc.Signer.KeyOwner, hostID, mrq, gc.Signer.Key, nil)
-	if err != nil {
-		return nil, err
-	}
-
 	var tnc *proto.Commitment
 	var rng *core.RationalRange
-	// Open link metadata -- only team name changes are supported now, and team index range changes are supported.
+	var rdf *proto.Role
+	// Open link metadata -- team name changes, team index range changes, and
+	// roster delegation floor changes are supported; anything else is skipped,
+	// which is what lets clients from before a given type open links that
+	// carry it.
 	for _, md := range gc.Metadata {
 		typ, err := md.GetT()
 		if err != nil {
@@ -317,7 +325,33 @@ func OpenTeamLink(
 			}
 			tmp := core.NewRationalRange(md.Teamindexrange())
 			rng = &tmp
+		case proto.ChangeType_RosterDelegationFloor:
+			if rdf != nil {
+				return nil, core.LinkError("only one roster delegation floor allowed")
+			}
+			tmp := md.Rosterdelegationfloor()
+			err = CheckRosterDelegationFloor(tmp)
+			if err != nil {
+				return nil, err
+			}
+			rdf = &tmp
 		}
+	}
+
+	floorKey, err := RosterDelegationFloorActive(priorFloor)
+	if err != nil {
+		return nil, err
+	}
+	gpOpts := &GameplanOpts{
+		DelegationFloor:      floorKey,
+		LinkHasAdminMetadata: tnc != nil || rng != nil || rdf != nil,
+	}
+
+	// Given the current roster, the signer ID, and the changes, compute
+	// the new roster, the rekey schedule. Also check the changes for sanity.
+	rPost, sched, err := rPre.Gameplan(*gc.Signer.KeyOwner, hostID, mrq, gc.Signer.Key, gpOpts)
+	if err != nil {
+		return nil, err
 	}
 
 	ret := OpenTeamLinkRes{
@@ -328,6 +362,8 @@ func OpenTeamLink(
 		Sched:      *sched,
 		Tnc:        tnc,
 		Range:      rng,
+
+		RosterDelegationFloor: rdf,
 	}
 
 	return &ret, nil
@@ -666,6 +702,7 @@ func NewBoxedTeamRemovalKey(
 	sender core.SharedPrivateSuiter,
 	teamReceiver *core.SPSBoxer,
 	memberReceiver *core.SPSBoxer,
+	delegateReceiver *core.SPSBoxer,
 	md rem.TeamRemovalKeyMetadata,
 ) (
 	*rem.TeamRemovalBoxData,
@@ -676,48 +713,70 @@ func NewBoxedTeamRemovalKey(
 	if err != nil {
 		return nil, nil, err
 	}
-	box, err := BoxTeamRemovalKey(sender, teamReceiver, memberReceiver, md, key)
+	box, err := BoxTeamRemovalKey(sender, teamReceiver, memberReceiver, delegateReceiver, md, key)
 	if err != nil {
 		return nil, nil, err
 	}
 	return box, key, nil
 }
 
-func BoxTeamRemovalKey(
+// BoxRemovalKeyForReceiver seals one removal key (with its metadata) for a
+// single receiver: the admin PTK, the member, or a delegation floor PTK.
+func BoxRemovalKeyForReceiver(
 	sender core.SharedPrivateSuiter,
-	teamReceiver *core.SPSBoxer,
-	memberReceiver *core.SPSBoxer,
+	rcvr *core.SPSBoxer,
 	md rem.TeamRemovalKeyMetadata,
 	key *rem.TeamRemovalKey,
 ) (
-	*rem.TeamRemovalBoxData,
+	*proto.TeamRemovalKeyBox,
 	error,
 ) {
 	payload := rem.TeamRemovalKeyBoxPayload{
 		Md:  md,
 		Key: *key,
 	}
-	boxOne := func(r *core.SPSBoxer) (*proto.TeamRemovalKeyBox, error) {
-		box, err := sender.BoxFor(&payload, r, core.BoxOpts{IncludePublicKey: true})
+	box, err := sender.BoxFor(&payload, rcvr, core.BoxOpts{IncludePublicKey: true})
+	if err != nil {
+		return nil, err
+	}
+	return &proto.TeamRemovalKeyBox{
+		Box: *box,
+		EncKey: proto.RoleAndGen{
+			Role: rcvr.Role,
+			Gen:  rcvr.Gen,
+		},
+	}, nil
+}
+
+// BoxTeamRemovalKey seals a new member's removal key for everyone who may
+// one day need it: the team admins, the member themselves, and -- when the
+// team has a roster delegation floor -- the floor role (delegateReceiver,
+// nil otherwise).
+func BoxTeamRemovalKey(
+	sender core.SharedPrivateSuiter,
+	teamReceiver *core.SPSBoxer,
+	memberReceiver *core.SPSBoxer,
+	delegateReceiver *core.SPSBoxer,
+	md rem.TeamRemovalKeyMetadata,
+	key *rem.TeamRemovalKey,
+) (
+	*rem.TeamRemovalBoxData,
+	error,
+) {
+	tm, err := BoxRemovalKeyForReceiver(sender, teamReceiver, md, key)
+	if err != nil {
+		return nil, err
+	}
+	mm, err := BoxRemovalKeyForReceiver(sender, memberReceiver, md, key)
+	if err != nil {
+		return nil, err
+	}
+	var dm *proto.TeamRemovalKeyBox
+	if delegateReceiver != nil {
+		dm, err = BoxRemovalKeyForReceiver(sender, delegateReceiver, md, key)
 		if err != nil {
 			return nil, err
 		}
-		return &proto.TeamRemovalKeyBox{
-			Box: *box,
-			EncKey: proto.RoleAndGen{
-				Role: r.Role,
-				Gen:  r.Gen,
-			},
-		}, nil
-	}
-
-	tm, err := boxOne(teamReceiver)
-	if err != nil {
-		return nil, err
-	}
-	mm, err := boxOne(memberReceiver)
-	if err != nil {
-		return nil, err
 	}
 	comm, err := core.ComputeKeyCommitment(key)
 	if err != nil {
@@ -725,9 +784,10 @@ func BoxTeamRemovalKey(
 	}
 
 	return &rem.TeamRemovalBoxData{
-		Md:     md,
-		Team:   *tm,
-		Member: *mm,
-		Comm:   *comm,
+		Md:       md,
+		Team:     *tm,
+		Member:   *mm,
+		Comm:     *comm,
+		Delegate: dm,
 	}, nil
 }

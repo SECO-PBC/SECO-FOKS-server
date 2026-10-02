@@ -244,6 +244,21 @@ type GameplanOpts struct {
 	// links; left unset when replaying existing chains, which must load even
 	// if they contain a link that stranded the team (issue #309).
 	RequireOwner bool
+
+	// DelegationFloor is the team's roster delegation floor in force BEFORE
+	// this change set, nil when delegation is off (never set, or set to
+	// NONE). When non-nil, members at or above it may sign the restricted
+	// changes delegatedChangesAllowedLocked describes; admins and owners are
+	// unaffected either way.
+	DelegationFloor *core.RoleKey
+
+	// LinkHasAdminMetadata is true when the link carrying this change set
+	// also carries link metadata (a team name commitment, an index range, or
+	// a delegation floor). Those stay admin-only, so a delegated change set
+	// is refused when this is set. A new metadata type that should also be
+	// admin-only must be added to the condition that computes this flag in
+	// OpenTeamLink.
+	LinkHasAdminMetadata bool
 }
 
 func (r *Roster) Gameplan(
@@ -511,4 +526,35 @@ func MemberRoleToMemberID(mr *proto.MemberRole, host proto.HostID) (*MemberID, e
 		Fqe:     *mem,
 		SrcRole: *rk,
 	}, nil
+}
+
+// MemberInfoFor returns the roster entry for one member, if present.
+func (r *Roster) MemberInfoFor(mid MemberID) (MemberInfo, bool) {
+	r.RosterCore.Lock()
+	defer r.RosterCore.Unlock()
+	mi, ok := r.members[mid]
+	return mi, ok
+}
+
+// RoleOfSigner looks the link signer up in this (pre-link) roster, the same
+// way Gameplan builds its doer: at the team's host, so a remote signer is
+// simply absent.
+func (r *Roster) RoleOfSigner(ko proto.KeyOwner, host proto.HostID) (*core.RoleKey, error) {
+	fqe, err := (proto.FQEntity{
+		Entity: ko.Party.EntityID(),
+		Host:   host,
+	}).Fixed()
+	if err != nil {
+		return nil, err
+	}
+	srcRole, err := core.ImportRole(ko.SrcRole)
+	if err != nil {
+		return nil, err
+	}
+	mi, ok := r.MemberInfoFor(MemberID{Fqe: *fqe, SrcRole: *srcRole})
+	if !ok {
+		return nil, nil
+	}
+	ret := mi.Role
+	return &ret, nil
 }
