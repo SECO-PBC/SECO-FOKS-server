@@ -1916,13 +1916,15 @@ func (t *TeamAddArg) Decode(dec rpc.Decoder) error {
 func (t *TeamAddArg) Bytes() []byte { return nil }
 
 type TeamChangeRolesArg struct {
-	Team    lib.FQTeamParsed
-	Changes []RoleChange
+	Team            lib.FQTeamParsed
+	Changes         []RoleChange
+	DelegationFloor *lib.Role
 }
 type TeamChangeRolesArgInternal__ struct {
-	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Team    *lib.FQTeamParsedInternal__
-	Changes *[](*RoleChangeInternal__)
+	_struct         struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Team            *lib.FQTeamParsedInternal__
+	Changes         *[](*RoleChangeInternal__)
+	DelegationFloor *lib.RoleInternal__
 }
 
 func (t TeamChangeRolesArgInternal__) Import() TeamChangeRolesArg {
@@ -1951,6 +1953,18 @@ func (t TeamChangeRolesArgInternal__) Import() TeamChangeRolesArg {
 			}
 			return ret
 		})(t.Changes),
+		DelegationFloor: (func(x *lib.RoleInternal__) *lib.Role {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *lib.RoleInternal__) (ret lib.Role) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(t.DelegationFloor),
 	}
 }
 func (t TeamChangeRolesArg) Export() *TeamChangeRolesArgInternal__ {
@@ -1966,6 +1980,12 @@ func (t TeamChangeRolesArg) Export() *TeamChangeRolesArgInternal__ {
 			}
 			return &ret
 		})(t.Changes),
+		DelegationFloor: (func(x *lib.Role) *lib.RoleInternal__ {
+			if x == nil {
+				return nil
+			}
+			return (*x).Export()
+		})(t.DelegationFloor),
 	}
 }
 func (t *TeamChangeRolesArg) Encode(enc rpc.Encoder) error {

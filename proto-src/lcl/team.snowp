@@ -194,7 +194,11 @@ protocol Team
 
     teamChangeRoles @14 (
         team @0 : lib.FQTeamParsed,
-        changes @1 : List(RoleChange)
+        changes @1 : List(RoleChange),
+        // When set, the same link also sets (or, with NONE, clears) the
+        // team's roster delegation floor. Admin-only, like the role
+        // changes this call makes.
+        delegationFloor @2 : Option(lib.Role)
     );
 
     // used largely in testing and in debugging

@@ -341,8 +341,9 @@ func find(changes ChangeSet, m MemberID, r core.RoleKey) *MemberInfo {
 }
 
 // Checks that the given changes can be applied by the doer
-// to the given roster.
-func (r *RosterCore) checkChangesLocked(doer MemberID, changes ChangeSet, create bool) error {
+// to the given roster. opts may be nil; it carries the team's roster
+// delegation floor, which is the one way a non-admin doer can pass.
+func (r *RosterCore) checkChangesLocked(doer MemberID, changes ChangeSet, create bool, opts *GameplanOpts) error {
 
 	// First pass - make sure that every user only shows up once
 	found := make(map[MemberID]bool)
@@ -380,7 +381,10 @@ func (r *RosterCore) checkChangesLocked(doer MemberID, changes ChangeSet, create
 		}
 		if doerRole != proto.RoleType_ADMIN &&
 			doerRole != proto.RoleType_OWNER {
-			return core.TeamRosterError("doer doesn't have privileged role")
+			err := r.delegatedChangesAllowedLocked(opts, doerInfo, doer, changes)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -545,7 +549,7 @@ func (d ChangeSet) Gameplan(
 	}
 
 	if opts == nil || !opts.TestingNoCheck {
-		err = rPre.checkChangesLocked(doer, d, create)
+		err = rPre.checkChangesLocked(doer, d, create, opts)
 		if err != nil {
 			return nil, nil, nil, err
 		}

@@ -368,6 +368,7 @@ foks team add acme --role=member/-4 t:human-resources/member/-8`,
 }
 
 func teamChangeRoles(m libclient.MetaContext, top *cobra.Command) {
+	var delegationFloorStr string
 	cmd := &cobra.Command{
 		Use:     "change-roles <team> <change1> <change2> ...",
 		Aliases: nil,
@@ -397,7 +398,7 @@ foks team change-roles acme t:hr→n      # remove team hr from acme
 foks team change-roles acme alice/m/-4→m/0 bob@foks.mydomain.com→n`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, arg []string) error {
-			if len(arg) < 2 {
+			if len(arg) < 1 || (len(arg) < 2 && delegationFloorStr == "") {
 				return ArgsError("expect two or more arguments -- team and change(s)")
 			}
 			fqt, err := core.ParseFQTeam(proto.FQTeamString(arg[0]))
@@ -414,10 +415,19 @@ foks team change-roles acme alice/m/-4→m/0 bob@foks.mydomain.com→n`,
 				changes = append(changes, *rc)
 			}
 
+			var floor *proto.Role
+			if delegationFloorStr != "" {
+				floor, err = proto.RoleString(delegationFloorStr).Parse()
+				if err != nil {
+					return err
+				}
+			}
+
 			return quickStartLambda(m, &teamOpts, func(cli lcl.TeamClient) error {
 				err := cli.TeamChangeRoles(m.Ctx(), lcl.TeamChangeRolesArg{
-					Team:    *fqt,
-					Changes: changes,
+					Team:            *fqt,
+					Changes:         changes,
+					DelegationFloor: floor,
 				})
 				if err != nil {
 					return err
@@ -430,6 +440,8 @@ foks team change-roles acme alice/m/-4→m/0 bob@foks.mydomain.com→n`,
 			})
 		},
 	}
+	cmd.Flags().StringVar(&delegationFloorStr, "delegation-floor", "",
+		"also set the team's roster delegation floor to this role (\"none\" clears it)")
 	top.AddCommand(cmd)
 }
 

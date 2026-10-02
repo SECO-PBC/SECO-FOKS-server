@@ -620,7 +620,14 @@ func (c *teamEditor) openLink(m shared.MetaContext) (*team.OpenTeamLinkRes, erro
 		return nil, err
 	}
 
-	res, err := team.OpenTeamLink(&c.arg.Link, hepks, &c.teamID, m.HostID().Id, roster)
+	// The floor in force before this link, from the server's own copy; it
+	// is read in the same transaction (and under the same team lock) as the
+	// roster, so a racing floor change serializes with this link.
+	floor, err := shared.LoadRosterDelegationFloor(m, c.tx, c.teamID)
+	if err != nil {
+		return nil, err
+	}
+	res, err := team.OpenTeamLink(&c.arg.Link, hepks, &c.teamID, m.HostID().Id, roster, floor)
 	if err != nil {
 		return nil, err
 	}

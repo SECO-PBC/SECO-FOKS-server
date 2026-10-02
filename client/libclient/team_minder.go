@@ -1590,7 +1590,7 @@ func (t *TeamMinder) withLoadedTeamAndAdminToken(
 	if fqt == nil {
 		return core.TeamNotFoundError{}
 	}
-	tm, tok, err := t.loadTeamAndAdminToken(m, *fqt, opts)
+	tm, tok, err := t.loadTeamAndEditToken(m, *fqt, opts)
 	if err != nil {
 		return err
 	}
