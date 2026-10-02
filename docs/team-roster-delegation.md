@@ -335,6 +335,10 @@ team : {
   and `floor_actions` as new trailing fields of `TeamConfig`. Older clients
   ignore them (tested, §6). Clients use them for display only; the server
   enforces.
+- `role_labels` are sent only while `roster_delegation` is on. A labelled
+  role can't be given out while the switch is off (setting the floor is
+  refused), so a client can read "no labels" as "no delegated roles on this
+  host" and hide them, without a separate field for the switch.
 - **Why the floor and not a fixed role:** the config applies to every team on
   the host. A fixed `m/100` would stop plain members of a DM team from
   creating the DM's channel. Tying the actions to the team's own floor

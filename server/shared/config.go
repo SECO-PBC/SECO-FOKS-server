@@ -186,7 +186,8 @@ type TeamConfigger interface {
 	// operator decides when teams may start using delegation at all.
 	RosterDelegation() bool
 	// RoleLabels names roles for clients ("delegate" = m/100). Served
-	// verbatim by GetTeamConfig; the server never checks them.
+	// verbatim by GetTeamConfig, but only while RosterDelegation is on;
+	// the server never checks them.
 	RoleLabels() (map[string]proto.Role, error)
 	// FloorActions lists the actions that, in a team with a delegation
 	// floor, require at least the floor role. Admins always pass, and

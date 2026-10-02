@@ -1211,6 +1211,13 @@ func (u *UserClientConn) GetTeamConfig(ctx context.Context) (rem.TeamConfig, err
 		return ret, err
 	}
 	ret.MaxRoles = uint64(tcfg.MaxRoles())
+	ret.FloorActions = tcfg.FloorActions()
+	// A labelled role is only assignable while the host allows delegation,
+	// so the labels go out only then: a client can treat their presence as
+	// "this host has delegated roles" without knowing about the switch.
+	if !tcfg.RosterDelegation() {
+		return ret, nil
+	}
 	labels, err := tcfg.RoleLabels()
 	if err != nil {
 		return ret, err
@@ -1223,7 +1230,6 @@ func (u *UserClientConn) GetTeamConfig(ctx context.Context) (rem.TeamConfig, err
 	for _, name := range names {
 		ret.RoleLabels = append(ret.RoleLabels, rem.RoleLabel{Name: name, Role: labels[name]})
 	}
-	ret.FloorActions = tcfg.FloorActions()
 	return ret, nil
 }
 
