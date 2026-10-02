@@ -94,19 +94,30 @@ func TestChannelCreateFloorAction(t *testing.T) {
 }
 
 // GetTeamConfig serves the host's role labels and floor actions, so a
-// client learns which role "delegate" is without hard-coding it.
+// client learns which role "delegate" is without hard-coding it. The labels
+// go out only while roster delegation is on, so their presence tells a
+// client the host has delegated roles at all.
 func TestGetTeamConfigRoleLabels(t *testing.T) {
 	tew := testEnvBeta(t)
 	setTeamFloorActions(t, tew, []string{"rt.channel.create_open"},
 		map[string]string{"delegate": "m/100", "helper": "m/50"})
 	defer setTeamFloorActions(t, tew, nil, nil)
+	defer setRosterDelegation(t, tew, false)
 	u := tew.NewTestUser(t)
 	tew.DirectDoubleMerklePokeInTest(t)
 
 	ctx := context.Background()
 	cli, closer := u.newTeamAdminClient(t, ctx)
 	defer closer()
+
+	setRosterDelegation(t, tew, false)
 	cfg, err := cli.GetTeamConfig(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{"rt.channel.create_open"}, cfg.FloorActions)
+	require.Empty(t, cfg.RoleLabels)
+
+	setRosterDelegation(t, tew, true)
+	cfg, err = cli.GetTeamConfig(ctx)
 	require.NoError(t, err)
 	require.Equal(t, []string{"rt.channel.create_open"}, cfg.FloorActions)
 	require.Equal(t, []rem.RoleLabel{

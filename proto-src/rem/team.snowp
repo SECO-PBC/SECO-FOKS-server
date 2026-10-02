@@ -363,6 +363,7 @@ struct RoleLabel {
 
 struct TeamConfig {
     maxRoles @0 : Uint; // max number of roles a team can have
+    // Empty unless the host allows roster delegation.
     roleLabels @1 : List(RoleLabel);
     // Actions that, in a team with a roster delegation floor, require at
     // least the floor role (admins always pass). Teams without a floor
