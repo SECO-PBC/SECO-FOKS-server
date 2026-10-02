@@ -6,6 +6,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/lib/team"
@@ -1117,6 +1118,19 @@ func (u *UserClientConn) GetTeamConfig(ctx context.Context) (rem.TeamConfig, err
 		return ret, err
 	}
 	ret.MaxRoles = uint64(tcfg.MaxRoles())
+	labels, err := tcfg.RoleLabels()
+	if err != nil {
+		return ret, err
+	}
+	names := make([]string, 0, len(labels))
+	for name := range labels {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		ret.RoleLabels = append(ret.RoleLabels, rem.RoleLabel{Name: name, Role: labels[name]})
+	}
+	ret.FloorActions = tcfg.FloorActions()
 	return ret, nil
 }
 

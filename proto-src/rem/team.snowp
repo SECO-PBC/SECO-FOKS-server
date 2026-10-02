@@ -323,8 +323,21 @@ struct TeamVOBearerTokenReqAndRole {
     role @1 : lib.Role;
 }
 
+// A display name the host gives a role, e.g. "delegate" = m/100. The server
+// never checks these; clients use them to know which role to show, assign,
+// or set as a team's delegation floor.
+struct RoleLabel {
+    name @0 : Text;
+    role @1 : lib.Role;
+}
+
 struct TeamConfig {
     maxRoles @0 : Uint; // max number of roles a team can have
+    roleLabels @1 : List(RoleLabel);
+    // Actions that, in a team with a roster delegation floor, require at
+    // least the floor role (admins always pass). Teams without a floor
+    // keep each action's built-in rule.
+    floorActions @2 : List(Text);
 }
 
 // Used for creation of adhoc and real teams; no
