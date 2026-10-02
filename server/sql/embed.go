@@ -109,15 +109,15 @@ var kvStorePatch1 string
 
 var Patches = map[string]map[int]string{
 	"foks_users": {
-		1: usersPatch1,
-		2: usersPatch2,
-		3: usersPatch3,
-		4: usersPatch4,
-		5: usersPatch5,
-		6: usersPatch6,
-		7: usersPatch7,
-		8: usersPatch8,
-		9: usersPatch9,
+		1:  usersPatch1,
+		2:  usersPatch2,
+		3:  usersPatch3,
+		4:  usersPatch4,
+		5:  usersPatch5,
+		6:  usersPatch6,
+		7:  usersPatch7,
+		8:  usersPatch8,
+		9:  usersPatch9,
 		10: usersPatch10,
 	},
 	"foks_server_config": {

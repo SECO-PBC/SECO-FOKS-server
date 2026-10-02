@@ -855,6 +855,12 @@ func (c *teamEditor) runEditCommon(m shared.MetaContext) error {
 		return err
 	}
 
+	// fork-only: delegated removers may only remove members they added.
+	err = c.checkDelegatedRemovalsOwnAdds(m)
+	if err != nil {
+		return err
+	}
+
 	err = shared.InsertTreeLocationMachinery(m,
 		c.tx,
 		proto.ChainType_Team,

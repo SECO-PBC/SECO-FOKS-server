@@ -74,17 +74,21 @@ func TestDelegateRemovesMemberEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	tew.DirectDoubleMerklePokeInTest(t)
 
-	// The delegate removes bob (whom the OWNER added, before the floor).
+	// Upstream, a delegate may remove any plain member; this fork narrows
+	// that to members the delegate added themselves (the own-invitees rule,
+	// docs/team-roster-delegation.md). bob was added by the OWNER, so the
+	// delegate's removal is refused and bob stays a member.
 	ms, tms := tew.teamMinderFor(t, delg)
 	err = tms.TeamChangeRoles(ms, lcl.TeamChangeRolesArg{
 		Team:    *tm.ToFQTeamParsed(t),
 		Changes: []lcl.RoleChange{tm.uidChange(t, bob, "n")},
 	})
-	require.NoError(t, err)
-	tew.DirectDoubleMerklePokeInTest(t)
-
-	_, err = loadTeamAs(t, tew, tm, bob)
 	require.Error(t, err)
+	require.ErrorContains(t, err, "signer added")
+
+	wrp0, err := loadTeamAs(t, tew, tm, bob)
+	require.NoError(t, err)
+	require.NotNil(t, wrp0)
 
 	// Delegate adds carl (the add boxes carl's delegate key) and removes him.
 	err = tms.Add(ms, lcl.TeamAddArg{
@@ -268,9 +272,11 @@ func TestDelegateRemovalKeyCoverageEnforced(t *testing.T) {
 	require.ErrorContains(t, err, "only an admin may send delegate removal key fills")
 }
 
-// A delegate promoted only after the floor key rotated can still open
-// delegate boxes made at the old generation: the seed chain hands new
-// holders every generation back to the first.
+// A delegate whose floor key rotated after they added someone can still
+// open that member's delegate box, made at the old generation. (Upstream's
+// variant of this test has a late-promoted delegate open the old box; this
+// fork's own-invitees rule means only the adder may remove, so here the
+// adder opens their own old-generation box after a rotation.)
 func TestDelegateOpensOldGenerationDelegateBox(t *testing.T) {
 	tew := testEnvBeta(t)
 	setRosterDelegation(t, tew, true)
@@ -285,46 +291,47 @@ func TestDelegateOpensOldGenerationDelegateBox(t *testing.T) {
 	floor := proto.NewRoleWithMember(100)
 	floorKey := core.RoleKey{Typ: proto.RoleType_MEMBER, Lev: 100}
 
-	// Floor on, with delg1 and bob; bob's delegate box is at floor gen 1.
-	// The perms rows are what a real add would create, so delg2's client
-	// can load bob later.
+	// Floor on, with two delegates.
 	tm.delegationFloor = &floorKey
 	_, err := tm.makeChangesFull(t, m, owner, []proto.MemberRole{
 		delg1.toMemberRole(t, floor, tm.hepks),
-		bob.toMemberRole(t, proto.NewRoleWithMember(0), tm.hepks),
+		delg2.toMemberRole(t, floor, tm.hepks),
 	}, nil, makeChangesKnobs{
 		md: []proto.ChangeMetadata{
 			proto.NewChangeMetadataWithRosterdelegationfloor(floor),
 		},
-		insLocalPermsFor: []proto.PartyID{delg1.uid.ToPartyID(), bob.uid.ToPartyID()},
+		insLocalPermsFor: []proto.PartyID{delg1.uid.ToPartyID(), delg2.uid.ToPartyID()},
 	})
 	require.NoError(t, err)
 	tew.DirectDoubleMerklePokeInTest(t)
 
-	// Removing delg1 rotates every key at or below m/100. skipDelegate so
-	// bob's box stays at the old generation -- the invariant is satisfied
-	// by the existing box, whose generation it does not care about.
+	// delg1 adds bob; bob's delegate box is made at floor generation 1.
+	floorRk := floorKey
+	_, err = tm.makeChangesFull(t, m, delg1, []proto.MemberRole{
+		bob.toMemberRole(t, proto.NewRoleWithMember(0), tm.hepks),
+	}, nil, makeChangesKnobs{
+		gameplanOpts:     &team.GameplanOpts{DelegationFloor: &floorRk},
+		insLocalPermsFor: []proto.PartyID{bob.uid.ToPartyID()},
+	})
+	require.NoError(t, err)
+	tew.DirectDoubleMerklePokeInTest(t)
+
+	// Removing delg2 rotates every key at or below m/100. skipDelegate so
+	// bob's box stays at the old generation -- the coverage check is
+	// satisfied by the existing box, whose generation it does not care
+	// about.
 	_, err = tm.makeChangesFull(t, m, owner, []proto.MemberRole{
-		delg1.toMemberRole(t, proto.NewRoleDefault(proto.RoleType_NONE), tm.hepks),
+		delg2.toMemberRole(t, proto.NewRoleDefault(proto.RoleType_NONE), tm.hepks),
 	}, nil, makeChangesKnobs{skipDelegate: true})
 	require.NoError(t, err)
 	tew.DirectDoubleMerklePokeInTest(t)
 	require.False(t, tm.ptks[floorKey].Metadata().Gen.IsFirst(),
 		"the floor PTK must have rotated for this test to mean anything")
 
-	// delg2 joins at the floor only now...
-	_, err = tm.makeChangesFull(t, m, owner, []proto.MemberRole{
-		delg2.toMemberRole(t, floor, tm.hepks),
-	}, nil, makeChangesKnobs{
-		skipDelegate:     true,
-		insLocalPermsFor: []proto.PartyID{delg2.uid.ToPartyID()},
-	})
-	require.NoError(t, err)
-	tew.DirectDoubleMerklePokeInTest(t)
-
-	// ...and removes bob through the real client, which must unwind the
-	// seed chain to the old generation to open bob's delegate box.
-	ms, tms := tew.teamMinderFor(t, delg2)
+	// delg1 removes bob through the real client, which fetches bob's
+	// delegate box (generation 1) and must open it under the rotated key
+	// ring (generation 2 current).
+	ms, tms := tew.teamMinderFor(t, delg1)
 	err = tms.TeamChangeRoles(ms, lcl.TeamChangeRolesArg{
 		Team:    *tm.ToFQTeamParsed(t),
 		Changes: []lcl.RoleChange{tm.uidChange(t, bob, "n")},
