@@ -527,3 +527,34 @@ func MemberRoleToMemberID(mr *proto.MemberRole, host proto.HostID) (*MemberID, e
 		SrcRole: *rk,
 	}, nil
 }
+
+// MemberInfoFor returns the roster entry for one member, if present.
+func (r *Roster) MemberInfoFor(mid MemberID) (MemberInfo, bool) {
+	r.RosterCore.Lock()
+	defer r.RosterCore.Unlock()
+	mi, ok := r.members[mid]
+	return mi, ok
+}
+
+// RoleOfSigner looks the link signer up in this (pre-link) roster, the same
+// way Gameplan builds its doer: at the team's host, so a remote signer is
+// simply absent.
+func (r *Roster) RoleOfSigner(ko proto.KeyOwner, host proto.HostID) (*core.RoleKey, error) {
+	fqe, err := (proto.FQEntity{
+		Entity: ko.Party.EntityID(),
+		Host:   host,
+	}).Fixed()
+	if err != nil {
+		return nil, err
+	}
+	srcRole, err := core.ImportRole(ko.SrcRole)
+	if err != nil {
+		return nil, err
+	}
+	mi, ok := r.MemberInfoFor(MemberID{Fqe: *fqe, SrcRole: *srcRole})
+	if !ok {
+		return nil, nil
+	}
+	ret := mi.Role
+	return &ret, nil
+}

@@ -702,6 +702,7 @@ func NewBoxedTeamRemovalKey(
 	sender core.SharedPrivateSuiter,
 	teamReceiver *core.SPSBoxer,
 	memberReceiver *core.SPSBoxer,
+	delegateReceiver *core.SPSBoxer,
 	md rem.TeamRemovalKeyMetadata,
 ) (
 	*rem.TeamRemovalBoxData,
@@ -712,48 +713,70 @@ func NewBoxedTeamRemovalKey(
 	if err != nil {
 		return nil, nil, err
 	}
-	box, err := BoxTeamRemovalKey(sender, teamReceiver, memberReceiver, md, key)
+	box, err := BoxTeamRemovalKey(sender, teamReceiver, memberReceiver, delegateReceiver, md, key)
 	if err != nil {
 		return nil, nil, err
 	}
 	return box, key, nil
 }
 
-func BoxTeamRemovalKey(
+// BoxRemovalKeyForReceiver seals one removal key (with its metadata) for a
+// single receiver: the admin PTK, the member, or a delegation floor PTK.
+func BoxRemovalKeyForReceiver(
 	sender core.SharedPrivateSuiter,
-	teamReceiver *core.SPSBoxer,
-	memberReceiver *core.SPSBoxer,
+	rcvr *core.SPSBoxer,
 	md rem.TeamRemovalKeyMetadata,
 	key *rem.TeamRemovalKey,
 ) (
-	*rem.TeamRemovalBoxData,
+	*proto.TeamRemovalKeyBox,
 	error,
 ) {
 	payload := rem.TeamRemovalKeyBoxPayload{
 		Md:  md,
 		Key: *key,
 	}
-	boxOne := func(r *core.SPSBoxer) (*proto.TeamRemovalKeyBox, error) {
-		box, err := sender.BoxFor(&payload, r, core.BoxOpts{IncludePublicKey: true})
+	box, err := sender.BoxFor(&payload, rcvr, core.BoxOpts{IncludePublicKey: true})
+	if err != nil {
+		return nil, err
+	}
+	return &proto.TeamRemovalKeyBox{
+		Box: *box,
+		EncKey: proto.RoleAndGen{
+			Role: rcvr.Role,
+			Gen:  rcvr.Gen,
+		},
+	}, nil
+}
+
+// BoxTeamRemovalKey seals a new member's removal key for everyone who may
+// one day need it: the team admins, the member themselves, and -- when the
+// team has a roster delegation floor -- the floor role (delegateReceiver,
+// nil otherwise).
+func BoxTeamRemovalKey(
+	sender core.SharedPrivateSuiter,
+	teamReceiver *core.SPSBoxer,
+	memberReceiver *core.SPSBoxer,
+	delegateReceiver *core.SPSBoxer,
+	md rem.TeamRemovalKeyMetadata,
+	key *rem.TeamRemovalKey,
+) (
+	*rem.TeamRemovalBoxData,
+	error,
+) {
+	tm, err := BoxRemovalKeyForReceiver(sender, teamReceiver, md, key)
+	if err != nil {
+		return nil, err
+	}
+	mm, err := BoxRemovalKeyForReceiver(sender, memberReceiver, md, key)
+	if err != nil {
+		return nil, err
+	}
+	var dm *proto.TeamRemovalKeyBox
+	if delegateReceiver != nil {
+		dm, err = BoxRemovalKeyForReceiver(sender, delegateReceiver, md, key)
 		if err != nil {
 			return nil, err
 		}
-		return &proto.TeamRemovalKeyBox{
-			Box: *box,
-			EncKey: proto.RoleAndGen{
-				Role: r.Role,
-				Gen:  r.Gen,
-			},
-		}, nil
-	}
-
-	tm, err := boxOne(teamReceiver)
-	if err != nil {
-		return nil, err
-	}
-	mm, err := boxOne(memberReceiver)
-	if err != nil {
-		return nil, err
 	}
 	comm, err := core.ComputeKeyCommitment(key)
 	if err != nil {
@@ -761,9 +784,10 @@ func BoxTeamRemovalKey(
 	}
 
 	return &rem.TeamRemovalBoxData{
-		Md:     md,
-		Team:   *tm,
-		Member: *mm,
-		Comm:   *comm,
+		Md:       md,
+		Team:     *tm,
+		Member:   *mm,
+		Comm:     *comm,
+		Delegate: dm,
 	}, nil
 }

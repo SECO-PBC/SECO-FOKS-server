@@ -306,10 +306,13 @@ func (t *TeamCreator) makeRemovalKeyBox(m MetaContext) error {
 	if t.rmkey == nil {
 		return nil
 	}
+	// No delegate box: a new team has no delegation floor, and the owner is
+	// above m/0 in any case.
 	trkbp, err := team.BoxTeamRemovalKey(
 		t.puk,
 		t.adminPtkPub,
 		t.mePub,
+		nil,
 		rem.TeamRemovalKeyMetadata{
 			Tm:     t.fqt,
 			Member: t.au.FQU().FQParty(),

@@ -34,11 +34,20 @@ func (tm *teamObj) setDelegationFloor(
 	floor proto.Role,
 	mr []proto.MemberRole,
 ) error {
-	_, err := tm.makeChangesFull(t, m, u, mr, nil, makeChangesKnobs{
+	// Track the floor on the team object first, so makeChangesFull builds
+	// the delegate boxes and fills this same link owes (as real clients do).
+	prev := tm.delegationFloor
+	fk, err := team.RosterDelegationFloorActive(&floor)
+	require.NoError(t, err)
+	tm.delegationFloor = fk
+	_, err = tm.makeChangesFull(t, m, u, mr, nil, makeChangesKnobs{
 		md: []proto.ChangeMetadata{
 			proto.NewChangeMetadataWithRosterdelegationfloor(floor),
 		},
 	})
+	if err != nil {
+		tm.delegationFloor = prev
+	}
 	return err
 }
 
