@@ -1046,12 +1046,18 @@ func (l *TeamLoader) checkMerkleRoot(m MetaContext) error {
 
 func (l *TeamLoader) openLinks(m MetaContext) error {
 	roster := l.rosterPre
+	// The floor in force before each link: seeded from cached chain state,
+	// advanced whenever a link changes it, exactly like the roster itself.
+	floor := l.rosterDelegationFloor
 	for n, link := range l.raw.Links {
-		otlr, err := team.OpenTeamLink(&link, l.hepks, &l.Arg.Team.Team, l.Arg.Team.Host, roster)
+		otlr, err := team.OpenTeamLink(&link, l.hepks, &l.Arg.Team.Team, l.Arg.Team.Host, roster, floor)
 		if err != nil {
 			return core.ChainLoaderError{Err: core.CLOpenLinkError{Err: err, N: n}}
 		}
 		roster = otlr.RosterPost
+		if otlr.RosterDelegationFloor != nil {
+			floor = otlr.RosterDelegationFloor
+		}
 		l.otlrs = append(l.otlrs, *otlr)
 	}
 	l.rosterPost = roster

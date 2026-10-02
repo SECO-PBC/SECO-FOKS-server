@@ -244,6 +244,21 @@ type GameplanOpts struct {
 	// links; left unset when replaying existing chains, which must load even
 	// if they contain a link that stranded the team (issue #309).
 	RequireOwner bool
+
+	// DelegationFloor is the team's roster delegation floor in force BEFORE
+	// this change set, nil when delegation is off (never set, or set to
+	// NONE). When non-nil, members at or above it may sign the restricted
+	// changes delegatedChangesAllowedLocked describes; admins and owners are
+	// unaffected either way.
+	DelegationFloor *core.RoleKey
+
+	// LinkHasAdminMetadata is true when the link carrying this change set
+	// also carries link metadata (a team name commitment, an index range, or
+	// a delegation floor). Those stay admin-only, so a delegated change set
+	// is refused when this is set. A new metadata type that should also be
+	// admin-only must be added to the condition that computes this flag in
+	// OpenTeamLink.
+	LinkHasAdminMetadata bool
 }
 
 func (r *Roster) Gameplan(

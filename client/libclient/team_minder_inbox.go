@@ -88,7 +88,34 @@ func (t *TeamMinder) makeAdminBearerToken(
 	return &tok, nil
 }
 
+// loadTeamAndAdminToken is the strict form of loadTeamAndEditToken: for
+// callers whose whole operation is admin-only (inbox, certs, index ranges),
+// which dereference the token.
 func (t *TeamMinder) loadTeamAndAdminToken(
+	m MetaContext,
+	tmid proto.FQTeam,
+	opts LoadTeamOpts,
+) (
+	*TeamRecord,
+	*rem.TeamBearerToken,
+	error,
+) {
+	tm, tok, err := t.loadTeamAndEditToken(m, tmid, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	if tok == nil {
+		return nil, nil, core.KeyNotFoundError{Which: "admin PUK"}
+	}
+	return tm, tok, nil
+}
+
+// loadTeamAndEditToken loads the team and readies a roster edit: an admin
+// bearer token when we hold the private admin PTK, or a nil token when we
+// do not but the team delegates roster changes, in which case the edit
+// posts as the logged-in signer and the chain rule decides what it may
+// contain. Callers must tolerate a nil token.
+func (t *TeamMinder) loadTeamAndEditToken(
 	m MetaContext,
 	tmid proto.FQTeam,
 	opts LoadTeamOpts,
@@ -102,15 +129,26 @@ func (t *TeamMinder) loadTeamAndAdminToken(
 		return nil, nil, err
 	}
 	ptks := tm.Tw().KeyRing().KeysForRole(core.AdminRole)
-	if ptks == nil || !ptks.LastGen().IsValid() {
-		return nil, nil, core.KeyNotFoundError{Which: "admin PUK"}
+	if ptks != nil && ptks.LastGen().IsValid() {
+		if ptk := ptks.Current(); ptk != nil {
+			tok, err := t.makeAdminBearerToken(m, tmid, ptk)
+			if err != nil {
+				return nil, nil, err
+			}
+			return tm, tok, nil
+		}
 	}
-	ptk := ptks.Current()
-	tok, err := t.makeAdminBearerToken(m, tmid, ptk)
+	// No private admin key: nil token if the team delegates roster changes.
+	// Whether this signer clears the floor is the chain rule's call, so it
+	// is not pre-checked here.
+	rk, err := team.RosterDelegationFloorActive(tm.Tw().RosterDelegationFloor())
 	if err != nil {
 		return nil, nil, err
 	}
-	return tm, tok, nil
+	if rk == nil {
+		return nil, nil, core.KeyNotFoundError{Which: "admin PUK"}
+	}
+	return tm, nil, nil
 }
 
 func (t *TeamMinder) adminTokenAndClient(

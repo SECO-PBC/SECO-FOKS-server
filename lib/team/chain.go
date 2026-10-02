@@ -46,7 +46,7 @@ func OpenEldestLink(
 	*OpenEldestRes,
 	error,
 ) {
-	otlr, err := OpenTeamLink(link, hepks, nil, hostID, nil)
+	otlr, err := OpenTeamLink(link, hepks, nil, hostID, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -226,12 +226,18 @@ func ExtractTeamAndSeqno(
 	return &tid, gc.Chainer.Base.Seqno, nil
 }
 
+// OpenTeamLink opens one team chain link against the pre-link roster.
+// priorFloor is the team's roster delegation floor in force BEFORE this
+// link (nil = off): callers replaying a chain pass the latest floor they
+// have seen so far, and the server passes its stored copy. It decides
+// whether a non-admin signer may pass the roster checks.
 func OpenTeamLink(
 	link *proto.LinkOuter,
 	hepks *core.HEPKSet,
 	team *proto.TeamID,
 	hostID proto.HostID,
 	rPre *Roster,
+	priorFloor *proto.Role,
 ) (
 	*OpenTeamLinkRes,
 	error,
@@ -294,13 +300,6 @@ func OpenTeamLink(
 		}
 	}
 
-	// Given the current roster, the signer ID, and the changes, compute
-	// the new roster, the rekey schedule. Also check the changes for sanity.
-	rPost, sched, err := rPre.Gameplan(*gc.Signer.KeyOwner, hostID, mrq, gc.Signer.Key, nil)
-	if err != nil {
-		return nil, err
-	}
-
 	var tnc *proto.Commitment
 	var rng *core.RationalRange
 	var rdf *proto.Role
@@ -337,6 +336,22 @@ func OpenTeamLink(
 			}
 			rdf = &tmp
 		}
+	}
+
+	floorKey, err := RosterDelegationFloorActive(priorFloor)
+	if err != nil {
+		return nil, err
+	}
+	gpOpts := &GameplanOpts{
+		DelegationFloor:      floorKey,
+		LinkHasAdminMetadata: tnc != nil || rng != nil || rdf != nil,
+	}
+
+	// Given the current roster, the signer ID, and the changes, compute
+	// the new roster, the rekey schedule. Also check the changes for sanity.
+	rPost, sched, err := rPre.Gameplan(*gc.Signer.KeyOwner, hostID, mrq, gc.Signer.Key, gpOpts)
+	if err != nil {
+		return nil, err
 	}
 
 	ret := OpenTeamLinkRes{

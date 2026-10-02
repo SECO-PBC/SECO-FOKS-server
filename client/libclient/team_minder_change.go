@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/foks-proj/go-foks/lib/core"
+	"github.com/foks-proj/go-foks/lib/team"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-foks/proto/rem"
@@ -106,6 +107,15 @@ func (t *TeamMinder) TeamChangeRoles(
 				return err
 			}
 
+			var md []proto.ChangeMetadata
+			if arg.DelegationFloor != nil {
+				err = team.CheckRosterDelegationFloor(*arg.DelegationFloor)
+				if err != nil {
+					return err
+				}
+				md = append(md, proto.NewChangeMetadataWithRosterdelegationfloor(*arg.DelegationFloor))
+			}
+
 			tr.Lock()
 			defer tr.Unlock()
 
@@ -118,6 +128,7 @@ func (t *TeamMinder) TeamChangeRoles(
 				cp:       tr.member,
 				hepks:    hepks,
 				changes:  rows,
+				cmd:      md,
 				cfg:      cfg,
 				testOpts: t.teamEditorTestOpts(),
 			}

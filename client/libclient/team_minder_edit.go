@@ -217,24 +217,20 @@ func (t *TeamEditor) setPrivateKeys(
 }
 
 func (t *TeamEditor) checkArgs(m MetaContext, mdOnly bool) error {
-	fields := 0
-	if t.tl != nil {
-		fields++
+	if (t.tl != nil) != (t.tw != nil) {
+		return core.InternalError("team editor: tl and tw must be provided together")
 	}
-	if t.tok != nil {
-		fields++
-	}
-	if t.tw != nil {
-		fields++
-	}
-	if fields != 0 && fields != 3 {
-		return core.InternalError("team editor: tl, tw and tok must be provided together")
+	// tok is optional on an edit: a member at or above the team's roster
+	// delegation floor edits as the logged-in signer, with no admin bearer
+	// token (there is no such thing as a non-admin one).
+	if t.tok != nil && t.tw == nil {
+		return core.InternalError("team editor: tok requires tl and tw")
 	}
 	if t.cp == nil {
 		return core.InternalError("team editor: cryptoPartier (cp) must be provided")
 	}
 	isUser := t.cp.FQParty().Party.IsUser()
-	if fields == 0 && !isUser {
+	if t.tw == nil && !isUser {
 		return core.InternalError("for new team, CP must be a user")
 	}
 	if t.pre == nil && !mdOnly {
@@ -261,12 +257,23 @@ func (t *TeamEditor) runGameplan(m MetaContext) error {
 	if err != nil {
 		return err
 	}
+	var floorKey *core.RoleKey
+	if t.tw != nil {
+		floorKey, err = team.RosterDelegationFloorActive(t.tw.RosterDelegationFloor())
+		if err != nil {
+			return err
+		}
+	}
 	roster, sched, err := t.pre.Gameplan(
 		t.keyOwner(),
 		t.cp.FQParty().Host,
 		mrq,
 		vk.GetEntityID(),
-		&team.GameplanOpts{RequireOwner: true},
+		&team.GameplanOpts{
+			RequireOwner:         true,
+			DelegationFloor:      floorKey,
+			LinkHasAdminMetadata: len(t.cmd) > 0,
+		},
 	)
 	if err != nil {
 		return err
@@ -650,6 +657,9 @@ func (t *TeamEditor) prepareRemoval(
 
 func (t *TeamEditor) prepareAllRemovals(m MetaContext) error {
 
+	if len(t.sched.Removals) == 0 {
+		return nil
+	}
 	if t.tok == nil {
 		return core.InternalError("no token, which is needed to load removal keys")
 	}
