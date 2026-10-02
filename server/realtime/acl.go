@@ -63,13 +63,21 @@ const (
 	// mutation applies to every channel. Reusing it would silently make
 	// rename and archive private-only.
 	accessMutate
+	// accessRevoke (fork-only): remove ANOTHER member from a private
+	// channel. Exactly accessManage, except that step 6 may open it to
+	// members at or above the team's roster delegation floor when the host
+	// configures rt.channel.revoke_private (floorOpensPrivateRevoke). It
+	// shares accessManage's archived gate and read-role bypass, and it does
+	// NOT touch the missing-ACL-row gate: a floor member revokes only in
+	// channels they are in, while admins keep their visible bypass.
+	accessRevoke
 )
 
 // managementKind reports whether this access is about the ACL rather than the
 // channel's contents. Both skip the read-role gate: a team admin has to be
 // able to moderate a private channel whose read role sits above their own.
 func (a accessKind) managementKind() bool {
-	return a == accessManage || a == accessRoster
+	return a == accessManage || a == accessRoster || a == accessRevoke
 }
 
 // adminBypassesAcl reports whether a team admin may exercise this access on a
@@ -228,7 +236,7 @@ func authorizeChannel(
 	// private channel the caller is not in would disclose that the channel
 	// exists.
 	switch want {
-	case accessWrite, accessManage:
+	case accessWrite, accessManage, accessRevoke:
 		if err := archivedBlocks(ca.archivedAt); err != nil {
 			return nil, err
 		}
@@ -278,7 +286,7 @@ func authorizeChannel(
 		if role.LessThan(*readRole) {
 			return nil, core.PermissionError("user role too low to read channel")
 		}
-	case accessManage, accessRoster, accessMutate:
+	case accessManage, accessRoster, accessMutate, accessRevoke:
 		// see above -- and accessMutate for the same reason: an admin must be
 		// able to archive or rename a channel whose read role is above theirs.
 	}
@@ -292,10 +300,20 @@ func authorizeChannel(
 		}
 		// Reading the roster needs no more than the membership (or admin
 		// standing) established in step 3. Changing it needs ownership.
-		if want == accessManage && !ca.aclOwner && !role.IsAdminOrAbove() {
-			// The caller holds an ACL row, so they already know the channel
-			// exists: there is nothing left to hide behind RowNotFound.
-			return nil, core.PermissionError("must be a channel owner or team admin to manage membership")
+		if (want == accessManage || want == accessRevoke) && !ca.aclOwner && !role.IsAdminOrAbove() {
+			openToFloor := false
+			if want == accessRevoke {
+				openToFloor, err = floorOpensPrivateRevoke(m, userdb, ca.team, *role)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if !openToFloor {
+				// The caller holds an ACL row, so they already know the
+				// channel exists: there is nothing left to hide behind
+				// RowNotFound.
+				return nil, core.PermissionError("must be a channel owner or team admin to manage membership")
+			}
 		}
 	}
 	return &ca, nil
@@ -758,7 +776,7 @@ func RevokeChannelMember(
 		rtdb,
 		"realtime.RevokeChannelMember",
 		func(m shared.MetaContext, tx pgx.Tx) (func(shared.MetaContext), error) {
-			want := accessManage
+			want := accessRevoke
 			if arg.Uid.Eq(m.UID()) {
 				// Self-revoke (Leave). accessRoster still requires the
 				// caller to hold an ACL row or admin standing, and an admin
