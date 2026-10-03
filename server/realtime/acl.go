@@ -53,27 +53,27 @@ const (
 	// too, and must: an admin's authority to revoke is useless if they cannot
 	// first see who is in the channel.
 	accessRoster
-	// accessMutate: change the channel's own metadata -- rename, edit
-	// description, archive, unarchive. Requires team admin-or-above, and is
-	// the one kind that passes the archived gate, since unarchiving would
-	// otherwise be unreachable.
+	// accessMutate: change the channel's own metadata -- rename or edit the
+	// description. Requires team admin-or-above unless a delegation floor
+	// action opens it (step 4b), and, with accessArchive, is one of the two
+	// kinds that pass the archived gate, since unarchiving would otherwise be
+	// unreachable.
 	//
 	// Deliberately NOT accessManage: that kind rejects a non-private channel
 	// outright ("channel is not private; it has no ACL"), and metadata
 	// mutation applies to every channel. Reusing it would silently make
 	// rename and archive private-only.
 	//
-	// accessMutate covers rename and edit description; archive and unarchive
-	// are accessArchive. The two differ only in which floor action can open
-	// them below admin (step 4b); everywhere else they are one kind
-	// (isMutation).
+	// Archive and unarchive are accessArchive. The two differ only in which
+	// floor action can open them below admin (step 4b); everywhere else they
+	// are one kind (isMutation).
 	accessMutate
 	// accessArchive (fork-only split of accessMutate): archive or unarchive.
 	accessArchive
 	// accessRevoke (fork-only): remove ANOTHER member from a private
 	// channel. Exactly accessManage, except that step 6 may open it to
 	// members at or above the team's roster delegation floor when the host
-	// configures rt.channel.revoke_private (floorOpensPrivateRevoke). It
+	// configures rt.channel.revoke_private (floorOpens). It
 	// shares accessManage's archived gate and read-role bypass, and it does
 	// NOT touch the missing-ACL-row gate: a floor member revokes only in
 	// channels they are in, while admins keep their visible bypass.
@@ -309,7 +309,7 @@ func authorizeChannel(
 			return nil, core.PermissionError("user role too low to read channel")
 		}
 	case accessManage, accessRoster, accessMutate, accessArchive, accessRevoke:
-		// see above -- and accessMutate for the same reason: an admin must be
+		// see above -- and the mutation kinds for the same reason: an admin must be
 		// able to archive or rename a channel whose read role is above theirs.
 	}
 
@@ -325,7 +325,7 @@ func authorizeChannel(
 		if (want == accessManage || want == accessRevoke) && !ca.aclOwner && !role.IsAdminOrAbove() {
 			openToFloor := false
 			if want == accessRevoke {
-				openToFloor, err = floorOpensPrivateRevoke(m, userdb, ca.team, *role)
+				openToFloor, err = floorOpens(m, userdb, ca.team, *role, FloorActionChannelRevokePrivate)
 				if err != nil {
 					return nil, err
 				}

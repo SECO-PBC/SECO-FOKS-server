@@ -1351,8 +1351,9 @@ func dropChannelPushes(m shared.MetaContext, tx pgx.Tx, channelID int64) error {
 	return err
 }
 
-// UpdateChannel renames a channel and/or replaces its description. Team admins
-// only (enforced by the chokepoint at accessMutate).
+// UpdateChannel renames a channel and/or replaces its description. Team admins,
+// or members at or above the team's delegation floor when the host configures
+// rt.channel.edit (enforced by the chokepoint at accessMutate).
 //
 // The server cannot check what the name says -- name_box is sealed with the
 // parent team's key -- so two things stay the client's responsibility, and
@@ -1431,7 +1432,10 @@ func UpdateChannel(m shared.MetaContext, arg rem.RtUpdateChannelArg) error {
 	)
 }
 
-// SetChannelArchived archives or unarchives a channel. Team admins only.
+// SetChannelArchived archives or unarchives a channel. Team admins, or -- for an
+// open channel -- members at or above the team's delegation floor when the host
+// configures rt.channel.archive_open (enforced by the chokepoint at
+// accessArchive).
 //
 // Archiving closes the channel to new activity and drops it out of the inbox
 // and the late-join fan-in, but deletes nothing: messages, parties, ACL and

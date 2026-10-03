@@ -58,6 +58,15 @@ func TestChannelEditArchiveFloorActions(t *testing.T) {
 	err = sc.rename(t, sc.bob, sc.pubSpec(), randomChannelName(t, "bob-"), "")
 	require.IsType(t, core.PermissionError(""), err)
 
+	// The floor never reaches an admin-tier channel: the tier gate runs first.
+	adminID, err := sc.alice.minder.MakeChannel(
+		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, randomChannelName(t, "admin-"), "",
+		proto.RolePairOpt{Read: &proto.AdminRole, Write: &proto.AdminRole},
+	)
+	require.NoError(t, err)
+	err = sc.rename(t, sc.eddie, sc.specFor(*adminID), randomChannelName(t, "tier-"), "")
+	require.Error(t, err)
+
 	// rt.channel.archive_open opens archive and unarchive of an open channel.
 	setTeamFloorActions(t, tew, []string{"rt.channel.edit", "rt.channel.archive_open"}, nil)
 	err = sc.setArchived(t, sc.bob, sc.pubSpec(), true)

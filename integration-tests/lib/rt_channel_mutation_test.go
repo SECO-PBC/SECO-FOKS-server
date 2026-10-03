@@ -142,9 +142,9 @@ func (s *mutScene) find(
 
 // --- rename ---------------------------------------------------------------
 
-// Only team admins may change channel metadata. The product rule (Leaders and
-// Stewards) collapses to admin-or-above in FOKS, and it is enforced on the
-// server: a UI-only rule is not a rule.
+// Only team admins may change channel metadata in a team without a delegation
+// floor (the floor actions are rt_channel_mutation_floor_test.go), and it is
+// enforced on the server: a UI-only rule is not a rule.
 func TestRenameRequiresAdmin(t *testing.T) {
 	sc := setupMutScene(t)
 
