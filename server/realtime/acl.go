@@ -62,7 +62,14 @@ const (
 	// outright ("channel is not private; it has no ACL"), and metadata
 	// mutation applies to every channel. Reusing it would silently make
 	// rename and archive private-only.
+	//
+	// accessMutate covers rename and edit description; archive and unarchive
+	// are accessArchive. The two differ only in which floor action can open
+	// them below admin (step 4b); everywhere else they are one kind
+	// (isMutation).
 	accessMutate
+	// accessArchive (fork-only split of accessMutate): archive or unarchive.
+	accessArchive
 	// accessRevoke (fork-only): remove ANOTHER member from a private
 	// channel. Exactly accessManage, except that step 6 may open it to
 	// members at or above the team's roster delegation floor when the host
@@ -87,7 +94,13 @@ func (a accessKind) managementKind() bool {
 // it). It deliberately does NOT cover reads or writes: an admin who wants to
 // read a private channel grants themselves a row, which its members can see.
 func (a accessKind) adminBypassesAcl() bool {
-	return a.managementKind() || a == accessMutate
+	return a.managementKind() || a.isMutation()
+}
+
+// isMutation reports whether this access changes the channel's own metadata
+// (accessMutate or accessArchive).
+func (a accessKind) isMutation() bool {
+	return a == accessMutate || a == accessArchive
 }
 
 // Values stored in channel_acl.acl_role.
@@ -228,7 +241,7 @@ func authorizeChannel(
 	// sends, and no ACL changes, since both are activity in a room that has
 	// been closed. Reads by explicit channel id still work -- the channel is
 	// hidden, not destroyed, and in practice no client reaches one because the
-	// inbox drops it. accessMutate passes, or unarchive could never run, and
+	// inbox drops it. The mutation kinds pass, or unarchive could never run, and
 	// rename must stay reachable because renaming an archived channel is how
 	// its reserved name is released.
 	//
@@ -254,9 +267,18 @@ func authorizeChannel(
 	// 4b. Metadata mutation is admins only, matching the product rule that
 	// renaming, editing and archiving a channel are Leader/Steward actions
 	// (blueprints/channels/CHANNELS.md 5.1). Enforced here rather than only in
-	// the UI: a UI-only rule is not a rule.
-	if want == accessMutate && !role.IsAdminOrAbove() {
-		return nil, core.PermissionError("must be a team admin to change channel metadata")
+	// the UI: a UI-only rule is not a rule. In a team with a roster
+	// delegation floor, the host can open rename/edit (rt.channel.edit) and
+	// archiving an OPEN channel (rt.channel.archive_open) to the floor role;
+	// see floorOpensMutation.
+	if want.isMutation() && !role.IsAdminOrAbove() {
+		open, err := floorOpensMutation(m, userdb, &ca, want, *role)
+		if err != nil {
+			return nil, err
+		}
+		if !open {
+			return nil, core.PermissionError("must be a team admin to change channel metadata")
+		}
 	}
 
 	// 5. Role gate, for reads and writes only.
@@ -286,7 +308,7 @@ func authorizeChannel(
 		if role.LessThan(*readRole) {
 			return nil, core.PermissionError("user role too low to read channel")
 		}
-	case accessManage, accessRoster, accessMutate, accessRevoke:
+	case accessManage, accessRoster, accessMutate, accessArchive, accessRevoke:
 		// see above -- and accessMutate for the same reason: an admin must be
 		// able to archive or rename a channel whose read role is above theirs.
 	}

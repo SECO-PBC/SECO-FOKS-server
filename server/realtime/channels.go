@@ -1042,9 +1042,11 @@ type channelMutator struct {
 	wakeUIDs []proto.UID
 }
 
-// authorize runs the chokepoint at accessMutate and caches what it loaded.
-func (c *channelMutator) authorize(m shared.MetaContext) error {
-	ca, err := authorizeChannel(m, c.tx, c.userdb, c.chid, accessMutate, true)
+// authorize runs the chokepoint at a mutation kind (accessMutate for rename
+// and edit, accessArchive for archive and unarchive) and caches what it
+// loaded.
+func (c *channelMutator) authorize(m shared.MetaContext, want accessKind) error {
+	ca, err := authorizeChannel(m, c.tx, c.userdb, c.chid, want, true)
 	if err != nil {
 		return err
 	}
@@ -1397,7 +1399,7 @@ func UpdateChannel(m shared.MetaContext, arg rem.RtUpdateChannelArg) error {
 				tx:     tx,
 				userdb: userdb,
 			}
-			if err := mu.authorize(m); err != nil {
+			if err := mu.authorize(m, accessMutate); err != nil {
 				return nil, err
 			}
 			// The name is sealed at the tier's name role; the description at
@@ -1458,7 +1460,7 @@ func SetChannelArchived(m shared.MetaContext, arg rem.RtSetChannelArchivedArg) e
 				tx:     tx,
 				userdb: userdb,
 			}
-			if err := mu.authorize(m); err != nil {
+			if err := mu.authorize(m, accessArchive); err != nil {
 				return nil, err
 			}
 			var set string

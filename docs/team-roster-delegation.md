@@ -361,13 +361,15 @@ its own files, so the list causes no merge conflicts.
 | Action | Built-in rule (today) | Checked in | Upstream |
 |---|---|---|---|
 | `rt.channel.create_open` | any member | `checkPerms` (`server/realtime/channels.go:453`) | Yes |
-| `rt.channel.edit` | admin | `authorizeChannel`, gate 4b (`acl.go:250`), for `UpdateChannel` (`channels.go:1377`) | After #376 |
-| `rt.channel.archive_open` | admin | gate 4b, for `SetChannelArchived` (`channels.go:1438`) on an open channel | After #376 |
+| `rt.channel.edit` | admin | `authorizeChannel`, gate 4b, at `accessMutate`, for `UpdateChannel` (`flooraction_mutate.go`) | After #376 |
+| `rt.channel.archive_open` | admin | gate 4b, at `accessArchive`, for `SetChannelArchived` on an open channel (`flooraction_mutate.go`) | After #376 |
 | `rt.channel.revoke_private` | channel owner or admin | `acl.go:295`, for `RevokeChannelMember` (`acl.go:761`) | Fork-only |
 
-- **Gate 4b** stops being a fixed admin check. `authorizeChannel` takes the
-  action, and the channel's privacy is already loaded at that point
-  (`acl.go:164-208`). Private archive, private creation (`acl.go:322`) and
+- **Gate 4b** stops being a fixed admin check. Archive and unarchive get
+  their own access kind, `accessArchive` (a split of `accessMutate`, which
+  keeps rename and edit), so the chokepoint knows the action; the channel's
+  privacy is already loaded at that point. Both kinds behave identically
+  everywhere else (`isMutation`). Private archive, private creation (`acl.go:322`) and
   grant on a private channel (`acl.go:673`) keep their fixed admin or owner
   rule; they are not floor actions.
 - **A Steward outside a private channel** still gets "not found" from the
@@ -379,7 +381,9 @@ its own files, so the list causes no merge conflicts.
   it before setting the floor. Otherwise a plain member who sends first is
   refused.
 - **Upstream status:** rename and archive are proposed upstream as #376, not
-  merged. Private channels are fork-only (`SECO-UPSTREAM.md`).
+  merged. The fork carries both and, since 2026-10-02, the two floor actions
+  on them (PR 5b, built fork-first). Private channels are fork-only
+  (`SECO-UPSTREAM.md`).
 
 ### 5.8 Own invitees (fork-only)
 
@@ -534,7 +538,7 @@ Branch each upstream PR from `upstream/main`, stacked where noted.
 | 3 | Chain rule, tokenless edit path, CLI flag (on 1, 2) | `lib/team/delegation.go`, `lib/team/core.go`, `server/engine/team_admin.go`, `client/libclient/team_minder_*.go` | M–L | Yes |
 | 4 | Delegate removal boxes: column, offchain field, invariant, bulk and delegate fetch (on 3) | SQL patch, `proto-src/rem/team.snowp`, `server/engine/team_admin.go`, `server/shared/team.go`, `client/libclient/team_minder_edit.go` | M | Yes |
 | 5 | Floor actions, `role_labels`/`floor_actions` in `GetTeamConfig`, `create_open` (on 2) | `server/shared/config*.go`, `server/realtime/*`, `proto-src/rem/team.snowp` | M | Yes |
-| 5b | `edit`, `archive_open` (on 5 and #376) | `server/realtime/acl.go`, `channels.go` | S | Yes, after #376 |
+| 5b | `edit`, `archive_open` (on 5 and #376) — built in the fork 2026-10-02 | `server/realtime/acl.go`, `channels.go`, `flooraction_mutate.go` | S | Yes, after #376 |
 | F1 | `revoke_private` (on 5) | `server/realtime` | S | Fork-only |
 | F2 | Own-invitees check (on 3) | `server/engine` | S | Fork-only |
 
