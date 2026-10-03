@@ -1042,9 +1042,11 @@ type channelMutator struct {
 	wakeUIDs []proto.UID
 }
 
-// authorize runs the chokepoint at accessMutate and caches what it loaded.
-func (c *channelMutator) authorize(m shared.MetaContext) error {
-	ca, err := authorizeChannel(m, c.tx, c.userdb, c.chid, accessMutate, true)
+// authorize runs the chokepoint at a mutation kind (accessMutate for rename
+// and edit, accessArchive for archive and unarchive) and caches what it
+// loaded.
+func (c *channelMutator) authorize(m shared.MetaContext, want accessKind) error {
+	ca, err := authorizeChannel(m, c.tx, c.userdb, c.chid, want, true)
 	if err != nil {
 		return err
 	}
@@ -1349,8 +1351,9 @@ func dropChannelPushes(m shared.MetaContext, tx pgx.Tx, channelID int64) error {
 	return err
 }
 
-// UpdateChannel renames a channel and/or replaces its description. Team admins
-// only (enforced by the chokepoint at accessMutate).
+// UpdateChannel renames a channel and/or replaces its description. Team admins,
+// or members at or above the team's delegation floor when the host configures
+// rt.channel.edit (enforced by the chokepoint at accessMutate).
 //
 // The server cannot check what the name says -- name_box is sealed with the
 // parent team's key -- so two things stay the client's responsibility, and
@@ -1397,7 +1400,7 @@ func UpdateChannel(m shared.MetaContext, arg rem.RtUpdateChannelArg) error {
 				tx:     tx,
 				userdb: userdb,
 			}
-			if err := mu.authorize(m); err != nil {
+			if err := mu.authorize(m, accessMutate); err != nil {
 				return nil, err
 			}
 			// The name is sealed at the tier's name role; the description at
@@ -1429,7 +1432,10 @@ func UpdateChannel(m shared.MetaContext, arg rem.RtUpdateChannelArg) error {
 	)
 }
 
-// SetChannelArchived archives or unarchives a channel. Team admins only.
+// SetChannelArchived archives or unarchives a channel. Team admins, or -- for an
+// open channel -- members at or above the team's delegation floor when the host
+// configures rt.channel.archive_open (enforced by the chokepoint at
+// accessArchive).
 //
 // Archiving closes the channel to new activity and drops it out of the inbox
 // and the late-join fan-in, but deletes nothing: messages, parties, ACL and
@@ -1458,7 +1464,7 @@ func SetChannelArchived(m shared.MetaContext, arg rem.RtSetChannelArchivedArg) e
 				tx:     tx,
 				userdb: userdb,
 			}
-			if err := mu.authorize(m); err != nil {
+			if err := mu.authorize(m, accessArchive); err != nil {
 				return nil, err
 			}
 			var set string

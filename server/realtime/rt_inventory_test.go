@@ -61,13 +61,15 @@ var rpcAccessClass = map[string]rpcClassification{
 	"rtUpdateChannel": {
 		channelWrite,
 		"TestRenameRequiresAdmin, TestRenameCasRace, TestRenameResealsAtTierRole, " +
-			"TestRenamedArchivedFreesTheName (row 16). Chokepoint at accessMutate, " +
-			"which requires team admin-or-above",
+			"TestRenamedArchivedFreesTheName, TestChannelEditArchiveFloorActions (row 16). " +
+			"Chokepoint at accessMutate, which requires team admin-or-above unless " +
+			"rt.channel.edit opens it to the delegation floor",
 	},
 	"rtSetChannelArchived": {
 		channelWrite,
 		"TestArchiveRequiresAdmin, TestArchivedLeavesTheInbox, " +
-			"TestCannotArchiveDefaultChannel (row 17). Chokepoint at accessMutate",
+			"TestCannotArchiveDefaultChannel, TestChannelArchivePrivateStaysAdmin (row 17). " +
+			"Chokepoint at accessArchive",
 	},
 	"rtNewChannel": {
 		channelWrite,
@@ -235,8 +237,8 @@ var queryAllowlist = map[string]allowedQueries{
 		"which for a private channel equal its ACL (invariant asserted by " +
 		"TestPrivateAclEqualsUserChannels) and are re-validated against the team " +
 		"roster by pruneStaleChannelMembers immediately before this runs"},
-	"touchChannelSet":                       {2, "grant and metadata-mutation paths; runs after authorizeChannel(accessManage or accessMutate) and touches only version bookkeeping"},
-	"channelMutator.casSeqno":               {1, "metadata mutation; runs after authorizeChannel(accessMutate), and writes only the row that call already authorized"},
+	"touchChannelSet":                       {2, "grant and metadata-mutation paths; runs after authorizeChannel(accessManage, accessMutate or accessArchive) and touches only version bookkeeping"},
+	"channelMutator.casSeqno":               {1, "metadata mutation; runs after authorizeChannel(accessMutate or accessArchive), and writes only the row that call already authorized"},
 	"channelMutator.membersWithDeliveryRow": {1, "metadata mutation; reads the delivery rows of the already-authorized channel to avoid re-fanning a member who has one, and returns no channel identity"},
 	"channelMutator.stampMembers":           {2, "metadata mutation; re-stamps the delivery rows of the already-authorized channel so the change reaches members' inboxes. Reads no channel identity a member does not already hold"},
 	"channelMaker.insertChannel":            {1, "creation; runs after channelMaker.checkPerms -> authorizeChannelCreate"},

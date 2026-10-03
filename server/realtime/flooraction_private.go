@@ -21,13 +21,15 @@ import (
 // community's add policy; removal is the delegated-moderation action.
 const FloorActionChannelRevokePrivate = "rt.channel.revoke_private"
 
-// floorOpensPrivateRevoke says whether the host config plus the team's
-// delegation floor open accessRevoke to this caller.
-func floorOpensPrivateRevoke(
+// floorOpens says whether the host configures action and the team's active
+// delegation floor is at or below role -- i.e. whether the floor opens an
+// otherwise admin-only action to this non-admin caller.
+func floorOpens(
 	m shared.MetaContext,
 	userdb shared.Querier,
 	teamID proto.TeamID,
 	role core.RoleKey,
+	action string,
 ) (
 	bool,
 	error,
@@ -36,7 +38,7 @@ func floorOpensPrivateRevoke(
 	if err != nil {
 		return false, err
 	}
-	if !slices.Contains(tcfg.FloorActions(), FloorActionChannelRevokePrivate) {
+	if !slices.Contains(tcfg.FloorActions(), action) {
 		return false, nil
 	}
 	flr, err := shared.LoadRosterDelegationFloor(m, userdb, teamID)
