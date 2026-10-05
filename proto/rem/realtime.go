@@ -1425,13 +1425,15 @@ func (r *RTThreadPage) Bytes() []byte { return nil }
 var RealTimeProtocolID rpc.ProtocolUniqueID = rpc.ProtocolUniqueID(0x4f58e7d4)
 
 type RtNewChannelArg struct {
-	Md      RTChannelMetadata
-	SetVers lib.RTChannelSetVersion
+	Md         RTChannelMetadata
+	SetVers    lib.RTChannelSetVersion
+	StartMuted bool
 }
 type RtNewChannelArgInternal__ struct {
-	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Md      *RTChannelMetadataInternal__
-	SetVers *lib.RTChannelSetVersionInternal__
+	_struct    struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Md         *RTChannelMetadataInternal__
+	SetVers    *lib.RTChannelSetVersionInternal__
+	StartMuted *bool
 }
 
 func (r RtNewChannelArgInternal__) Import() RtNewChannelArg {
@@ -1448,12 +1450,19 @@ func (r RtNewChannelArgInternal__) Import() RtNewChannelArg {
 			}
 			return x.Import()
 		})(r.SetVers),
+		StartMuted: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.StartMuted),
 	}
 }
 func (r RtNewChannelArg) Export() *RtNewChannelArgInternal__ {
 	return &RtNewChannelArgInternal__{
-		Md:      r.Md.Export(),
-		SetVers: r.SetVers.Export(),
+		Md:         r.Md.Export(),
+		SetVers:    r.SetVers.Export(),
+		StartMuted: &r.StartMuted,
 	}
 }
 func (r *RtNewChannelArg) Encode(enc rpc.Encoder) error {
@@ -2515,6 +2524,54 @@ func (r *RtSetChannelArchivedArg) Decode(dec rpc.Decoder) error {
 
 func (r *RtSetChannelArchivedArg) Bytes() []byte { return nil }
 
+type RtSetChannelMutedArg struct {
+	ChannelID lib.RTChannelID
+	Muted     bool
+}
+type RtSetChannelMutedArgInternal__ struct {
+	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	ChannelID *lib.RTChannelIDInternal__
+	Muted     *bool
+}
+
+func (r RtSetChannelMutedArgInternal__) Import() RtSetChannelMutedArg {
+	return RtSetChannelMutedArg{
+		ChannelID: (func(x *lib.RTChannelIDInternal__) (ret lib.RTChannelID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.ChannelID),
+		Muted: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Muted),
+	}
+}
+func (r RtSetChannelMutedArg) Export() *RtSetChannelMutedArgInternal__ {
+	return &RtSetChannelMutedArgInternal__{
+		ChannelID: r.ChannelID.Export(),
+		Muted:     &r.Muted,
+	}
+}
+func (r *RtSetChannelMutedArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RtSetChannelMutedArg) Decode(dec rpc.Decoder) error {
+	var tmp RtSetChannelMutedArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RtSetChannelMutedArg) Bytes() []byte { return nil }
+
 type RealTimeInterface interface {
 	RtNewChannel(context.Context, RtNewChannelArg) error
 	RtGetChannel(context.Context, lib.RTChannelID) (RTChannelMetadata, error)
@@ -2537,6 +2594,7 @@ type RealTimeInterface interface {
 	RtNotifyMembers(context.Context, RtNotifyMembersArg) error
 	RtUpdateChannel(context.Context, RtUpdateChannelArg) error
 	RtSetChannelArchived(context.Context, RtSetChannelArchivedArg) error
+	RtSetChannelMuted(context.Context, RtSetChannelMutedArg) error
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h lib.Header) error
 	MakeResHeader() lib.Header
@@ -3044,6 +3102,26 @@ func (c RealTimeClient) RtSetChannelArchived(ctx context.Context, arg RtSetChann
 	}
 	var tmp rpc.DataWrap[lib.Header, interface{}]
 	err = c.Cli.Call2(ctx, rpc.NewMethodV2(RealTimeProtocolID, 208, "RealTime.rtSetChannelArchived"), warg, &tmp, 0*time.Millisecond, realTimeErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+func (c RealTimeClient) RtSetChannelMuted(ctx context.Context, arg RtSetChannelMutedArg) (err error) {
+	warg := &rpc.DataWrap[lib.Header, *RtSetChannelMutedArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, interface{}]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(RealTimeProtocolID, 209, "RealTime.rtSetChannelMuted"), warg, &tmp, 0*time.Millisecond, realTimeErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
 	if err != nil {
 		return
 	}
@@ -3668,6 +3746,34 @@ func RealTimeProtocol(i RealTimeInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "rtSetChannelArchived",
+			},
+			209: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *RtSetChannelMutedArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *RtSetChannelMutedArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *RtSetChannelMutedArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						err := i.RtSetChannelMuted(ctx, (typedArg.Import()))
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[lib.Header, interface{}]{
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "rtSetChannelMuted",
 			},
 		},
 		WrapError: RealTimeMakeGenericErrorWrapper(i.ErrorWrapper()),

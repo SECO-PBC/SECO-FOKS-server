@@ -115,7 +115,7 @@ func reconcileUserChannels(m shared.MetaContext, app proto.RTAppID) error {
 		func(m shared.MetaContext, tx pgx.Tx) (func(shared.MetaContext), error) {
 			fanned := false
 			for _, chid := range candidates {
-				inserted, err := fanUserIntoChannel(m, tx, uid, appDB, chid)
+				inserted, err := fanUserIntoChannel(m, tx, uid, appDB, chid, false)
 				if err != nil {
 					return nil, err
 				}

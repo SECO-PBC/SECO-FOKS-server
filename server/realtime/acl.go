@@ -744,7 +744,7 @@ func GrantChannelMember(
 			}
 			// Idempotent: a re-grant of an existing member (say, promoting
 			// them to owner) leaves their delivery row alone.
-			_, err = fanUserIntoChannel(m, tx, arg.Uid, appDB, arg.ChannelID.Short())
+			_, err = fanUserIntoChannel(m, tx, arg.Uid, appDB, arg.ChannelID.Short(), false)
 			if err != nil {
 				return nil, err
 			}

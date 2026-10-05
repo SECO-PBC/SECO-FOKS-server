@@ -203,6 +203,7 @@ func (c *AgentConn) ClientRTMakeChannel(
 			NoPush:             arg.NoPush,
 			Private:            arg.Private,
 			AllowDuplicateName: arg.AllowDuplicateName,
+			StartMuted:         arg.StartMuted,
 		},
 		nil,
 	)

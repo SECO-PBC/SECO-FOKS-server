@@ -440,11 +440,14 @@ func applyPrivateGate(md *rem.RTChannelMetadata, aclMember bool) {
 }
 
 type channelMaker struct {
-	md      rem.RTChannelMetadata
-	vers    proto.RTChannelSetVersion
-	userdb  *pgxpool.Conn
-	rtdbtx  pgx.Tx
-	dstRole *core.RoleKey
+	md   rem.RTChannelMetadata
+	vers proto.RTChannelSetVersion
+	// startMuted fans every member but the creator in muted (fork-only,
+	// follow-scoped-push).
+	startMuted bool
+	userdb     *pgxpool.Conn
+	rtdbtx     pgx.Tx
+	dstRole    *core.RoleKey
 
 	// members whose inbox versions the fanout bumped; the caller wakes their
 	// parked long-pollers after the transaction commits.
@@ -781,7 +784,8 @@ func (c *channelMaker) fanoutToUser(m shared.MetaContext, uid proto.UID) error {
 	if err != nil {
 		return err
 	}
-	inserted, err := fanUserIntoChannel(m, c.rtdbtx, uid, app, c.md.Id.Short())
+	muted := c.startMuted && uid != m.UID()
+	inserted, err := fanUserIntoChannel(m, c.rtdbtx, uid, app, c.md.Id.Short(), muted)
 	if err != nil {
 		return err
 	}
@@ -799,13 +803,15 @@ func (c *channelMaker) fanoutToUser(m shared.MetaContext, uid proto.UID) error {
 // requires. Shared by the channel-creation fanout and the late-join fan-in
 // (issue #301). Returns false if the membership row already existed (a benign
 // race for the late-join path: a concurrent device fanned the user in first;
-// the version bump is then a harmless gap).
+// the version bump is then a harmless gap). muted is the new row's push
+// mute: only the creation fanout of a startMuted channel passes true.
 func fanUserIntoChannel(
 	m shared.MetaContext,
 	tx pgx.Tx,
 	uid proto.UID,
 	appDB string,
 	channelID proto.RTChannelIDShort,
+	muted bool,
 ) (
 	bool,
 	error,
@@ -861,7 +867,7 @@ func fanUserIntoChannel(
 			 last_msg_time, earliest_msg_time, read_through, hidden, muted,
 			 ctime, mtime)
 		VALUES ($1, $2, $3, $4, $5,
-		        NOW(), NULL, 0, false, false,
+		        NOW(), NULL, 0, false, $6,
 		        NOW(), NOW())
 		ON CONFLICT (short_host_id, channel_id, uid) DO NOTHING`,
 		m.ShortHostID(),
@@ -869,6 +875,7 @@ func fanUserIntoChannel(
 		uid.ExportToDB(),
 		appDB,
 		inboxVers,
+		muted,
 	)
 	if err != nil {
 		return false, err
@@ -902,9 +909,9 @@ func (c *channelMaker) run(m shared.MetaContext) error {
 
 func MakeChannel(
 	m shared.MetaContext,
-	md rem.RTChannelMetadata,
-	vers proto.RTChannelSetVersion,
+	arg rem.RtNewChannelArg,
 ) error {
+	md, vers := arg.Md, arg.SetVers
 
 	rtdb, err := m.Db(shared.DbTypeRealTime)
 	if err != nil {
@@ -922,10 +929,11 @@ func MakeChannel(
 		"realtime.MakeChannel",
 		func(m shared.MetaContext, tx pgx.Tx) (func(shared.MetaContext), error) {
 			mk := channelMaker{
-				md:     md,
-				vers:   vers,
-				rtdbtx: tx,
-				userdb: userdb,
+				md:         md,
+				vers:       vers,
+				startMuted: arg.StartMuted,
+				rtdbtx:     tx,
+				userdb:     userdb,
 			}
 			if err := mk.run(m); err != nil {
 				return nil, err
@@ -1285,7 +1293,7 @@ func (c *channelMutator) fanInEligibleMembers(m shared.MetaContext) error {
 		if existing[uid] {
 			continue
 		}
-		inserted, err := fanUserIntoChannel(m, c.tx, uid, c.appDB, proto.RTChannelIDShort(c.chid))
+		inserted, err := fanUserIntoChannel(m, c.tx, uid, c.appDB, proto.RTChannelIDShort(c.chid), false)
 		if err != nil {
 			return err
 		}

@@ -166,7 +166,10 @@ protocol RealTime
          * tier already has, and the name "general": for a caller that
          * identifies channels by id. librt.MakeChannelOpts.AllowDuplicateName
          * is the other half. */
-        allowDuplicateName @4 : Bool
+        allowDuplicateName @4 : Bool,
+        /* FORK-ONLY (follow-scoped-push). Fan every other member in muted.
+         * librt.MakeChannelOpts.StartMuted is the other half. */
+        startMuted @5 : Bool
     ) -> lib.RTChannelID;
 
     clientRTListChannelsForTeam @1 (

@@ -172,6 +172,11 @@ type MakeChannelOpts struct {
 	// control channel, a DM team's nameless default channel -- rely on the
 	// collision check to create it exactly once.
 	AllowDuplicateName bool
+
+	// StartMuted fans every member but the creator in with their push mute
+	// set (follow-scoped-push): a new open channel pushes nobody until they
+	// join it, which unmutes them (SetChannelMuted). Creation-time only.
+	StartMuted bool
 }
 
 func (d *Minder) MakeChannel(
@@ -420,8 +425,9 @@ func (d *Minder) makeChannelOneAttempt(
 	update.NoPush = opts.NoPush
 
 	arg := rem.RtNewChannelArg{
-		Md:      update,
-		SetVers: chlst.Vers + 1,
+		Md:         update,
+		SetVers:    chlst.Vers + 1,
+		StartMuted: opts.StartMuted,
 	}
 
 	_, cli, err := d.clientLocal(m.Base(), d.au)
@@ -1015,6 +1021,39 @@ func (d *Minder) ReadThrough(
 	return cli.RtReadThrough(m.Ctx(), rem.RTReadThroughArg{
 		ChannelID: ch.Id,
 		Seq:       seq,
+	})
+}
+
+// SetChannelMuted sets the caller's own push mute in a channel
+// (follow-scoped-push): a muted member gets no push for its sends. Setting the
+// value it already has is a no-op server-side; a change bumps the caller's
+// inbox version, so the new flag reaches their other devices' inbox rows.
+func (d *Minder) SetChannelMuted(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	muted bool,
+) error {
+	err := assertTeam(team)
+	if err != nil {
+		return err
+	}
+	rtp, err := d.base.GetParty(m.Base(), team)
+	if err != nil {
+		return err
+	}
+	ch, err := d.resolveChannel(m, rtp, appID, channel)
+	if err != nil {
+		return err
+	}
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return err
+	}
+	return cli.RtSetChannelMuted(m.Ctx(), rem.RtSetChannelMutedArg{
+		ChannelID: ch.Id,
+		Muted:     muted,
 	})
 }
 

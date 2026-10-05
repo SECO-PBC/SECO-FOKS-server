@@ -51,7 +51,7 @@ func (s *Server) Setup(m shared.MetaContext) error {
 
 func (c *ClientConn) RtNewChannel(ctx context.Context, arg rem.RtNewChannelArg) error {
 	m := shared.NewMetaContextConn(ctx, c)
-	err := MakeChannel(m, arg.Md, arg.SetVers)
+	err := MakeChannel(m, arg)
 	return err
 }
 
@@ -192,6 +192,11 @@ func (c *ClientConn) RtUpdateChannel(ctx context.Context, arg rem.RtUpdateChanne
 func (c *ClientConn) RtSetChannelArchived(ctx context.Context, arg rem.RtSetChannelArchivedArg) error {
 	m := shared.NewMetaContextConn(ctx, c)
 	return SetChannelArchived(m, arg)
+}
+
+func (c *ClientConn) RtSetChannelMuted(ctx context.Context, arg rem.RtSetChannelMutedArg) error {
+	m := shared.NewMetaContextConn(ctx, c)
+	return SetChannelMuted(m, arg)
 }
 
 var _ shared.RPCServer = (*Server)(nil)
