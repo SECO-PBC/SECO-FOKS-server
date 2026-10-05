@@ -334,7 +334,7 @@ func ReleasePushes(m shared.MetaContext, arg rem.RtReleasePushesArg) error {
 }
 
 // NotifyMembers queues one content-free 'system' push per entry whose member
-// can read the channel. Others are skipped without error.
+// can read the channel and has not muted it. Others are skipped without error.
 // NotifyMembers queues system pushes, which is new activity, so an archived
 // channel must not produce one. holderTx authorizes at accessRead, which the
 // chokepoint deliberately does not gate on archived_at (a read by explicit id
@@ -390,15 +390,16 @@ func NotifyMembers(m shared.MetaContext, arg rem.RtNotifyMembersArg) error {
 				if len(e.Handle) > 0 {
 					data = e.Handle
 				}
-				// Only members with a delivery row: the same set the send
-				// fan-out pushes to.
+				// Only unmuted members with a delivery row: the same set the
+				// send fan-out pushes to.
 				_, err = tx.Exec(
 					m.Ctx(),
 					`INSERT INTO push_outbox
 					   (short_host_id, uid, channel_id, kind, seq, data, status, ctime, mtime)
 					 SELECT uc.short_host_id, uc.uid, uc.channel_id, 'system', NULL, $4, 'queued', NOW(), NOW()
 					   FROM user_channels uc
-					  WHERE uc.short_host_id=$1 AND uc.channel_id=$2 AND uc.uid=$3`,
+					  WHERE uc.short_host_id=$1 AND uc.channel_id=$2 AND uc.uid=$3
+					    AND NOT uc.muted`,
 					m.ShortHostID(), chid, e.Uid.ExportToDB(), data,
 				)
 				if err != nil {

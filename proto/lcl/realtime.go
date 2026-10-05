@@ -1281,6 +1281,7 @@ type ClientRTMakeChannelArg struct {
 	NoPush             bool
 	Private            bool
 	AllowDuplicateName bool
+	StartMuted         bool
 }
 type ClientRTMakeChannelArgInternal__ struct {
 	_struct            struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -1289,6 +1290,7 @@ type ClientRTMakeChannelArgInternal__ struct {
 	NoPush             *bool
 	Private            *bool
 	AllowDuplicateName *bool
+	StartMuted         *bool
 }
 
 func (c ClientRTMakeChannelArgInternal__) Import() ClientRTMakeChannelArg {
@@ -1323,6 +1325,12 @@ func (c ClientRTMakeChannelArgInternal__) Import() ClientRTMakeChannelArg {
 			}
 			return *x
 		})(c.AllowDuplicateName),
+		StartMuted: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(c.StartMuted),
 	}
 }
 func (c ClientRTMakeChannelArg) Export() *ClientRTMakeChannelArgInternal__ {
@@ -1332,6 +1340,7 @@ func (c ClientRTMakeChannelArg) Export() *ClientRTMakeChannelArgInternal__ {
 		NoPush:             &c.NoPush,
 		Private:            &c.Private,
 		AllowDuplicateName: &c.AllowDuplicateName,
+		StartMuted:         &c.StartMuted,
 	}
 }
 func (c *ClientRTMakeChannelArg) Encode(enc rpc.Encoder) error {

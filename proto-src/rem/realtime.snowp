@@ -209,7 +209,12 @@ protocol RealTime
     // the server.
     rtNewChannel @0 (
         md @0 : RTChannelMetadata,
-        setVers @1 : lib.RTChannelSetVersion /* from fetch, so we don't race */
+        setVers @1 : lib.RTChannelSetVersion, /* from fetch, so we don't race */
+        /* FORK-ONLY (follow-scoped-push). Fan every member but the creator in
+         * muted, so a new open channel pushes nobody until they join it.
+         * Creation-time only; each member's own rtSetChannelMuted changes it
+         * afterwards. Late joiners are fanned in unmuted. */
+        startMuted @2 : Bool
     );
 
     // Look up a single channel's server-side metadata by ID. User auth only;
@@ -368,5 +373,16 @@ protocol RealTime
         chid @0 : lib.RTChannelID,
         seqno @1 : lib.RTChannelSeqno,
         archived @2 : Bool
+    );
+
+    // FORK-ONLY (follow-scoped-push). Set the CALLER's own push mute for a
+    // channel they have a delivery row in: a muted member gets no push_outbox
+    // row from a send or a notify. Nothing else changes -- reads, sends, the
+    // inbox and unread counts stay as they are. A change bumps the caller's
+    // inbox version (like rtReadThrough) so their other devices see it; the
+    // same value again is a no-op.
+    rtSetChannelMuted @209 (
+        channelID @0 : lib.RTChannelID,
+        muted @1 : Bool
     );
 }

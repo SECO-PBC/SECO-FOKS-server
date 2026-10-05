@@ -302,7 +302,8 @@ func (s *messageSender) fanoutInboxVersions(
 		return err
 	}
 
-	// Queue one content-free push row per recipient (not the sender) in
+	// Queue one content-free push row per recipient (not the sender, and not
+	// a member who muted the channel -- fork-only, follow-scoped-push) in
 	// the same transaction as the send, so a row exists iff the message
 	// does. push_outbox is already in the schema; this is the writer.
 	// kind='msg', data=NULL — a pure wake: no message content, sender or
@@ -328,7 +329,8 @@ func (s *messageSender) fanoutInboxVersions(
 		`INSERT INTO push_outbox (short_host_id, uid, channel_id, kind, seq, status, ctime, mtime)
 		 SELECT uc.short_host_id, uc.uid, uc.channel_id, 'msg', $3, $5::push_status, NOW(), NOW()
 		   FROM user_channels uc
-		  WHERE uc.short_host_id=$1 AND uc.channel_id=$2 AND uc.uid <> $4`,
+		  WHERE uc.short_host_id=$1 AND uc.channel_id=$2 AND uc.uid <> $4
+		    AND NOT uc.muted`,
 		m.ShortHostID(),
 		s.channelID(),
 		seq.Int64(),

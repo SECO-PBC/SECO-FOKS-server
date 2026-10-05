@@ -71,9 +71,15 @@ var rpcAccessClass = map[string]rpcClassification{
 			"TestCannotArchiveDefaultChannel, TestChannelArchivePrivateStaysAdmin (row 17). " +
 			"Chokepoint at accessArchive",
 	},
+	"rtSetChannelMuted": {
+		channelWrite,
+		"TestSetChannelMutedWithoutAccess, TestMutedMemberGetsNoPush. Writes only the " +
+			"caller's own delivery row; chokepoint at accessRead, like rtReadThrough",
+	},
 	"rtNewChannel": {
 		channelWrite,
-		"TestPrivateCreateRequiresAdmin, TestPrivateCreateFansOutToCreatorOnly (row 11)",
+		"TestPrivateCreateRequiresAdmin, TestPrivateCreateFansOutToCreatorOnly (row 11), " +
+			"TestStartMutedChannelPushesNobodyElse",
 	},
 	"rtGetChannel": {
 		channelData,
@@ -250,6 +256,7 @@ var queryAllowlist = map[string]allowedQueries{
 
 	// --- reads that run after the chokepoint authorized the caller ---
 	"readThroughMarker.run": {3, "calls loadChannel -> authorizeChannel(accessRead) before anything else"},
+	"channelMuter.run":      {3, "calls authorizeChannel(accessRead) before anything else; touches only the caller's own row"},
 
 	// --- shared SQL fragments (top-level consts). The functions that
 	// interpolate these carry no protected-table reference of their own, so
