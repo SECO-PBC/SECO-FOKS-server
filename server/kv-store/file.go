@@ -823,9 +823,9 @@ func loadNode(
 		// KVNodeType_None is a tombstone, which is a legal value of the type
 		// -- Type() returns it without error -- but not a node anyone can
 		// load. Without this arm ret stays nil and the caller dereferences
-		// it. A default rather than a None case so that a node type added to
-		// the enum later fails loudly here instead of panicking in the
-		// handler. Also upstream as #374.
+		// it, which is the same crash by a different route. A default rather
+		// than a None case so that a node type added to the enum later fails
+		// loudly here instead of panicking in the handler.
 		return nil, core.BadArgsError("cannot load a node of this type")
 	}
 	return ret, nil
@@ -937,12 +937,12 @@ func loadSmallFileOrSymlink(
 	if err != nil {
 		return nil, err
 	}
-	// A row that is not in the table comes back as a nil entry, not as a
-	// short slice -- mLoadSmallFilesOrSymlinks appends its map lookup
-	// unconditionally -- and loadNode dereferences this result. Without the
-	// nil check, a KvGetNode for any absent small-file or symlink ID was a
-	// remotely triggered panic. The listing path already guards (listDir
-	// checks f != nil); this was the one caller that did not.
+	// A node ID with no row comes back as a nil ENTRY, not as a short slice:
+	// mLoadSmallFilesOrSymlinks builds its result by appending a map lookup
+	// per requested key, so a key it did not find contributes nil. The length
+	// check alone therefore passed for a missing node and handed loadNode a
+	// nil box to dereference. The batch caller already guards (listDir skips
+	// nil entries); this one did not.
 	if len(ret) != 1 || ret[0] == nil {
 		return nil, core.NotFoundError("small file")
 	}

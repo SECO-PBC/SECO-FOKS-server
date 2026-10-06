@@ -752,11 +752,11 @@ func TestPrivateGrantVisibleToWarmCache(t *testing.T) {
 	// And the end-to-end consequence: bob can now send and read by name.
 	_, err = warm.Send(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat, sc.spec(), []byte("hello"))
 	require.NoError(t, err)
-	msgs, _, err := warm.GetThreadBookended(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat,
+	res, err := warm.GetThreadBookended(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat,
 		makeChannelSpecifier(sc.name), 1, 1)
 	require.NoError(t, err)
-	require.Len(t, msgs, 1)
-	require.Equal(t, "hello", string(msgs[0].Body))
+	require.Len(t, res.Msgs, 1)
+	require.Equal(t, "hello", string(res.Msgs[0].Body))
 }
 
 // --- §8.2: invariants -------------------------------------------------------

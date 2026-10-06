@@ -99,6 +99,11 @@ struct RTChannelMetadata @0xddf6b26b2ace1535 {
     // prefix) whose traffic no human should be buzzed about; there is no
     // flip path -- a channel is born silent or not. @21 keeps the positional
     // encoding dense (see the note above @20).
+    //
+    // Upstream's port (#365) numbers this field @13. The deployed fork server
+    // and clients speak @21, and these fields are positional on the wire, so
+    // the fork keeps @21; the Go field name (NoPush) is the same on both
+    // sides. Reconcile by content at each upstream merge (SECO-UPSTREAM.md).
     noPush @21 : Bool;
     // FORK-ONLY (see docs/rt-channel-mutation.md). An archived channel is
     // closed to new activity and gone from the inbox, but it deliberately
