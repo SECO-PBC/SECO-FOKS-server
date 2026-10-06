@@ -479,13 +479,9 @@ func (u *TestUser) FQUser() proto.FQUser {
 }
 
 // fakeTreeRootEpnoBase seeds the fabricated merkle tree roots that tests sign
-// links against when they are not driving the real pipeline
-// (SetupOpts.RealTreeRoot == false). The server compares a link's root epno
-// against the epno of the signer's own already-committed merkle work
-// (AssertNoRacingSigners, server/shared/chain.go) and rejects a link whose
-// root sits behind that work as RevokeRaceError{"too old"} -- so this base has
-// to stay comfortably ahead of however far the real tree advances across a
-// whole test run.
+// over when they do not want a real one. It has to stay ahead of the real
+// tree, since a link signed over a root older than the committed one is
+// rejected as RevokeRaceError{"too old"}.
 //
 // It was 1000, which the suite quietly outgrew: adding enough users in one run
 // pushed the real tree past it, and every fabricated-root revoke then failed

@@ -58,8 +58,8 @@ func TestPartyLoaderCacheNodeWaiterDoesNotHoldCacheLock(t *testing.T) {
 	require.Eventually(t, func() bool { return blockedInGetLockedNode(hdr) },
 		5*time.Second, time.Millisecond, "getLockedNode never blocked on the held node")
 
-	// The reload finishing: loadTeam records fqptCache under the cache lock
-	// while still holding the node.
+	// Take the cache lock while still holding the node, as loadTeam does when
+	// a reload finishes.
 	require.True(t, p.TryLock(), "a goroutine waiting on a node lock is holding the cache lock")
 	p.fqptCache[proto.StdHash{}] = &fqp
 	p.Unlock()

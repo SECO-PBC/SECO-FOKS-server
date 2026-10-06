@@ -513,7 +513,7 @@ func TestArchiveIsReversible(t *testing.T) {
 	before, err := sc.alice.minder.GetThreadRecentMsgs(
 		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, sc.pubSpec(), n)
 	require.NoError(t, err)
-	require.Len(t, before, n)
+	require.Len(t, before.Msgs, n)
 
 	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
 	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), false))
@@ -521,10 +521,10 @@ func TestArchiveIsReversible(t *testing.T) {
 	after, err := sc.alice.minder.GetThreadRecentMsgs(
 		sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat, sc.pubSpec(), n)
 	require.NoError(t, err)
-	require.Len(t, after, n)
-	for i := range before {
-		require.Equal(t, before[i].Seq, after[i].Seq)
-		require.Equal(t, before[i].Body, after[i].Body)
+	require.Len(t, after.Msgs, n)
+	for i := range before.Msgs {
+		require.Equal(t, before.Msgs[i].Seq, after.Msgs[i].Seq)
+		require.Equal(t, before.Msgs[i].Body, after.Msgs[i].Body)
 	}
 
 	// Sending works again once the channel is back.
@@ -665,8 +665,8 @@ func TestArchivedThreadStillReadableById(t *testing.T) {
 	msgs, err := sc.alice.minder.GetThreadRecentMsgs(sc.alice.m, sc.teamCfg(),
 		proto.RTAppID_Chat, sc.pubSpec(), 10)
 	require.NoError(t, err, "an archived channel is hidden, not destroyed")
-	require.Len(t, msgs, 1)
-	require.Equal(t, []byte("before the archive"), msgs[0].Body)
+	require.Len(t, msgs.Msgs, 1)
+	require.Equal(t, []byte("before the archive"), msgs.Msgs[0].Body)
 }
 
 // Marking read through is permitted on an archived channel: it writes only the

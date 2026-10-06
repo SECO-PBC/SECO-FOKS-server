@@ -1473,6 +1473,26 @@ func (r RTMsgReplayMismatchError) Error() string {
 	return "message ID already delivered elsewhere"
 }
 
+// RTMsgQueuedError is a client-generated soft failure: the send could not
+// reach the server (transport error) and the message sits durably in the
+// local outbox, to be drained on reconnect. MsgID identifies the queued
+// message so callers can render it pending and reconcile on ack.
+type RTMsgQueuedError struct {
+	MsgID proto.RTMsgID
+}
+
+func (r RTMsgQueuedError) Error() string {
+	return "message queued for delivery on reconnect"
+}
+
+// RTOutboxFullError is a client-generated error: the per-channel outbox is at
+// capacity, and the send is refused rather than shedding a queued message.
+type RTOutboxFullError struct{}
+
+func (r RTOutboxFullError) Error() string {
+	return "outbox is full for this channel"
+}
+
 func ErrorToStatus(e error) proto.Status {
 
 	switch {
@@ -1695,6 +1715,10 @@ func ErrorToStatus(e error) proto.Status {
 		return proto.NewStatusWithKvOutboxFull()
 	case RTMsgReplayMismatchError:
 		return proto.NewStatusWithRtMsgReplayMismatch()
+	case RTMsgQueuedError:
+		return proto.NewStatusWithRtMsgQueued(te.MsgID)
+	case RTOutboxFullError:
+		return proto.NewStatusWithRtOutboxFull()
 	case RPCEOFError:
 		return proto.NewStatusWithRpcEof()
 	case OverQuotaError:
@@ -2180,6 +2204,10 @@ func StatusToError(s proto.Status) error {
 		return RTMsgOrderError(string(s.RtMsgOrderError()))
 	case proto.StatusCode_RT_MSG_REPLAY_MISMATCH:
 		return RTMsgReplayMismatchError{}
+	case proto.StatusCode_RT_MSG_QUEUED:
+		return RTMsgQueuedError{MsgID: s.RtMsgQueued()}
+	case proto.StatusCode_RT_OUTBOX_FULL:
+		return RTOutboxFullError{}
 	default:
 		return errors.New(s.Default())
 	}
