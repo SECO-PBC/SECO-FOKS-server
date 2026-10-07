@@ -102,6 +102,7 @@ func (c *connectionMgr) checkIdle(m RpcClientMetaContexter) {
 		m.Infow("closing idle connection", "remote", c.remote)
 		c.xp.Close()
 		c.xp = nil
+		liveConns.clear(c)
 		c.rc = nil
 		if c.opts.testIdleDisconnectCh != nil {
 			c.opts.testIdleDisconnectCh <- struct{}{}
@@ -114,6 +115,7 @@ func (c *connectionMgr) xpLoop(m RpcClientMetaContexter) {
 		select {
 		case <-c.eofCh:
 			m.Infow("exiting xp loop")
+			liveConns.clear(c)
 			if c.opts.testExitCh != nil {
 				c.opts.testExitCh <- 0
 			}
@@ -134,6 +136,7 @@ func (c *connectionMgr) resetXp(m RpcClientMetaContexter) {
 	if c.xp != nil {
 		tmp := c.xp
 		c.xp = nil
+		liveConns.clear(c)
 		tmp.Close()
 	}
 }
@@ -147,6 +150,7 @@ func (c *connectionMgr) getXp(m RpcClientMetaContexter) getXpRes {
 		m.Infow("found dead connection")
 		c.xp.Close()
 		c.xp = nil
+		liveConns.clear(c)
 	}
 
 	conn, err := c.connectLoop(m)
@@ -178,6 +182,7 @@ func (c *connectionMgr) getXp(m RpcClientMetaContexter) getXpRes {
 	}
 
 	c.xp = xp
+	liveConns.set(c, conn.NetConn())
 	return getXpRes{xp: xp}
 }
 
