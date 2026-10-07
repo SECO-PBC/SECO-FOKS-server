@@ -25,7 +25,7 @@ func registered(c *connectionMgr) bool {
 // packets: the call is written, and its reply never comes. Closing every
 // connection must release that call at once, with a transport error, and the
 // next call must dial again.
-func TestCloseAllConnectionsReleasesPendingCall(t *testing.T) {
+func TestCloseConnectionsReleasesPendingCall(t *testing.T) {
 	fc := clockwork.NewFakeClock() // never advanced: Slow never returns
 	srv := testServer{cl: fc}
 	srv.start(t)
@@ -48,8 +48,17 @@ func TestCloseAllConnectionsReleasesPendingCall(t *testing.T) {
 	// Let the Slow call reach the server before pulling the plug.
 	fc.BlockUntil(1)
 
+	// Another host's connections are left alone...
+	CloseConnectionsTo("elsewhere.example")
+	select {
+	case err := <-errCh:
+		t.Fatalf("closing another host released this call: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// ...and this host's are dropped.
 	start := time.Now()
-	CloseAllConnections()
+	CloseConnectionsTo("LOCALHOST")
 	require.Less(t, time.Since(start), time.Second)
 
 	select {
@@ -64,6 +73,20 @@ func TestCloseAllConnectionsReleasesPendingCall(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(2), res)
 	require.True(t, registered(gcli.cm))
+
+	// CloseAllConnections drops every host.
+	go func() {
+		_, err := cli.Slow(ctx, lcl.SlowArg{X: 1, Wait: proto.ExportDurationMilli(time.Hour)})
+		errCh <- err
+	}()
+	fc.BlockUntil(2) // the first Slow's server handler is still parked too
+	CloseAllConnections()
+	select {
+	case err := <-errCh:
+		require.True(t, IsTransportError(err), "got %T: %v", err, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("pending call was not released by CloseAllConnections")
+	}
 }
 
 func TestConnRegistryClearedOnShutdownAndIdle(t *testing.T) {
