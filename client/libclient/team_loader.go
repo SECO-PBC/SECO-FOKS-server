@@ -158,6 +158,10 @@ type TeamLoader struct {
 	hepks                 *core.HEPKSet
 	indexRange            *core.RationalRange
 	histSend              HistoricalSenders
+
+	// ignoreCache makes the next run replay the chain from scratch instead
+	// of resuming from the state saved on disk; see Run.
+	ignoreCache bool
 }
 
 type TeamWrapper struct {
@@ -619,6 +623,22 @@ func (l *TeamLoader) Run(m MetaContext) (*TeamWrapper, error) {
 		return nil, err
 	}
 	err = l.BaseChainLoader.runMany(m, l.runOnce, l.resetState)
+	if err != nil && l.existing != nil && isOpenLinkError(err) {
+		// A link that will not open on top of cached state may be the
+		// cache's fault rather than the chain's. A client that predates a
+		// chain field (the roster delegation floor, say) replays the link
+		// that sets it without complaint, saves state without it, and after
+		// an upgrade every later link that depends on it fails -- before
+		// saveState, so the bad state is never replaced and the team stays
+		// unloadable. A from-scratch replay is the authoritative check: a
+		// genuinely bad chain fails it too, and a good one overwrites the
+		// cache.
+		m.Warnw("TeamLoader.Run", "err", err,
+			"note", "link failed over cached state; replaying the team chain from scratch")
+		l.discardCache()
+		err = l.BaseChainLoader.runMany(m, l.runOnce, l.resetState)
+		l.ignoreCache = false
+	}
 	if err != nil {
 		// Offline fallback: with the server unreachable, serve the last
 		// verified snapshot instead of nothing. The snapshot -- PTKs and the
@@ -1058,6 +1078,10 @@ func (l *TeamLoader) loadExistingTeam(m MetaContext) error {
 		if err != nil {
 			return err
 		}
+		return nil
+	}
+
+	if l.ignoreCache {
 		return nil
 	}
 
@@ -2350,6 +2374,28 @@ func (l *TeamLoader) checkTeamname(m MetaContext) error {
 	l.tnseq = nseq
 	return nil
 
+}
+
+// discardCache returns the loader to the state NewTeamLoader made it in, set
+// to skip the saved chain state on its next run. Resetting the whole struct,
+// rather than the fields loadExistingTeam happens to fill today, is what keeps
+// a field added later from leaking cached state into the replay.
+func (l *TeamLoader) discardCache() {
+	testing := l.testing
+	*l = *NewTeamLoader(l.au, l.Arg)
+	l.testing = testing
+	l.ignoreCache = true
+}
+
+// isOpenLinkError reports whether a chain load failed opening one of its
+// links (CLOpenLinkError), as opposed to fetching or checking the chain.
+func isOpenLinkError(err error) bool {
+	clerr, ok := err.(core.ChainLoaderError)
+	if !ok {
+		return false
+	}
+	_, ok = clerr.Err.(core.CLOpenLinkError)
+	return ok
 }
 
 func (l *TeamLoader) resetState() {
