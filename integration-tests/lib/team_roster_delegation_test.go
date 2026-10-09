@@ -9,6 +9,7 @@ import (
 	"github.com/foks-proj/go-foks/client/libclient"
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/lib/team"
+	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-foks/server/shared"
 	"github.com/stretchr/testify/require"
@@ -200,4 +201,62 @@ func TestTeamLinkUnknownMetadataTypeIgnored(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, wrp)
+}
+
+// A client from before the floor skips the floor-setting link's metadata
+// and saves its chain state with no floor. Once that device upgrades, the
+// loader must not resume from that state, or it reports delegation as off
+// until the floor next changes; it replays from scratch and re-saves.
+func TestPreFloorCachedStateIsReplayed(t *testing.T) {
+	tew := testEnvBeta(t)
+	setRosterDelegation(t, tew, true)
+	owner := tew.NewTestUser(t)
+	stew := tew.NewTestUser(t)
+	tew.DirectDoubleMerklePokeInTest(t)
+	tm := tew.makeTeamForOwner(t, owner)
+	m := tew.MetaContext()
+
+	floor := proto.NewRoleWithMember(100)
+	err := tm.setDelegationFloor(t, m, owner, floor, []proto.MemberRole{
+		stew.toMemberRole(t, floor, tm.hepks),
+	})
+	require.NoError(t, err)
+	tew.DirectDoubleMerklePokeInTest(t)
+
+	mco := tew.NewClientMetaContext(t, owner)
+	arg := libclient.LoadTeamArg{
+		Team:    tm.FQTeam(t),
+		As:      owner.FQUser().FQParty(),
+		Keys:    owner.KeySeq(t, proto.OwnerRole),
+		SrcRole: proto.OwnerRole,
+	}
+	_, err = libclient.LoadTeam(mco, arg)
+	require.NoError(t, err)
+
+	// Rewrite the saved state the way a pre-floor client wrote it.
+	scoper := mco.G().ActiveUser().FQU()
+	var st lcl.TeamChainState
+	_, err = mco.DbGet(&st, libclient.DbTypeSoft, &scoper, lcl.DataType_TeamChainState, arg)
+	require.NoError(t, err)
+	require.True(t, st.RosterDelegationFloorTracked)
+	st.RosterDelegationFloor = nil
+	st.RosterDelegationFloorTracked = false
+	err = mco.DbPut(libclient.DbTypeSoft, libclient.PutArg{
+		Scope: &scoper,
+		Typ:   lcl.DataType_TeamChainState,
+		Val:   &st,
+		Key:   arg,
+	})
+	require.NoError(t, err)
+
+	wrp, err := libclient.LoadTeam(mco, arg)
+	require.NoError(t, err)
+	require.NotNil(t, wrp.RosterDelegationFloor(), "resumed from the pre-floor state")
+	require.Equal(t, floor, *wrp.RosterDelegationFloor())
+
+	st = lcl.TeamChainState{}
+	_, err = mco.DbGet(&st, libclient.DbTypeSoft, &scoper, lcl.DataType_TeamChainState, arg)
+	require.NoError(t, err)
+	require.True(t, st.RosterDelegationFloorTracked)
+	require.Equal(t, floor, *st.RosterDelegationFloor)
 }

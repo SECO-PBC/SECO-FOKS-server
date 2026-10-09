@@ -960,6 +960,16 @@ func (l *TeamLoader) loadExistingTeam(m MetaContext) error {
 		return err
 	}
 
+	// Saved by a client from before the delegation floor: it played any
+	// floor-setting link without recording the floor, so resuming from it
+	// would report the floor as off until the next one. Replay from scratch;
+	// the save at the end of this load marks the state and heals it.
+	if !ret.RosterDelegationFloorTracked {
+		m.Infow("TeamLoader.loadExistingTeam", "stage", "untrackedFloor",
+			"note", "cached state predates the delegation floor; replaying from scratch")
+		return nil
+	}
+
 	// Treat a failure to load a team as non-fatal. We can reload the team from scratch.
 	ptks, err := l.readKeysFromState(m, &ret)
 	if err != nil {
@@ -2016,7 +2026,8 @@ func (l *TeamLoader) saveState(m MetaContext) error {
 		HistoricalSenders: l.histSend.Export(),
 		MemberLoadFloor:   l.memberLoadFloor,
 
-		RosterDelegationFloor: l.rosterDelegationFloor,
+		RosterDelegationFloor:        l.rosterDelegationFloor,
+		RosterDelegationFloorTracked: true,
 	}
 	if l.sctlsc == nil {
 		return core.InternalError("no 'sctlsc' set; it should be set in save(); refusing to save")
