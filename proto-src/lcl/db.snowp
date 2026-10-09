@@ -157,5 +157,13 @@ struct TeamChainState {
     // field would misread every TeamChainState row already stored. Reconcile
     // by content at the next upstream merge (SECO-UPSTREAM.md).
     verifiedAt @16 : lib.Time;
+    // Set by every client that tracks rosterDelegationFloor. A client from
+    // before it skips the floor-setting link's metadata and saves no floor,
+    // so a state without this mark is replayed from scratch, not resumed.
+    //
+    // FORK NUMBERING: upstream #383 has this at @16, which the fork already
+    // gave verifiedAt (above). Reconcile by content at the next upstream
+    // merge (SECO-UPSTREAM.md).
+    rosterDelegationFloorTracked @17 : Bool;
 }
 

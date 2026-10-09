@@ -1135,43 +1135,45 @@ func (s *SharedKeyWithInfo) Decode(dec rpc.Decoder) error {
 func (s *SharedKeyWithInfo) Bytes() []byte { return nil }
 
 type TeamChainState struct {
-	Fqt                   lib.FQTeam
-	Tail                  lib.HidingChainer
-	LastHash              lib.LinkHash
-	Name                  lib.NameAndSeqnoBundle
-	Ptks                  []SharedKeyWithInfo
-	Members               []lib.MemberRoleSeqno
-	Sctlsc                lib.TreeLocationCommitment
-	MerkleLeaves          []lib.MerkleLeaf
-	PrivateKeys           []lib.SharedKeyParcel
-	RemovalKey            *lib.TeamRemovalKeyBox
-	RemoteViewTokens      []lib.TeamRemoteMemberViewTokenInner
-	Hepks                 lib.HEPKSet
-	Tir                   lib.RationalRange
-	HistoricalSenders     []lib.SenderPair
-	MemberLoadFloor       *lib.Role
-	RosterDelegationFloor *lib.Role
-	VerifiedAt            lib.Time
+	Fqt                          lib.FQTeam
+	Tail                         lib.HidingChainer
+	LastHash                     lib.LinkHash
+	Name                         lib.NameAndSeqnoBundle
+	Ptks                         []SharedKeyWithInfo
+	Members                      []lib.MemberRoleSeqno
+	Sctlsc                       lib.TreeLocationCommitment
+	MerkleLeaves                 []lib.MerkleLeaf
+	PrivateKeys                  []lib.SharedKeyParcel
+	RemovalKey                   *lib.TeamRemovalKeyBox
+	RemoteViewTokens             []lib.TeamRemoteMemberViewTokenInner
+	Hepks                        lib.HEPKSet
+	Tir                          lib.RationalRange
+	HistoricalSenders            []lib.SenderPair
+	MemberLoadFloor              *lib.Role
+	RosterDelegationFloor        *lib.Role
+	VerifiedAt                   lib.Time
+	RosterDelegationFloorTracked bool
 }
 type TeamChainStateInternal__ struct {
-	_struct               struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Fqt                   *lib.FQTeamInternal__
-	Tail                  *lib.HidingChainerInternal__
-	LastHash              *lib.LinkHashInternal__
-	Name                  *lib.NameAndSeqnoBundleInternal__
-	Ptks                  *[](*SharedKeyWithInfoInternal__)
-	Members               *[](*lib.MemberRoleSeqnoInternal__)
-	Sctlsc                *lib.TreeLocationCommitmentInternal__
-	MerkleLeaves          *[](*lib.MerkleLeafInternal__)
-	PrivateKeys           *[](*lib.SharedKeyParcelInternal__)
-	RemovalKey            *lib.TeamRemovalKeyBoxInternal__
-	RemoteViewTokens      *[](*lib.TeamRemoteMemberViewTokenInnerInternal__)
-	Hepks                 *lib.HEPKSetInternal__
-	Tir                   *lib.RationalRangeInternal__
-	HistoricalSenders     *[](*lib.SenderPairInternal__)
-	MemberLoadFloor       *lib.RoleInternal__
-	RosterDelegationFloor *lib.RoleInternal__
-	VerifiedAt            *lib.TimeInternal__
+	_struct                      struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Fqt                          *lib.FQTeamInternal__
+	Tail                         *lib.HidingChainerInternal__
+	LastHash                     *lib.LinkHashInternal__
+	Name                         *lib.NameAndSeqnoBundleInternal__
+	Ptks                         *[](*SharedKeyWithInfoInternal__)
+	Members                      *[](*lib.MemberRoleSeqnoInternal__)
+	Sctlsc                       *lib.TreeLocationCommitmentInternal__
+	MerkleLeaves                 *[](*lib.MerkleLeafInternal__)
+	PrivateKeys                  *[](*lib.SharedKeyParcelInternal__)
+	RemovalKey                   *lib.TeamRemovalKeyBoxInternal__
+	RemoteViewTokens             *[](*lib.TeamRemoteMemberViewTokenInnerInternal__)
+	Hepks                        *lib.HEPKSetInternal__
+	Tir                          *lib.RationalRangeInternal__
+	HistoricalSenders            *[](*lib.SenderPairInternal__)
+	MemberLoadFloor              *lib.RoleInternal__
+	RosterDelegationFloor        *lib.RoleInternal__
+	VerifiedAt                   *lib.TimeInternal__
+	RosterDelegationFloorTracked *bool
 }
 
 func (t TeamChainStateInternal__) Import() TeamChainState {
@@ -1368,6 +1370,12 @@ func (t TeamChainStateInternal__) Import() TeamChainState {
 			}
 			return x.Import()
 		})(t.VerifiedAt),
+		RosterDelegationFloorTracked: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(t.RosterDelegationFloorTracked),
 	}
 }
 func (t TeamChainState) Export() *TeamChainStateInternal__ {
@@ -1457,7 +1465,8 @@ func (t TeamChainState) Export() *TeamChainStateInternal__ {
 			}
 			return (*x).Export()
 		})(t.RosterDelegationFloor),
-		VerifiedAt: t.VerifiedAt.Export(),
+		VerifiedAt:                   t.VerifiedAt.Export(),
+		RosterDelegationFloorTracked: &t.RosterDelegationFloorTracked,
 	}
 }
 func (t *TeamChainState) Encode(enc rpc.Encoder) error {
