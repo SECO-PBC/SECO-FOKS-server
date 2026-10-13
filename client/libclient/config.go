@@ -21,6 +21,7 @@ import (
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-snowpack-rpc/rpc"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 type bgJobConfigFlags struct {
@@ -252,9 +253,19 @@ type ConfigTestParams struct {
 	fakeTeamIndexRanges           map[proto.FQTeam]core.RationalRange
 }
 
-func (c *Config) setupGlobalFlags(cmd *cobra.Command) {
-	pf := cmd.PersistentFlags()
+// newConfig returns a Config whose flags hold the values the CLI registers.
+// Registering a flag is what writes its default into the field, and every
+// numeric flag defaults to -1, "unset". A process that embeds the client and
+// never parses a command line (gomobile, a sidecar, a daemon) would otherwise
+// keep Go's zero values, and getUint reads a 0 flag as an explicit "--flag 0"
+// that outranks the env var, the config file and the default.
+func newConfig() *Config {
+	c := &Config{}
+	c.registerFlags(pflag.NewFlagSet("embedded", pflag.ContinueOnError))
+	return c
+}
 
+func (c *Config) registerFlags(pf *pflag.FlagSet) {
 	pf.StringVarP(&c.fl.configFile, "config", "c", "", "config file to use")
 	pf.StringVarP(&c.fl.home, "home", "H", "", "home directory to use")
 	pf.StringVarP(&c.fl.rpcLogOpts, "rpc-log-opts", "", "", "RPC logger options")
@@ -337,7 +348,7 @@ func ParseSecretKeyStorageType(s string) (*proto.SecretKeyStorageType, error) {
 func (c *Config) Setup(ctx context.Context, cmd *cobra.Command) error {
 	c.Lock()
 	defer c.Unlock()
-	c.setupGlobalFlags(cmd)
+	c.registerFlags(cmd.PersistentFlags())
 	return nil
 }
 
@@ -858,14 +869,9 @@ func (c *Config) RTOutboxMaxPerChannel() uint64 {
 	c.Lock()
 	defer c.Unlock()
 	// A bound of zero would refuse every send, so zero from any source selects
-	// the default. That also covers a Config whose flags were never registered
-	// with cobra, where the flag reads 0 rather than its -1 "unset" value.
-	cli := c.fl.rt.outboxMaxPerChannel
-	if cli == 0 {
-		cli = -1
-	}
+	// the default.
 	ret := c.getUint(
-		cli,
+		c.fl.rt.outboxMaxPerChannel,
 		prefixed("RT_OUTBOX_MAX_PER_CHANNEL"),
 		c.file.Data.RT.OutboxMaxPerChannel,
 		defRTOutboxMaxPerChannel,

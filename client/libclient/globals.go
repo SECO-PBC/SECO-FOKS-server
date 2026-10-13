@@ -341,7 +341,7 @@ func NewGlobalContext() *GlobalContext {
 	return &GlobalContext{
 		name:            "cmd",
 		log:             log,
-		cfg:             &Config{},
+		cfg:             newConfig(),
 		users:           make(map[core.LocalUserIndex](*UserContext)),
 		dbs:             NewDBs(),
 		cnameResolver:   core.PassthroughCNameResolver{},
