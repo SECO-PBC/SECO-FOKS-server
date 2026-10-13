@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,4 +69,13 @@ func TestConfigZeroGuards(t *testing.T) {
 
 	require.Equal(t, uint64(defRTOutboxMaxPerChannel), cfg.RTOutboxMaxPerChannel())
 	require.Equal(t, uint64(1), cfg.TeamExploreConcurrency())
+}
+
+func TestTeamExploreConcurrencyFlagWinsOverEnv(t *testing.T) {
+	t.Setenv(prefixed("TEAM_EXPLORE_CONCURRENCY"), "3")
+	c := embeddedConfig()
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	c.registerFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--team-explore-concurrency", "2"}))
+	require.Equal(t, uint64(2), c.TeamExploreConcurrency())
 }
