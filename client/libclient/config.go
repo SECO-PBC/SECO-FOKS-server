@@ -839,8 +839,19 @@ func (c *Config) KVListPageSize() uint64 {
 func (c *Config) TeamExploreConcurrency() uint64 {
 	c.Lock()
 	defer c.Unlock()
+	// A Config whose flags were never registered with cobra -- every embedded
+	// client: the mobile bridge, the desktop sidecar, a daemon -- reads this
+	// flag as 0 rather than its -1 "unset" value, and getUint takes 0 as an
+	// explicit setting ahead of env, config file and default. That clamped
+	// the membership walk to one team at a time. Zero is never a useful width
+	// (it is clamped to 1 below), so treat it as unset, as
+	// RTOutboxMaxPerChannel does for the same reason.
+	cli := c.fl.team.exploreConcurrency
+	if cli == 0 {
+		cli = -1
+	}
 	ret := c.getUint(
-		c.fl.team.exploreConcurrency,
+		cli,
 		prefixed("TEAM_EXPLORE_CONCURRENCY"),
 		c.file.Data.Team.ExploreConcurrency,
 		defTeamExploreConcurrency,
