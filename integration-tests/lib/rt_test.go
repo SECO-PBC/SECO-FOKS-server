@@ -1736,7 +1736,7 @@ func TestRTOutboxCap(t *testing.T) {
 	r := makeRTOutboxTestRig(t)
 	cfg := r.mb.G().Cfg()
 	cfg.TestSetRTOutboxMaxPerChannel(2)
-	t.Cleanup(func() { cfg.TestSetRTOutboxMaxPerChannel(0) })
+	t.Cleanup(func() { cfg.TestSetRTOutboxMaxPerChannel(-1) })
 
 	r.minder.SetTestHooks(&librt.MinderTestHooks{
 		SendRPC: func(librt.MetaContext, rem.RTSendArg) (*rem.RTSendRes, error) {
