@@ -756,3 +756,193 @@ func TestArchiveDropsHeldPushes(t *testing.T) {
 	require.Zero(t, sc.pendingPushes(t, "queued"),
 		"and archiving must not quietly release them into the queue instead")
 }
+
+// --- review fixes ported from upstream #376 --------------------------------
+
+// The name-collision check is the only thing keeping two channels of one tier
+// from sharing a name: the server cannot compare encrypted names. A listing
+// that skipped a row it could not decrypt cannot see that row's name, so a
+// create or rename relying on the check must fail rather than pass without
+// it. Display, channel resolution, and the operations that check no name keep
+// the lenient listing.
+func TestNameCheckFailsOnUnreadableRow(t *testing.T) {
+	sc := setupMutScene(t)
+	roles := proto.RolePairOpt{Read: &proto.DefaultRole, Write: &proto.DefaultRole}
+	otherID, err := sc.alice.minder.MakeChannel(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, randomChannelName(t, "other-"), "", roles)
+	require.NoError(t, err)
+
+	sc.corruptNameBox(t, sc.pubID)
+
+	require.Nil(t, sc.find(t, sc.alice, sc.pubID),
+		"the listing skips the row it cannot decrypt")
+	require.NotNil(t, sc.find(t, sc.alice, *otherID), "and keeps the rest")
+
+	_, err = sc.alice.minder.MakeChannel(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, randomChannelName(t, "new-"), "", roles)
+	require.Error(t, err, "a create must not pass a name check that could not see every name")
+	require.Error(t, sc.rename(t, sc.alice, sc.specFor(*otherID),
+		randomChannelName(t, "renamed-"), ""), "nor may a rename")
+
+	_, err = sc.alice.minder.MakeChannelWithOpts(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, randomChannelName(t, "dup-ok-"), "", roles,
+		librt.MakeChannelOpts{AllowDuplicateName: true}, nil)
+	require.NoError(t, err, "a create that checks no name is unaffected")
+	_, err = sc.alice.minder.MakeChannelWithOpts(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, randomChannelName(t, "priv-ok-"), "", roles,
+		librt.MakeChannelOpts{Private: true}, nil)
+	require.NoError(t, err, "nor is a private create, which is exempt from the check")
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.specFor(*otherID), true))
+}
+
+// corruptNameBox flips a byte of a channel's stored name ciphertext, leaving
+// the RTBoxRG well-formed, and bumps the team's channel-set version so every
+// client re-fetches the row.
+func (s *mutScene) corruptNameBox(t *testing.T, id proto.RTChannelID) {
+	m := s.tew.MetaContext()
+	db, err := m.Db(shared.DbTypeRealTime)
+	require.NoError(t, err)
+	defer db.Release()
+	chid := id.Short().Int64()
+
+	var raw []byte
+	require.NoError(t, db.QueryRow(m.Ctx(),
+		`SELECT name_box FROM channels WHERE short_host_id=$1 AND channel_id=$2`,
+		m.ShortHostID(), chid).Scan(&raw))
+	var box proto.RTBoxRG
+	require.NoError(t, core.DecodeFromBytes(&box, raw))
+	nacl := box.Box.Nacl()
+	ct := append(proto.NaclCiphertext(nil), nacl.Ciphertext...)
+	ct[0] ^= 0xff
+	nacl.Ciphertext = ct
+	box.Box = proto.NewSecretBoxWithNacl(nacl)
+	enc, err := core.EncodeToBytes(&box)
+	require.NoError(t, err)
+
+	var vers int
+	require.NoError(t, db.QueryRow(m.Ctx(),
+		`UPDATE channel_sets cs SET vers = cs.vers + 1, mtime = NOW()
+		 FROM channels c
+		 WHERE c.short_host_id=$1 AND c.channel_id=$2
+		 AND cs.short_host_id=c.short_host_id
+		 AND cs.parent_team_id=c.parent_team_id AND cs.app_id=c.app_id
+		 RETURNING cs.vers`,
+		m.ShortHostID(), chid).Scan(&vers))
+	_, err = db.Exec(m.Ctx(),
+		`UPDATE channels SET name_box=$3, updated_at_set_vers=$4
+		 WHERE short_host_id=$1 AND channel_id=$2`,
+		m.ShortHostID(), chid, enc, vers)
+	require.NoError(t, err)
+}
+
+// A caller who may not send into a channel learns nothing about whether it is
+// archived: the chokepoint's archived gate runs after every gate that can
+// refuse the caller, so they get the same PermissionError either way. Only a
+// caller who could send is told why not.
+func TestArchivedSendChecksPermissionFirst(t *testing.T) {
+	sc := setupMutScene(t)
+	ann, err := sc.alice.minder.MakeChannel(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
+		randomChannelName(t, "announce-"), "admins post here",
+		proto.RolePairOpt{Read: &proto.DefaultRole, Write: &proto.AdminRole})
+	require.NoError(t, err)
+	send := func(by *privActor) error {
+		_, err := by.minder.Send(by.m, sc.teamCfg(), proto.RTAppID_Chat,
+			sc.specFor(*ann), []byte("hello"))
+		return err
+	}
+
+	require.IsType(t, core.PermissionError(""), send(sc.bob))
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.specFor(*ann), true))
+	require.IsType(t, core.PermissionError(""), send(sc.bob),
+		"an archived channel must look the same as a live one to a caller who cannot send")
+	require.IsType(t, core.RTChannelArchivedError{}, send(sc.alice))
+}
+
+// The same for managing a private channel's membership: a member who is not an
+// owner gets PermissionError for a grant whether or not the channel is
+// archived.
+func TestArchivedGrantChecksPermissionFirst(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	spec := lcl.NewRTChannelSpecifierWithId(sc.chid)
+	sc.grant(t, sc.alice, sc.cleo, false)
+	grant := func() error {
+		return sc.cleo.minder.GrantChannelMember(sc.cleo.m, sc.chid, sc.bob.u.uid, false)
+	}
+
+	require.IsType(t, core.PermissionError(""), grant())
+	require.NoError(t, sc.alice.minder.SetChannelArchived(sc.alice.m,
+		sc.teamCfg(), proto.RTAppID_Chat, spec, true))
+	require.IsType(t, core.PermissionError(""), grant(),
+		"a non-owner must not learn that the channel is archived")
+}
+
+// Setting a channel to the archived state it is already in writes nothing: no
+// seqno bump, and no channel-set version bump, so no client re-fetches the
+// listing and no member's inbox row is re-stamped.
+func TestArchiveToCurrentStateIsNoop(t *testing.T) {
+	sc := setupMutScene(t)
+	snapshot := func() (proto.RTChannelSeqno, proto.RTChannelSetVersion) {
+		lst, err := sc.alice.minder.ListAllChannelsForTeam(sc.alice.m, sc.teamCfg(),
+			proto.RTAppID_Chat)
+		require.NoError(t, err)
+		for _, ch := range lst.Channels {
+			if ch.Id.Eq(sc.pubID) {
+				return ch.Seqno, lst.Vers
+			}
+		}
+		require.FailNow(t, "channel missing from the listing")
+		return 0, 0
+	}
+
+	seq0, vers0 := snapshot()
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), false))
+	seq1, vers1 := snapshot()
+	require.Equal(t, seq0, seq1, "unarchiving a live channel must not bump its seqno")
+	require.Equal(t, vers0, vers1, "nor the channel-set version")
+
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
+	seq2, vers2 := snapshot()
+	require.Greater(t, seq2, seq1, "a real change does bump the seqno")
+	require.Greater(t, vers2, vers1)
+
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
+	seq3, vers3 := snapshot()
+	require.Equal(t, seq2, seq3, "archiving an archived channel must not bump its seqno")
+	require.Equal(t, vers2, vers3, "nor the channel-set version")
+}
+
+// A member who joined while the channel was archived has no delivery row,
+// since the late-join fan-in skips archived channels and still records them as
+// reconciled. Unarchiving gives them one, in the same pass that re-stamps the
+// existing members' rows. The invariant suite on cleanup checks that pass
+// burned no inbox version.
+func TestUnarchiveFansInLateJoiner(t *testing.T) {
+	sc := setupMutScene(t)
+	_, err := sc.alice.minder.Send(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
+		sc.pubSpec(), []byte("before the archive"))
+	require.NoError(t, err)
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
+
+	frank := sc.tew.NewTestUser(t)
+	sc.tm.makeChanges(t, sc.tew.MetaContext(), sc.alice.u,
+		[]proto.MemberRole{frank.toMemberRole(t, proto.DefaultRole, sc.tm.hepks)}, nil)
+	fa := newPrivActor(t, sc.tew, frank)
+
+	// This sync runs the late-join fan-in, which skips the archived channel
+	// and records frank's membership as reconciled.
+	_, err = fa.minder.SyncInbox(fa.m, proto.RTAppID_Chat)
+	require.NoError(t, err)
+	require.False(t, inboxHas(t, fa, sc.pubID))
+
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), false))
+
+	for _, who := range []struct {
+		name string
+		a    *privActor
+	}{{"existing member", sc.bob}, {"late joiner", fa}} {
+		_, err = who.a.minder.SyncInbox(who.a.m, proto.RTAppID_Chat)
+		require.NoError(t, err)
+		require.True(t, inboxHas(t, who.a, sc.pubID),
+			"unarchiving must put the channel in the %s's inbox", who.name)
+	}
+}

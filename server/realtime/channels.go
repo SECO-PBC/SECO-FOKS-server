@@ -662,11 +662,7 @@ func (c *channelMaker) insertChannel(m shared.MetaContext) error {
 
 func (c *channelMaker) fanoutUsers(m shared.MetaContext) error {
 
-	// Stage 1a: fan out only to direct, local user-members of the parent team
-	// whose team role is high enough to read the channel. Nested-team
-	// (transitive) membership is deferred to stage 1b. We match the
-	// device-membership convention used by AuthorizeUserForTeam: local host,
-	// source role Owner, most-recent active row.
+	// Stage 1a: fan out only to the members eligibleReaderUIDs selects.
 	//
 	// Users added to the team (or promoted past the read role) after channel
 	// creation are fanned in lazily by reconcileUserChannels (fanin.go), which
@@ -690,16 +686,55 @@ func (c *channelMaker) fanoutUsers(m shared.MetaContext) error {
 		return nil
 	}
 
-	readRole, err := core.ImportRole(c.md.Roles.Read)
+	uids, err := eligibleReaderUIDs(m, c.userdb, c.md.ParentTeam, c.md.Roles.Read)
 	if err != nil {
 		return err
+	}
+	for _, uid := range uids {
+		err = c.fanoutToUser(m, uid)
+		if err != nil {
+			return err
+		}
+	}
+	c.wakeUIDs = uids
+	return nil
+}
+
+// eligibleReaderUIDs lists the team's members who should hold a delivery row
+// for a PUBLIC channel with the given read role, in ascending uid order. (A
+// private channel's members are its ACL rows, not a role.)
+//
+// Stage 1a membership rule: direct, local user-members of the team, matching
+// the device-membership convention used by AuthorizeUserForTeam (local host,
+// source role Owner, active row), whose team role is at or above the read
+// role. Nested-team (transitive) membership is deferred to stage 1b.
+//
+// Sorted because callers take user_inbox row locks in this order, matching the
+// message-send fanout (messageSender.fanoutInboxVersions, which ORDERs BY uid),
+// so concurrent transactions over overlapping member sets do not deadlock.
+//
+// Shared by channel creation and unarchive. The late-join fan-in
+// (findMissingChannels) applies the same role comparison, but per user across
+// that user's teams, so it does not run this query.
+func eligibleReaderUIDs(
+	m shared.MetaContext,
+	userdb shared.Querier,
+	team proto.TeamID,
+	readRole proto.Role,
+) (
+	[]proto.UID,
+	error,
+) {
+	readKey, err := core.ImportRole(readRole)
+	if err != nil {
+		return nil, err
 	}
 	ownerType, ownerViz, err := proto.OwnerRole.ExportToDB()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	rows, err := c.userdb.Query(
+	rows, err := userdb.Query(
 		m.Ctx(),
 		`SELECT member_id, dst_role_type, dst_viz_level
 		 FROM team_members
@@ -710,30 +745,31 @@ func (c *channelMaker) fanoutUsers(m shared.MetaContext) error {
 		 AND src_viz_level=$5
 		 AND active=true`,
 		m.ShortHostID(),
-		c.md.ParentTeam.ExportToDB(),
+		team.ExportToDB(),
 		shared.ExportHostP(nil),
 		ownerType,
 		ownerViz,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 
-	// Collect eligible UIDs before writing, since the membership cursor lives
-	// on c.userdb while the fan-out writes go to the c.rtdbtx transaction.
+	// Collect every UID before the caller writes anything, since this cursor
+	// lives on the users DB while the fan-out writes go to a realtime
+	// transaction.
 	var uids []proto.UID
 	for rows.Next() {
 		var memRaw []byte
 		var dstType, dstViz int
 		err = rows.Scan(&memRaw, &dstType, &dstViz)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		var pid proto.PartyID
 		err = pid.ImportFromDB(memRaw)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// Stage 1a is users-only; nested-team members are skipped here.
 		if !pid.IsUser() {
@@ -741,38 +777,30 @@ func (c *channelMaker) fanoutUsers(m shared.MetaContext) error {
 		}
 		memRole, err := core.ImportRoleKeyFromDB(dstType, dstViz)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// The member can read the channel iff their team role is at or above
 		// the channel's read role.
-		if memRole.LessThan(*readRole) {
+		if memRole.LessThan(*readKey) {
 			continue
 		}
 		uid, err := pid.UID()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		uids = append(uids, uid)
 	}
 	if err = rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
+	sortUIDs(uids)
+	return uids, nil
+}
 
-	// Deterministic order: fanoutToUser takes user_inbox row locks, so sorting
-	// by UID keeps the lock order consistent with the message-send fanout
-	// (messageSender.fanoutInboxVersions, which ORDERs BY uid), avoiding
-	// deadlocks between concurrent transactions over overlapping member sets.
+func sortUIDs(uids []proto.UID) {
 	slices.SortFunc(uids, func(a, b proto.UID) int {
 		return bytes.Compare(a[:], b[:])
 	})
-	for _, uid := range uids {
-		err = c.fanoutToUser(m, uid)
-		if err != nil {
-			return err
-		}
-	}
-	c.wakeUIDs = uids
-	return nil
 }
 
 // fanoutToUser bumps the user's inbox version for this app and writes the
@@ -1091,9 +1119,11 @@ func (c *channelMutator) casSeqno(
 	return nil
 }
 
-// stampMembers re-stamps every member's user_channels row for this channel at
-// a fresh inbox version, so the channel is re-delivered on their next inbox
-// sync carrying its new metadata.
+// restamp re-stamps every member's user_channels row for this channel at a
+// fresh inbox version, so the channel is re-delivered on their next inbox sync
+// carrying its new metadata. With fanIn set, it also gives a row to every
+// eligible reader of a public channel who has none; SetChannelArchived
+// explains why unarchive needs that.
 //
 // One inbox-version allocation per stamped row, never a batch: the UNIQUE
 // user_channels_inbox_idx forbids two of a user's rows sharing a version, and
@@ -1107,9 +1137,66 @@ func (c *channelMutator) casSeqno(
 // these are rare admin actions, not per-message work. If channel metadata ever
 // becomes frequently mutated, this is the first thing to reconsider.
 //
-// Ordered by uid so the user_inbox row locks are taken in the same order as
-// the send fan-out, which keeps concurrent transactions deadlock-free.
-func (c *channelMutator) stampMembers(m shared.MetaContext) error {
+// Existing rows and new ones are written in ONE pass in ascending uid order.
+// Each iteration takes that user's user_inbox row lock, and a send takes the
+// same locks in the same order (fanoutInboxVersions ORDERs BY uid). Two
+// separately sorted passes are not sorted overall: with rows for u1 and u3
+// and a newcomer u2, they lock u1, u3, then u2, and a concurrent send into
+// another channel whose members include u2 and u3 -- holding u2, waiting on
+// u3 -- deadlocks against it. TestRealtimeLockOrder cannot see this: it
+// orders tables, and both passes touch the same one.
+//
+// Only users without a row go through fanUserIntoChannel. It allocates an
+// inbox version before its ON CONFLICT DO NOTHING insert, so calling it for a
+// user who already has a row burns a version that stamps nothing. The head
+// would then sit permanently above every version the client can reach:
+// SyncInbox pages until it gets an empty delta, stops without advancing its
+// cursor, and PollInbox returns immediately forever after.
+func (c *channelMutator) restamp(m shared.MetaContext, fanIn bool) error {
+	have, err := c.channelMemberUIDs(m)
+	if err != nil {
+		return err
+	}
+	existing := make(map[proto.UID]bool, len(have))
+	for _, uid := range have {
+		existing[uid] = true
+	}
+	uids := have
+	if fanIn {
+		eligible, err := eligibleReaderUIDs(m, c.userdb, c.ca.team, c.ca.readRole)
+		if err != nil {
+			return err
+		}
+		for _, uid := range eligible {
+			if !existing[uid] {
+				uids = append(uids, uid)
+			}
+		}
+		sortUIDs(uids)
+	}
+	for _, uid := range uids {
+		if existing[uid] {
+			if err := c.stampMember(m, uid); err != nil {
+				return err
+			}
+			c.wakeUIDs = append(c.wakeUIDs, uid)
+			continue
+		}
+		inserted, err := fanUserIntoChannel(m, c.tx, uid, c.appDB,
+			proto.RTChannelIDShort(c.chid), false)
+		if err != nil {
+			return err
+		}
+		if inserted {
+			c.wakeUIDs = append(c.wakeUIDs, uid)
+		}
+	}
+	return nil
+}
+
+// channelMemberUIDs lists the users holding a delivery row for this channel,
+// ascending -- the package-wide user_inbox lock order.
+func (c *channelMutator) channelMemberUIDs(m shared.MetaContext) ([]proto.UID, error) {
 	rows, err := c.tx.Query(
 		m.Ctx(),
 		`SELECT uid FROM user_channels
@@ -1119,59 +1206,55 @@ func (c *channelMutator) stampMembers(m shared.MetaContext) error {
 		c.chid,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	defer rows.Close()
 	var uids []proto.UID
 	for rows.Next() {
 		var raw []byte
 		if err = rows.Scan(&raw); err != nil {
-			rows.Close()
-			return err
+			return nil, err
 		}
 		var uid proto.UID
 		if err = uid.ImportFromDB(raw); err != nil {
-			rows.Close()
-			return err
+			return nil, err
 		}
 		uids = append(uids, uid)
 	}
-	err = rows.Err()
-	rows.Close()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return uids, nil
+}
+
+// stampMember moves one user's existing user_channels row for this channel to
+// a freshly allocated inbox version.
+func (c *channelMutator) stampMember(m shared.MetaContext, uid proto.UID) error {
+	var vers int64
+	err := c.tx.QueryRow(
+		m.Ctx(),
+		`INSERT INTO user_inbox (short_host_id, uid, app_id, inbox_version, mtime)
+		 VALUES ($1, $2, $3, 1, NOW())
+		 ON CONFLICT (short_host_id, uid, app_id)
+		 DO UPDATE SET inbox_version = user_inbox.inbox_version + 1, mtime = NOW()
+		 RETURNING inbox_version`,
+		m.ShortHostID(),
+		uid.ExportToDB(),
+		c.appDB,
+	).Scan(&vers)
 	if err != nil {
 		return err
 	}
-
-	for _, uid := range uids {
-		var vers int64
-		err = c.tx.QueryRow(
-			m.Ctx(),
-			`INSERT INTO user_inbox (short_host_id, uid, app_id, inbox_version, mtime)
-			 VALUES ($1, $2, $3, 1, NOW())
-			 ON CONFLICT (short_host_id, uid, app_id)
-			 DO UPDATE SET inbox_version = user_inbox.inbox_version + 1, mtime = NOW()
-			 RETURNING inbox_version`,
-			m.ShortHostID(),
-			uid.ExportToDB(),
-			c.appDB,
-		).Scan(&vers)
-		if err != nil {
-			return err
-		}
-		_, err = c.tx.Exec(
-			m.Ctx(),
-			`UPDATE user_channels SET inbox_version=$4, mtime=NOW()
-			 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3`,
-			m.ShortHostID(),
-			c.chid,
-			uid.ExportToDB(),
-			vers,
-		)
-		if err != nil {
-			return err
-		}
-	}
-	c.wakeUIDs = uids
-	return nil
+	_, err = c.tx.Exec(
+		m.Ctx(),
+		`UPDATE user_channels SET inbox_version=$4, mtime=NOW()
+		 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3`,
+		m.ShortHostID(),
+		c.chid,
+		uid.ExportToDB(),
+		vers,
+	)
+	return err
 }
 
 // finish does the bookkeeping both mutations share: surface the change in the
@@ -1188,157 +1271,10 @@ func (c *channelMutator) stampMembers(m shared.MetaContext) error {
 // resolves by killing one of them with a deadlock error the retry loop is not
 // built to absorb.
 func (c *channelMutator) finish(m shared.MetaContext) error {
-	if err := c.stampMembers(m); err != nil {
+	if err := c.restamp(m, false); err != nil {
 		return err
 	}
 	return touchChannelSet(m, c.tx, c.ca.team, c.appDB, c.chid)
-}
-
-// fanInEligibleMembers gives a delivery row to every current team member who
-// can read the channel and has none, at one fresh inbox version each.
-//
-// Unarchiving needs this and stampMembers is not enough. The late-join fan-in
-// skips archived channels -- it has to, or it would re-create rows for them on
-// every sync -- but it still records the membership version it reconciled
-// through. So a member who joined the team while the channel was archived is
-// recorded as reconciled, has no delivery row, and will never be given one:
-// stampMembers only re-stamps rows that already exist, and the fan-in will not
-// look again until their membership changes. They would be permanently absent
-// from a channel everybody else can see.
-//
-// Only for public channels. A private channel's membership is its ACL, which
-// archiving does not touch, so its rows are all still there.
-func (c *channelMutator) fanInEligibleMembers(m shared.MetaContext) error {
-	if c.ca.private {
-		return nil
-	}
-	readRole, err := core.ImportRole(c.ca.readRole)
-	if err != nil {
-		return err
-	}
-	ownerType, ownerViz, err := proto.OwnerRole.ExportToDB()
-	if err != nil {
-		return err
-	}
-	rows, err := c.userdb.Query(
-		m.Ctx(),
-		`SELECT member_id, dst_role_type, dst_viz_level
-		 FROM team_members
-		 WHERE short_host_id=$1
-		 AND team_id=$2
-		 AND member_host_id=$3
-		 AND src_role_type=$4
-		 AND src_viz_level=$5
-		 AND active=true`,
-		m.ShortHostID(),
-		c.ca.team.ExportToDB(),
-		shared.ExportHostP(nil),
-		ownerType,
-		ownerViz,
-	)
-	if err != nil {
-		return err
-	}
-	var uids []proto.UID
-	for rows.Next() {
-		var memRaw []byte
-		var dstType, dstViz int
-		if err = rows.Scan(&memRaw, &dstType, &dstViz); err != nil {
-			rows.Close()
-			return err
-		}
-		var pid proto.PartyID
-		if err = pid.ImportFromDB(memRaw); err != nil {
-			rows.Close()
-			return err
-		}
-		if !pid.IsUser() {
-			continue
-		}
-		memRole, err := core.ImportRoleKeyFromDB(dstType, dstViz)
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		if memRole.LessThan(*readRole) {
-			continue
-		}
-		uid, err := pid.UID()
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		uids = append(uids, uid)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
-	}
-	// Only members who have NO delivery row. fanUserIntoChannel allocates an
-	// inbox version before it inserts, and its insert is ON CONFLICT DO
-	// NOTHING -- so calling it for a member stampMembers has already stamped
-	// burns a version that stamps no row. The head would then sit permanently
-	// above every version the client can reach: SyncInbox pages until it gets
-	// an empty delta, stops without advancing its cursor, and PollInbox
-	// returns immediately forever after, because head > since is always true.
-	// One skipped query here is the difference between that and a quiet inbox.
-	existing, err := c.membersWithDeliveryRow(m)
-	if err != nil {
-		return err
-	}
-	// Ascending uid, the package-wide user_inbox lock order.
-	slices.SortFunc(uids, func(a, b proto.UID) int { return bytes.Compare(a[:], b[:]) })
-	for _, uid := range uids {
-		if existing[uid] {
-			continue
-		}
-		inserted, err := fanUserIntoChannel(m, c.tx, uid, c.appDB, proto.RTChannelIDShort(c.chid), false)
-		if err != nil {
-			return err
-		}
-		if inserted {
-			c.wakeUIDs = append(c.wakeUIDs, uid)
-		}
-	}
-	return nil
-}
-
-// membersWithDeliveryRow is the set of users who already hold a user_channels
-// row for this channel.
-func (c *channelMutator) membersWithDeliveryRow(
-	m shared.MetaContext,
-) (
-	map[proto.UID]bool,
-	error,
-) {
-	rows, err := c.tx.Query(
-		m.Ctx(),
-		`SELECT uid FROM user_channels
-		 WHERE short_host_id=$1 AND channel_id=$2`,
-		m.ShortHostID(),
-		c.chid,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	ret := make(map[proto.UID]bool)
-	for rows.Next() {
-		var raw []byte
-		if err = rows.Scan(&raw); err != nil {
-			return nil, err
-		}
-		var uid proto.UID
-		if err = uid.ImportFromDB(raw); err != nil {
-			return nil, err
-		}
-		ret[uid] = true
-	}
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
-	return ret, nil
 }
 
 // dropChannelPushes discards a closing channel's undelivered push rows.
@@ -1450,6 +1386,15 @@ func UpdateChannel(m shared.MetaContext, arg rem.RtUpdateChannelArg) error {
 // delivery rows all stay, and the channel remains in the team's channel
 // listing so its encrypted name stays reserved. Unarchiving is the exact
 // inverse and needs no separate call.
+//
+// Unarchiving a public channel also fans in every current reader who has no
+// delivery row. The late-join fan-in skips archived channels -- it has to, or
+// it would re-create rows for them on every sync -- but it still records the
+// membership version it reconciled through. So a member who joined the team
+// while the channel was archived is recorded as reconciled and has no row, and
+// the fan-in will not look again until their membership changes. A private
+// channel needs none of this: its membership is its ACL, which archiving does
+// not touch, so its rows are all still there.
 func SetChannelArchived(m shared.MetaContext, arg rem.RtSetChannelArchivedArg) error {
 	rtdb, err := m.Db(shared.DbTypeRealTime)
 	if err != nil {
@@ -1475,6 +1420,16 @@ func SetChannelArchived(m shared.MetaContext, arg rem.RtSetChannelArchivedArg) e
 			if err := mu.authorize(m, accessArchive); err != nil {
 				return nil, err
 			}
+			// Already in the requested state: write nothing. Otherwise a
+			// repeated archive (two admins, or a retried call) would re-stamp
+			// every member's inbox row, bump the channel-set version for every
+			// client, and wake every parked long-poller, for a row that does
+			// not change. The seqno is not checked here: the caller asked for
+			// a state rather than a transition, and that state already holds
+			// whatever changed since they read the seqno.
+			if (mu.ca.archivedAt != nil) == arg.Archived {
+				return nil, nil
+			}
 			var set string
 			if arg.Archived {
 				set = `archived_at=NOW()`
@@ -1484,18 +1439,16 @@ func SetChannelArchived(m shared.MetaContext, arg rem.RtSetChannelArchivedArg) e
 			if err := mu.casSeqno(m, set); err != nil {
 				return nil, err
 			}
-			// stampMembers takes the user_inbox locks; dropping the channel's
-			// push rows must come after it, because a send takes those two in
-			// that order too (see finish's note on lock order).
-			if err := mu.stampMembers(m); err != nil {
+			// restamp takes the user_inbox locks; dropping the channel's push
+			// rows must come after it, because a send takes those two in that
+			// order too (see finish's note on lock order).
+			if err := mu.restamp(m, !arg.Archived && !mu.ca.private); err != nil {
 				return nil, err
 			}
 			if arg.Archived {
 				if err := dropChannelPushes(m, tx, mu.chid); err != nil {
 					return nil, err
 				}
-			} else if err := mu.fanInEligibleMembers(m); err != nil {
-				return nil, err
 			}
 			if err := touchChannelSet(m, tx, mu.ca.team, mu.appDB, mu.chid); err != nil {
 				return nil, err

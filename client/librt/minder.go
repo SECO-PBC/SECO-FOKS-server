@@ -255,28 +255,21 @@ func (d *Minder) MakeChannelWithOpts(
 	if nm.IsEmpty() && opts.NoPush {
 		return nil, core.RTGenericError("cannot make the default channel no-push")
 	}
-	sleepDur := time.Millisecond
-	numTries := 5
-	for i := range numTries {
-		ret, err := d.makeChannelOneAttempt(m, team, appId, nm, desc, roles, opts, test)
-		if err == nil {
-			return ret, nil
-		}
-		var raceErr core.RTRaceError
-		if !errors.As(err, &raceErr) || i == numTries-1 {
-			return nil, err
-		}
-
-		// Report any races we hit to the testing framework
-		if test != nil && test.HitRaceHook != nil {
-			test.HitRaceHook(i)
-		}
-
-		m.Warnw("race condition on team metadata update", "iter", i, "sleep", sleepDur)
-		time.Sleep(sleepDur)
-		sleepDur *= 2
+	// Report any races we hit to the testing framework
+	var onRace func(int)
+	if test != nil {
+		onRace = test.HitRaceHook
 	}
-	return nil, core.RTRaceError{Which: "channels"}
+	var ret *proto.RTChannelID
+	err := d.retryOnRace(m, onRace, func() error {
+		var err error
+		ret, err = d.makeChannelOneAttempt(m, team, appId, nm, desc, roles, opts, test)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ret, nil
 }
 
 func assertTeam(team lcl.ConfigTeam) error {
@@ -311,7 +304,20 @@ func (d *Minder) makeChannelOneAttempt(
 	if err != nil {
 		return nil, err
 	}
-	chlst, err := d.listAllChannelsForTeam(m, rtp, appId)
+	// Private channels are exempt from team-wide name-collision detection: the
+	// server cannot dedupe names it hides from the caller, the listing the map
+	// was built from is itself filtered, and two private channels sharing a
+	// name is legitimate anyway.
+	//
+	// AllowDuplicateName never covers the EMPTY name: None-specifier lookups
+	// resolve a team's nameless default channel, and a second one would make
+	// them ambiguous.
+	checkNames := !opts.Private && (!opts.AllowDuplicateName || nm.IsEmpty())
+	listFn := d.listAllChannelsForTeam
+	if checkNames {
+		listFn = d.listAllChannelsForNameCheck
+	}
+	chlst, err := listFn(m, rtp, appId)
 	if err != nil {
 		return nil, err
 	}
@@ -360,15 +366,7 @@ func (d *Minder) makeChannelOneAttempt(
 	}
 	nameRole := nameRoleForTier(newChTier)
 
-	// Private channels are exempt from team-wide name-collision detection: the
-	// server cannot dedupe names it hides from the caller, the listing the map
-	// was built from is itself filtered, and two private channels sharing a
-	// name is legitimate anyway.
-	//
-	// AllowDuplicateName never covers the EMPTY name: None-specifier lookups
-	// resolve a team's nameless default channel, and a second one would make
-	// them ambiguous.
-	if !opts.Private && (!opts.AllowDuplicateName || nm.IsEmpty()) {
+	if checkNames {
 		if _, found := chMap[chKey{
 			name: nm.Normalize(),
 			tier: newChTier,
@@ -688,6 +686,11 @@ func (k *Minder) ListAllChannelsForTeam(
 	return ret, nil
 }
 
+// listAllChannelsForTeam lists the team's channels for display and for
+// resolving a channel specifier. A row whose NAME this device cannot decrypt
+// is skipped with a warning rather than failing the listing, so one bad row
+// costs one channel, not every channel in the team; see
+// listAllChannelsForTeamSkipping.
 func (k *Minder) listAllChannelsForTeam(
 	m MetaContext,
 	rtp *RTParty,
@@ -696,16 +699,60 @@ func (k *Minder) listAllChannelsForTeam(
 	*lcl.RTChannelSetForTeam,
 	error,
 ) {
+	lst, _, err := k.listAllChannelsForTeamSkipping(m, rtp, appID)
+	return lst, err
+}
+
+// listAllChannelsForNameCheck is listAllChannelsForTeam for a caller about to
+// use the listing as the team's name registry: creating a channel, or renaming
+// one, after checking the name is free. It fails instead of skipping a row,
+// returning the error that row hit.
+//
+// The server cannot compare encrypted names, so this client-side check is the
+// only thing preventing two channels of one tier from sharing a name. A
+// skipped row is a name the check cannot see, and passing the check without
+// it would create the duplicate the check exists to stop. Failing leaves the
+// caller to retry once the device has the keys.
+func (k *Minder) listAllChannelsForNameCheck(
+	m MetaContext,
+	rtp *RTParty,
+	appID proto.RTAppID,
+) (
+	*lcl.RTChannelSetForTeam,
+	error,
+) {
+	lst, skipErr, err := k.listAllChannelsForTeamSkipping(m, rtp, appID)
+	if err != nil {
+		return nil, err
+	}
+	if skipErr != nil {
+		return nil, skipErr
+	}
+	return lst, nil
+}
+
+// listAllChannelsForTeamSkipping does the work for both listings above. It
+// returns the decrypted rows, and separately the error from the first row it
+// skipped (nil if none was).
+func (k *Minder) listAllChannelsForTeamSkipping(
+	m MetaContext,
+	rtp *RTParty,
+	appID proto.RTAppID,
+) (
+	*lcl.RTChannelSetForTeam,
+	error,
+	error,
+) {
 
 	chsid, err := DeriveRTChannelSetID(rtp.plcn.FQParty(), appID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var lastKnownVersion proto.RTChannelSetVersion
 	cached, _, err := rtp.caches.channelSets.Get(m.Base(), *chsid)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	d := make(map[proto.RTChannelID]rem.RTChannelMetadata)
 	if cached != nil {
@@ -717,7 +764,48 @@ func (k *Minder) listAllChannelsForTeam(
 
 	fqt := rtp.plcn.FQParty().FQTeam()
 	if fqt == nil {
-		return nil, core.InternalError("teamID of chat party was inexpectedly nil")
+		return nil, nil, core.InternalError("teamID of chat party was inexpectedly nil")
+	}
+
+	// decryptAll decrypts every row it can and skips the rest, recording the
+	// first skip's error in skipErr.
+	//
+	// Only a NAME that will not open makes a row skip; a bad description is
+	// survivable and handled inside decryptChannelMetadata. Skip rather than
+	// failing the whole listing, as renderInboxRow already does for the inbox.
+	// Every box the server hands us should open -- it gates by tier and read
+	// role, and an unreadable channel's name is still sealed at the tier's
+	// name role -- so reaching here means something is wrong with that one
+	// row: a generation this device cannot fetch, a corrupt box, or a name box
+	// sealed with the wrong key derivation.
+	//
+	// The last of those is worth naming. RTBoxRG carries a role and a
+	// generation and nothing about the box's PURPOSE, so the server cannot
+	// tell a channel-description box from a channel-name box and will store
+	// either as name_box if the role matches (checkNameBoxRole is the most it
+	// can do). Failing the loop meant one such row made every channel in the
+	// team unlistable for everyone; skipping costs only that row. Closing the
+	// gap itself needs an authenticated purpose discriminator on the wire.
+	//
+	// A skipped row's name is missing from the result, so a caller that uses
+	// the listing as the name registry must not ignore skipErr; see
+	// listAllChannelsForNameCheck.
+	var skipErr error
+	decryptAll := func(rows []rem.RTChannelMetadata) []lcl.RTChannelMetadataPlaintext {
+		var ret []lcl.RTChannelMetadataPlaintext
+		for _, chmdenc := range rows {
+			chmdpt, err := k.decryptChannelMetadata(m, rtp, chmdenc)
+			if err != nil {
+				m.Warnw("listAllChannelsForTeam", "stage", "decrypt",
+					"chid", chmdenc.Id, "err", err)
+				if skipErr == nil {
+					skipErr = err
+				}
+				continue
+			}
+			ret = append(ret, *chmdpt)
+		}
+		return ret
 	}
 
 	// staleFromCache serves the last-known channel set when the server is
@@ -726,22 +814,20 @@ func (k *Minder) listAllChannelsForTeam(
 	// branch could run, making the whole offline mode unreachable in real
 	// disconnected use (docs/rt_offline.md, D4/D7). An empty cache still
 	// errors.
-	staleFromCache := func(rpcErr error) (*lcl.RTChannelSetForTeam, error) {
+	staleFromCache := func(rpcErr error) (*lcl.RTChannelSetForTeam, error, error) {
 		if !core.IsTransportError(rpcErr) || cached == nil {
-			return nil, rpcErr
+			return nil, nil, rpcErr
 		}
 		var out lcl.RTChannelSetForTeam
-		for _, chmdenc := range d {
-			chmdpt, err := k.decryptChannelMetadata(m, rtp, chmdenc)
-			if err != nil {
-				return nil, err
-			}
-			out.Channels = append(out.Channels, *chmdpt)
+		rows := make([]rem.RTChannelMetadata, 0, len(d))
+		for _, v := range d {
+			rows = append(rows, v)
 		}
+		out.Channels = decryptAll(rows)
 		out.Vers = lastKnownVersion
 		out.Team = fqt.Team
 		out.AppID = appID
-		return &out, nil
+		return &out, skipErr, nil
 	}
 
 	if k.testHooks != nil && k.testHooks.ListFail != nil {
@@ -774,7 +860,7 @@ func (k *Minder) listAllChannelsForTeam(
 			},
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		d = make(map[proto.RTChannelID]rem.RTChannelMetadata)
 	}
@@ -793,36 +879,7 @@ func (k *Minder) listAllChannelsForTeam(
 	}
 
 	var out lcl.RTChannelSetForTeam
-	for _, chmdenc := range mdlist {
-		chmdpt, err := k.decryptChannelMetadata(m, rtp, chmdenc)
-		if err != nil {
-			// Only a NAME that will not open reaches here; a bad description
-			// is survivable and handled inside decryptChannelMetadata, which
-			// matters because dropping the row would drop its name from the
-			// collision map and let the next create claim it.
-			//
-			// Skip rather than failing the whole listing, as renderInboxRow
-			// already does for the inbox. Every box the server hands us should
-			// open -- it gates by tier and read role, and an unreadable
-			// channel's name is still sealed at the tier's name role -- so
-			// reaching here means something is wrong with that one row: a
-			// generation this device cannot fetch, a corrupt box, or a name
-			// box sealed with the wrong key derivation.
-			//
-			// The last of those is worth naming. RTBoxRG carries a role and a
-			// generation and nothing about the box's PURPOSE, so the server
-			// cannot tell a channel-description box from a channel-name box
-			// and will store either as name_box if the role matches
-			// (checkNameBoxRole is the most it can do). Failing the loop meant
-			// one such row made every channel in the team unlistable for
-			// everyone; skipping costs only that row. Closing the gap itself
-			// needs an authenticated purpose discriminator on the wire.
-			m.Warnw("listAllChannelsForTeam", "stage", "decrypt",
-				"chid", chmdenc.Id, "err", err)
-			continue
-		}
-		out.Channels = append(out.Channels, *chmdpt)
-	}
+	out.Channels = decryptAll(mdlist)
 	out.Vers = encList.Vers
 	out.Team = fqt.Team
 	out.AppID = appID
@@ -831,10 +888,10 @@ func (k *Minder) listAllChannelsForTeam(
 
 	err = rtp.caches.channelSets.Put(m.Base(), *chsid, encList, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return &out, nil
+	return &out, skipErr, nil
 }
 
 // ThreadMessage is a single decrypted message, as returned by GetThread.
@@ -2892,7 +2949,7 @@ func (d *Minder) UpdateChannel(
 	desc proto.RTChannelDesc,
 	allowDuplicateName bool,
 ) error {
-	return d.retryOnRace(m, func() error {
+	return d.retryOnRace(m, nil, func() error {
 		return d.updateChannelOneAttempt(m, team, appID, spec, nm, desc, allowDuplicateName)
 	})
 }
@@ -2910,8 +2967,8 @@ func (d *Minder) SetChannelArchived(
 	spec lcl.RTChannelSpecifier,
 	archived bool,
 ) error {
-	return d.retryOnRace(m, func() error {
-		_, ch, _, cli, err := d.loadChannelForMutation(m, team, appID, spec)
+	return d.retryOnRace(m, nil, func() error {
+		_, ch, _, cli, err := d.loadChannelForMutation(m, team, appID, spec, false)
 		if err != nil {
 			return err
 		}
@@ -2931,10 +2988,15 @@ func (d *Minder) SetChannelArchived(
 	})
 }
 
-// retryOnRace runs f, retrying with backoff while it loses a metadata CAS.
-// Shared by the channel mutations and shaped like MakeChannelWithTestHooks'
-// loop, which predates it.
-func (d *Minder) retryOnRace(m MetaContext, f func() error) error {
+// retryOnRace runs f, retrying with backoff while it loses a metadata CAS
+// (RTRaceError). Shared by channel creation and the channel mutations. onRace,
+// if non-nil, is called with the attempt number before each retry; tests use
+// it to observe races.
+func (d *Minder) retryOnRace(
+	m MetaContext,
+	onRace func(int),
+	f func() error,
+) error {
 	sleepDur := time.Millisecond
 	numTries := 5
 	for i := range numTries {
@@ -2945,6 +3007,9 @@ func (d *Minder) retryOnRace(m MetaContext, f func() error) error {
 		var raceErr core.RTRaceError
 		if !errors.As(err, &raceErr) || i == numTries-1 {
 			return err
+		}
+		if onRace != nil {
+			onRace(i)
 		}
 		m.Warnw("race condition on channel metadata update", "iter", i, "sleep", sleepDur)
 		time.Sleep(sleepDur)
@@ -2962,6 +3027,7 @@ func (d *Minder) loadChannelForMutation(
 	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	spec lcl.RTChannelSpecifier,
+	checkNames bool,
 ) (
 	*RTParty,
 	*lcl.RTChannelMetadataPlaintext,
@@ -2979,8 +3045,14 @@ func (d *Minder) loadChannelForMutation(
 	// One listing per attempt, reused for both jobs it has to do: resolving
 	// the channel (and its current seqno, which the mutation CASes on) and, for
 	// a rename, checking the new name against the team. Re-listing for the
-	// second would double the network cost of every retry.
-	lst, err := d.listAllChannelsForTeam(m, rtp, appID)
+	// second would double the network cost of every retry. Pass checkNames
+	// when the listing will be used for that check; see
+	// listAllChannelsForNameCheck.
+	listFn := d.listAllChannelsForTeam
+	if checkNames {
+		listFn = d.listAllChannelsForNameCheck
+	}
+	lst, err := listFn(m, rtp, appID)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -3014,7 +3086,13 @@ func (d *Minder) updateChannelOneAttempt(
 	if nm.IsEmpty() || (nm.Eq(proto.RTGeneralChannel) && !allowDuplicateName) {
 		return core.RTGenericError("cannot rename a channel to the default channel's name")
 	}
-	rtp, ch, lst, cli, err := d.loadChannelForMutation(m, team, appID, spec)
+	// Every update here is a rename, so the listing is strict unless the
+	// caller skips the name check. That includes a private channel, which is
+	// exempt from the check below but is only known to be private once the
+	// listing has resolved it; a rename of one fails, retryably, in a team
+	// where some row will not decrypt.
+	rtp, ch, lst, cli, err := d.loadChannelForMutation(m, team, appID, spec,
+		!allowDuplicateName)
 	if err != nil {
 		return err
 	}
