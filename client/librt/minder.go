@@ -2970,9 +2970,10 @@ func (d *Minder) UpdateChannel(
 	// treats "general" as an ordinary name; the empty name stays refused,
 	// because None-specifier lookups resolve it.
 	//
-	// Renaming the default channel itself (FROM the empty name) stays
-	// allowed in the fork, unlike upstream: the SECO blueprint lets #general
-	// be renamed. See the #376 row in SECO-UPSTREAM.md.
+	// Renaming the nameless default channel itself (FROM the empty name)
+	// stays allowed in the fork, unlike upstream #376: the app's one-time
+	// #general migration renames it to "general" (with AllowDuplicateName).
+	// See the Local row in SECO-UPSTREAM.md.
 	if nm := upd.Name; nm != nil &&
 		(nm.IsEmpty() || (nm.Eq(proto.RTGeneralChannel) && !upd.AllowDuplicateName)) {
 		return core.RTGenericError("cannot rename a channel to the default channel's name")

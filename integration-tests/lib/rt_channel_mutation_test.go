@@ -1002,23 +1002,35 @@ func TestRenameKeepsDescription(t *testing.T) {
 	require.IsType(t, core.BadArgsError(""), err)
 }
 
-// FORK-ONLY. The team's default (nameless) channel can be renamed here, because
-// the SECO blueprint lets #general be renamed. Upstream #376 refuses this in
-// librt, since a renamed default channel leaves every lookup that names no
-// channel with nothing to find. This test exists so the next upstream merge
-// cannot take upstream's refusal without someone deciding to; see the #376
-// row in SECO-UPSTREAM.md.
+// FORK-ONLY. The team's nameless default channel can be renamed here, because
+// the app's one-time #general migration (SECO-FOKS
+// apps/mobile/src/lib/chat/defaultChannelMigration.ts) renames it to
+// "general", with AllowDuplicateName set and the description resent. That is
+// the call this test makes. Upstream #376 refuses the rename, since a renamed
+// default channel leaves every lookup that names no channel with nothing to
+// find. This test exists so the next upstream merge cannot take upstream's
+// refusal without someone deciding to; see the Local row in SECO-UPSTREAM.md.
 func TestDefaultChannelCanBeRenamedInFork(t *testing.T) {
 	sc := setupMutScene(t)
 	none := lcl.NewRTChannelSpecifierDefault(lcl.RTChannelSpecifierType_None)
-	newName := randomChannelName(t, "was-general-")
-	require.NoError(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
-		proto.RTAppID_Chat, none, renameTo(newName)))
-
-	lst, err := sc.bob.minder.ListAllChannelsForTeam(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat)
+	def, err := sc.alice.minder.ListAllChannelsForTeam(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat)
 	require.NoError(t, err)
-	for _, ch := range lst.Channels {
-		require.False(t, ch.Name.IsEmpty() && !ch.Private,
-			"the default channel was renamed, so no public channel is nameless")
+	var defID *proto.RTChannelID
+	for i := range def.Channels {
+		if ch := &def.Channels[i]; ch.Name.IsEmpty() && !ch.Private {
+			defID = &ch.Id
+		}
 	}
+	require.NotNil(t, defID, "the scene has a nameless default channel")
+
+	desc := proto.RTChannelDesc("")
+	upd := renameAllowDup(proto.RTGeneralChannel)
+	upd.Desc = &desc
+	require.NoError(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, none, upd))
+
+	got := sc.find(t, sc.bob, *defID)
+	require.NotNil(t, got)
+	require.Equal(t, proto.RTGeneralChannel, got.Name,
+		"the migration's rename of the nameless channel must succeed in the fork")
 }
