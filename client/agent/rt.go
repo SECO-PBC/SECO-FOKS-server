@@ -289,8 +289,9 @@ func (c *AgentConn) ClientRTInboxView(
 	return *view, nil
 }
 
-// ClientRTUpdateChannel renames a channel and replaces its description; an
-// empty desc clears it. Admin-only, enforced by the server.
+// ClientRTUpdateChannel renames a channel and/or sets its description; an
+// absent field is left as it is, and an empty desc clears it. Admin-only,
+// enforced by the server.
 func (c *AgentConn) ClientRTUpdateChannel(
 	ctx context.Context,
 	arg lcl.ClientRTUpdateChannelArg,
@@ -300,8 +301,13 @@ func (c *AgentConn) ClientRTUpdateChannel(
 		return err
 	}
 	return minder.UpdateChannel(
-		m, arg.Cfg.Team, arg.Cfg.AppID, arg.Cfg.Channel, arg.Name, arg.Desc,
-		arg.AllowDuplicateName)
+		m, arg.Cfg.Team, arg.Cfg.AppID, arg.Cfg.Channel,
+		librt.ChannelUpdate{
+			Name:               arg.Name,
+			Desc:               arg.Desc,
+			AllowDuplicateName: arg.AllowDuplicateName,
+		},
+	)
 }
 
 // ClientRTSetChannelArchived archives or unarchives a channel. Admin-only,

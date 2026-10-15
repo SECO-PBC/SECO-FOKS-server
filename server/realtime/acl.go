@@ -237,24 +237,6 @@ func authorizeChannel(
 		}
 	}
 
-	// 3b. Archived gate. An archived channel is closed to new activity: no
-	// sends, and no ACL changes, since both are activity in a room that has
-	// been closed. Reads by explicit channel id still work -- the channel is
-	// hidden, not destroyed, and in practice no client reaches one because the
-	// inbox drops it. The mutation kinds pass, or unarchive could never run, and
-	// rename must stay reachable because renaming an archived channel is how
-	// its reserved name is released.
-	//
-	// After the private gate, never before it: an archived-channel error for a
-	// private channel the caller is not in would disclose that the channel
-	// exists.
-	switch want {
-	case accessWrite, accessManage, accessRevoke:
-		if err := archivedBlocks(ca.archivedAt); err != nil {
-			return nil, err
-		}
-	}
-
 	// 4. Tier gate: an admin-tier channel is invisible below admin. Implied by
 	// the read-role gate for every channel librt creates (the tier is derived
 	// from the read role), but stated here so the chokepoint does not depend
@@ -336,6 +318,29 @@ func authorizeChannel(
 				// RowNotFound.
 				return nil, core.PermissionError("must be a channel owner or team admin to manage membership")
 			}
+		}
+	}
+
+	// 7. Archived gate. An archived channel is closed to new activity: no
+	// sends, and no ACL changes, since both are activity in a room that has
+	// been closed. Reads by explicit channel id still work -- the channel is
+	// hidden, not destroyed, and in practice no client reaches one because the
+	// inbox drops it. The mutation kinds pass, or unarchive could never run, and
+	// rename must stay reachable because renaming an archived channel is how
+	// its reserved name is released.
+	//
+	// LAST, after every gate that can refuse the caller. Archived-ness is
+	// channel state, and only a caller entitled to the access they asked for
+	// may learn it: run earlier, it would tell a member below the write role
+	// (or a non-owner trying to manage) that the channel is archived, where a
+	// live channel gives them PermissionError. That also keeps it after the
+	// private gate, where an archived-channel error for a private channel the
+	// caller is not in would disclose that the channel exists. With lock=true
+	// the row lock is already held, so a send still cannot race an archive.
+	switch want {
+	case accessWrite, accessManage, accessRevoke:
+		if err := archivedBlocks(ca.archivedAt); err != nil {
+			return nil, err
 		}
 	}
 	return &ca, nil

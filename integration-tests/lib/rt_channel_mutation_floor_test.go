@@ -104,12 +104,12 @@ func TestChannelArchivePrivateStaysAdmin(t *testing.T) {
 	require.IsType(t, core.PermissionError(""), err)
 
 	require.NoError(t, sc.eddie.minder.UpdateChannel(sc.eddie.m, sc.teamCfg(), proto.RTAppID_Chat,
-		spec, randomChannelName(t, "priv-"), "", false))
+		spec, renameTo(randomChannelName(t, "priv-"))))
 
 	// A delegate outside it cannot even find it: the client resolves the
 	// channel from its own listing first, where it is absent.
 	err = fred.minder.UpdateChannel(fred.m, sc.teamCfg(), proto.RTAppID_Chat,
-		spec, randomChannelName(t, "outside-"), "", false)
+		spec, renameTo(randomChannelName(t, "outside-")))
 	require.IsType(t, core.RTNotFoundError(""), err)
 
 	// An admin still archives it.

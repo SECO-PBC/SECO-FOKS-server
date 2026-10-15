@@ -266,6 +266,14 @@ rename/archive apply to every channel. That is the whole reason it cannot
 simply reuse `accessManage`, and it is the easiest thing to get wrong when
 implementing.
 
+**As built since 2026-10-15: the gate runs LAST in `authorizeChannel`**, after
+every gate that can refuse the caller (tier, mutation, role, ACL authority).
+It used to sit right after the private gate, which told a member below the
+write role, or a non-owner trying to grant, that the channel was archived,
+where a live channel gave them `PermissionError`. Upstream review of #376 found
+the same leak in upstream's send path. Tests:
+`TestArchivedSendChecksPermissionFirst`, `TestArchivedGrantChecksPermissionFirst`.
+
 **Decision, needs sign-off (§6 Q1): an archived channel stays readable by
 explicit channel id.** Writes and ACL management are refused; `rtGetThread`,
 `rtGetThreadRecents` and `rtGetChannel` still serve it. The reasoning: the
@@ -324,10 +332,18 @@ func notArchived(chAlias string) string {
 
 ```
 rtUpdateChannel      @207 (chid : lib.RTChannelID, seqno : lib.RTChannelSeqno,
-                           nameBox : lib.RTBoxRG, descBox : Option(lib.RTBoxRG));
+                           nameBox : Option(lib.RTBoxRG), desc : RTChannelDescUpdate);
 rtSetChannelArchived @208 (chid : lib.RTChannelID, seqno : lib.RTChannelSeqno,
                            archived : Bool);
 ```
+
+**As built since 2026-10-15, `@207`'s arguments changed in place** to match
+upstream #376: an absent `nameBox` keeps the name, and `desc` is a Keep /
+Clear / Set variant, so a rename no longer clears the description. It was
+`nameBox : lib.RTBoxRG, descBox : Option(lib.RTBoxRG)`, where an absent
+`descBox` cleared it. Same number, new shape: the server and the app must
+ship together. `clientRTUpdateChannel @9` takes `Option` name and desc to
+match, and `librt.UpdateChannel` takes a `ChannelUpdate`.
 
 `RTChannelMetadata` gains `archived @22 : Bool`.
 
@@ -657,7 +673,7 @@ The test is mechanical and worth running literally: *does this diff apply to
 |---|---|---|
 | `archived_at` column + p9 | **Yes** | Goes upstream unchanged. Upstream's patch number will differ from our p9 — expect that and do not fight it. |
 | `touchChannelSet` | **Yes, but it lives in the wrong file.** Its body touches only `channel_sets` and `channels.updated_at_set_vers`; it sits in `acl.go` purely because grant/revoke needed it first. | **Move it to `channels.go` in the fork first, as a pure no-behaviour-change refactor.** One commit, callers unchanged, and — **as built** — no `queryAllowlist` change at all: the guard keys on receiver-plus-function name rather than on the file, so a move within the package is invisible to it. After that it is an ordinary `channels.go` helper the upstream PR can introduce where it belongs, and our merge conflict on it disappears. This single move is the highest-leverage thing on this list. |
-| The archived gate | **Content yes, placement no.** Upstream has no chokepoint to put it in. | Write it as a standalone helper — `checkNotArchived(archivedAt, want)` for row paths and `notArchived(alias)` for set paths — so the *predicate* is shared and only the *call site* differs. Upstream calls it from `loadChannelForRead` and `lockChannel`; the fork calls it from `authorizeChannel`. That reduces the permanent fork delta to a handful of call lines instead of a redesign. |
+| The archived gate | **Content yes, placement no.** Upstream has no chokepoint to put it in. | Write it as a standalone helper — `checkNotArchived(archivedAt, want)` for row paths and `notArchived(alias)` for set paths — so the *predicate* is shared and only the *call site* differs. Upstream calls it from `messageSender.run`, after `authorize()` (it was in `lockChannel` until the #376 review); the fork calls it at the end of `authorizeChannel`. That reduces the permanent fork delta to a handful of call lines instead of a redesign. |
 | Listing / inbox / fan-in filters | **Yes** | Upstream's diff is `AND c.archived_at IS NULL`. The fork's sits beside the private gate. Small, predictable, recurring conflict — the cost of having a fork. |
 | `rtUpdateChannel`, `rtSetChannelArchived` | **Yes** | See §9.4 — the numbers differ between the two versions. |
 | `archived` on `RTChannelMetadata` | **Yes** | Same. |

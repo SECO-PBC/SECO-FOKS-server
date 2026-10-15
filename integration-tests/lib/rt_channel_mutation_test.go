@@ -110,11 +110,31 @@ func (s *mutScene) specFor(id proto.RTChannelID) lcl.RTChannelSpecifier {
 	return lcl.NewRTChannelSpecifierWithId(id)
 }
 
+// rename renames a channel, setting its description too when desc is
+// non-empty and leaving it alone otherwise.
 func (s *mutScene) rename(
 	t *testing.T, by *privActor, spec lcl.RTChannelSpecifier,
 	nm proto.RTChannelName, desc proto.RTChannelDesc,
 ) error {
-	return by.minder.UpdateChannel(by.m, s.teamCfg(), proto.RTAppID_Chat, spec, nm, desc, false)
+	upd := renameTo(nm)
+	if !desc.IsEmpty() {
+		upd.Desc = &desc
+	}
+	return by.minder.UpdateChannel(by.m, s.teamCfg(), proto.RTAppID_Chat, spec, upd)
+}
+
+// renameTo is a name-only ChannelUpdate; renameAllowDup is the same with
+// AllowDuplicateName set; describe is a description-only one.
+func renameTo(nm proto.RTChannelName) librt.ChannelUpdate {
+	return librt.ChannelUpdate{Name: &nm}
+}
+
+func renameAllowDup(nm proto.RTChannelName) librt.ChannelUpdate {
+	return librt.ChannelUpdate{Name: &nm, AllowDuplicateName: true}
+}
+
+func describe(desc proto.RTChannelDesc) librt.ChannelUpdate {
+	return librt.ChannelUpdate{Desc: &desc}
 }
 
 func (s *mutScene) setArchived(
@@ -246,7 +266,7 @@ func TestRenameCasRace(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			errs[i] = actors[i].minder.UpdateChannel(actors[i].m, sc.teamCfg(),
-				proto.RTAppID_Chat, sc.pubSpec(), names[i], "", false)
+				proto.RTAppID_Chat, sc.pubSpec(), renameTo(names[i]))
 		}(i)
 	}
 	wg.Wait()
@@ -306,17 +326,17 @@ func TestAllowDuplicateNameOnCreateAndRename(t *testing.T) {
 	require.NoError(t, err)
 	require.Error(t, sc.rename(t, sc.alice, sc.specFor(*dup), proto.RTGeneralChannel, ""))
 	require.NoError(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
-		proto.RTAppID_Chat, sc.specFor(*dup), proto.RTGeneralChannel, "", true))
+		proto.RTAppID_Chat, sc.specFor(*dup), renameAllowDup(proto.RTGeneralChannel)))
 
 	// Renaming onto a live name: refused without the flag, allowed with it.
 	require.IsType(t, core.RTChannelExistsError{},
 		sc.rename(t, sc.alice, sc.specFor(*gen), sc.pubName, ""))
 	require.NoError(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
-		proto.RTAppID_Chat, sc.specFor(*gen), sc.pubName, "", true))
+		proto.RTAppID_Chat, sc.specFor(*gen), renameAllowDup(sc.pubName)))
 
 	// The empty name stays refused either way: None lookups resolve it.
 	require.Error(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
-		proto.RTAppID_Chat, sc.specFor(*gen), "", "", true))
+		proto.RTAppID_Chat, sc.specFor(*gen), renameAllowDup("")))
 
 	// …and stays unique on create: the flag never mints a second nameless
 	// channel.
@@ -755,4 +775,262 @@ func TestArchiveDropsHeldPushes(t *testing.T) {
 			"again, so nothing would ever release them")
 	require.Zero(t, sc.pendingPushes(t, "queued"),
 		"and archiving must not quietly release them into the queue instead")
+}
+
+// --- review fixes ported from upstream #376 --------------------------------
+
+// The name-collision check is the only thing keeping two channels of one tier
+// from sharing a name: the server cannot compare encrypted names. A listing
+// that skipped a row it could not decrypt cannot see that row's name, so a
+// create or rename relying on the check must fail rather than pass without
+// it. Display, channel resolution, and the operations that check no name keep
+// the lenient listing.
+func TestNameCheckFailsOnUnreadableRow(t *testing.T) {
+	sc := setupMutScene(t)
+	roles := proto.RolePairOpt{Read: &proto.DefaultRole, Write: &proto.DefaultRole}
+	otherID, err := sc.alice.minder.MakeChannel(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, randomChannelName(t, "other-"), "", roles)
+	require.NoError(t, err)
+
+	sc.corruptNameBox(t, sc.pubID)
+
+	require.Nil(t, sc.find(t, sc.alice, sc.pubID),
+		"the listing skips the row it cannot decrypt")
+	require.NotNil(t, sc.find(t, sc.alice, *otherID), "and keeps the rest")
+
+	_, err = sc.alice.minder.MakeChannel(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, randomChannelName(t, "new-"), "", roles)
+	require.Error(t, err, "a create must not pass a name check that could not see every name")
+	require.Error(t, sc.rename(t, sc.alice, sc.specFor(*otherID),
+		randomChannelName(t, "renamed-"), ""), "nor may a rename")
+
+	_, err = sc.alice.minder.MakeChannelWithOpts(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, randomChannelName(t, "dup-ok-"), "", roles,
+		librt.MakeChannelOpts{AllowDuplicateName: true}, nil)
+	require.NoError(t, err, "a create that checks no name is unaffected")
+	_, err = sc.alice.minder.MakeChannelWithOpts(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, randomChannelName(t, "priv-ok-"), "", roles,
+		librt.MakeChannelOpts{Private: true}, nil)
+	require.NoError(t, err, "nor is a private create, which is exempt from the check")
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.specFor(*otherID), true))
+}
+
+// corruptNameBox flips a byte of a channel's stored name ciphertext, leaving
+// the RTBoxRG well-formed, and bumps the team's channel-set version so every
+// client re-fetches the row.
+func (s *mutScene) corruptNameBox(t *testing.T, id proto.RTChannelID) {
+	m := s.tew.MetaContext()
+	db, err := m.Db(shared.DbTypeRealTime)
+	require.NoError(t, err)
+	defer db.Release()
+	chid := id.Short().Int64()
+
+	var raw []byte
+	require.NoError(t, db.QueryRow(m.Ctx(),
+		`SELECT name_box FROM channels WHERE short_host_id=$1 AND channel_id=$2`,
+		m.ShortHostID(), chid).Scan(&raw))
+	var box proto.RTBoxRG
+	require.NoError(t, core.DecodeFromBytes(&box, raw))
+	nacl := box.Box.Nacl()
+	ct := append(proto.NaclCiphertext(nil), nacl.Ciphertext...)
+	ct[0] ^= 0xff
+	nacl.Ciphertext = ct
+	box.Box = proto.NewSecretBoxWithNacl(nacl)
+	enc, err := core.EncodeToBytes(&box)
+	require.NoError(t, err)
+
+	var vers int
+	require.NoError(t, db.QueryRow(m.Ctx(),
+		`UPDATE channel_sets cs SET vers = cs.vers + 1, mtime = NOW()
+		 FROM channels c
+		 WHERE c.short_host_id=$1 AND c.channel_id=$2
+		 AND cs.short_host_id=c.short_host_id
+		 AND cs.parent_team_id=c.parent_team_id AND cs.app_id=c.app_id
+		 RETURNING cs.vers`,
+		m.ShortHostID(), chid).Scan(&vers))
+	_, err = db.Exec(m.Ctx(),
+		`UPDATE channels SET name_box=$3, updated_at_set_vers=$4
+		 WHERE short_host_id=$1 AND channel_id=$2`,
+		m.ShortHostID(), chid, enc, vers)
+	require.NoError(t, err)
+}
+
+// A caller who may not send into a channel learns nothing about whether it is
+// archived: the chokepoint's archived gate runs after every gate that can
+// refuse the caller, so they get the same PermissionError either way. Only a
+// caller who could send is told why not.
+func TestArchivedSendChecksPermissionFirst(t *testing.T) {
+	sc := setupMutScene(t)
+	ann, err := sc.alice.minder.MakeChannel(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
+		randomChannelName(t, "announce-"), "admins post here",
+		proto.RolePairOpt{Read: &proto.DefaultRole, Write: &proto.AdminRole})
+	require.NoError(t, err)
+	send := func(by *privActor) error {
+		_, err := by.minder.Send(by.m, sc.teamCfg(), proto.RTAppID_Chat,
+			sc.specFor(*ann), []byte("hello"))
+		return err
+	}
+
+	require.IsType(t, core.PermissionError(""), send(sc.bob))
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.specFor(*ann), true))
+	require.IsType(t, core.PermissionError(""), send(sc.bob),
+		"an archived channel must look the same as a live one to a caller who cannot send")
+	require.IsType(t, core.RTChannelArchivedError{}, send(sc.alice))
+}
+
+// The same for managing a private channel's membership: a member who is not an
+// owner gets PermissionError for a grant whether or not the channel is
+// archived.
+func TestArchivedGrantChecksPermissionFirst(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	spec := lcl.NewRTChannelSpecifierWithId(sc.chid)
+	sc.grant(t, sc.alice, sc.cleo, false)
+	grant := func() error {
+		return sc.cleo.minder.GrantChannelMember(sc.cleo.m, sc.chid, sc.bob.u.uid, false)
+	}
+
+	require.IsType(t, core.PermissionError(""), grant())
+	require.NoError(t, sc.alice.minder.SetChannelArchived(sc.alice.m,
+		sc.teamCfg(), proto.RTAppID_Chat, spec, true))
+	require.IsType(t, core.PermissionError(""), grant(),
+		"a non-owner must not learn that the channel is archived")
+}
+
+// Setting a channel to the archived state it is already in writes nothing: no
+// seqno bump, and no channel-set version bump, so no client re-fetches the
+// listing and no member's inbox row is re-stamped.
+func TestArchiveToCurrentStateIsNoop(t *testing.T) {
+	sc := setupMutScene(t)
+	snapshot := func() (proto.RTChannelSeqno, proto.RTChannelSetVersion) {
+		lst, err := sc.alice.minder.ListAllChannelsForTeam(sc.alice.m, sc.teamCfg(),
+			proto.RTAppID_Chat)
+		require.NoError(t, err)
+		for _, ch := range lst.Channels {
+			if ch.Id.Eq(sc.pubID) {
+				return ch.Seqno, lst.Vers
+			}
+		}
+		require.FailNow(t, "channel missing from the listing")
+		return 0, 0
+	}
+
+	seq0, vers0 := snapshot()
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), false))
+	seq1, vers1 := snapshot()
+	require.Equal(t, seq0, seq1, "unarchiving a live channel must not bump its seqno")
+	require.Equal(t, vers0, vers1, "nor the channel-set version")
+
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
+	seq2, vers2 := snapshot()
+	require.Greater(t, seq2, seq1, "a real change does bump the seqno")
+	require.Greater(t, vers2, vers1)
+
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
+	seq3, vers3 := snapshot()
+	require.Equal(t, seq2, seq3, "archiving an archived channel must not bump its seqno")
+	require.Equal(t, vers2, vers3, "nor the channel-set version")
+}
+
+// A member who joined while the channel was archived has no delivery row,
+// since the late-join fan-in skips archived channels and still records them as
+// reconciled. Unarchiving gives them one, in the same pass that re-stamps the
+// existing members' rows. The invariant suite on cleanup checks that pass
+// burned no inbox version.
+func TestUnarchiveFansInLateJoiner(t *testing.T) {
+	sc := setupMutScene(t)
+	_, err := sc.alice.minder.Send(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
+		sc.pubSpec(), []byte("before the archive"))
+	require.NoError(t, err)
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
+
+	frank := sc.tew.NewTestUser(t)
+	sc.tm.makeChanges(t, sc.tew.MetaContext(), sc.alice.u,
+		[]proto.MemberRole{frank.toMemberRole(t, proto.DefaultRole, sc.tm.hepks)}, nil)
+	fa := newPrivActor(t, sc.tew, frank)
+
+	// This sync runs the late-join fan-in, which skips the archived channel
+	// and records frank's membership as reconciled.
+	_, err = fa.minder.SyncInbox(fa.m, proto.RTAppID_Chat)
+	require.NoError(t, err)
+	require.False(t, inboxHas(t, fa, sc.pubID))
+
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), false))
+
+	for _, who := range []struct {
+		name string
+		a    *privActor
+	}{{"existing member", sc.bob}, {"late joiner", fa}} {
+		_, err = who.a.minder.SyncInbox(who.a.m, proto.RTAppID_Chat)
+		require.NoError(t, err)
+		require.True(t, inboxHas(t, who.a, sc.pubID),
+			"unarchiving must put the channel in the %s's inbox", who.name)
+	}
+}
+
+// A rename that says nothing about the description leaves it alone, and a
+// description can be edited without restating the name. An empty description
+// clears it, and an update that changes nothing is refused. Before the
+// partial update, every rename sent a description and an omitted one cleared
+// it.
+func TestRenameKeepsDescription(t *testing.T) {
+	sc := setupMutScene(t)
+	update := func(upd librt.ChannelUpdate) error {
+		return sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
+			proto.RTAppID_Chat, sc.pubSpec(), upd)
+	}
+
+	newName := randomChannelName(t, "typo-fixed-")
+	require.NoError(t, update(renameTo(newName)))
+	got := sc.find(t, sc.bob, sc.pubID)
+	require.Equal(t, newName, got.Name)
+	require.NotNil(t, got.Desc, "a rename must keep the description")
+	require.Equal(t, proto.RTChannelDesc("a public channel"), *got.Desc)
+
+	require.NoError(t, update(describe("edited")))
+	got = sc.find(t, sc.bob, sc.pubID)
+	require.Equal(t, newName, got.Name, "a description edit must keep the name")
+	require.NotNil(t, got.Desc)
+	require.Equal(t, proto.RTChannelDesc("edited"), *got.Desc)
+
+	require.NoError(t, update(describe("")))
+	got = sc.find(t, sc.bob, sc.pubID)
+	require.Equal(t, newName, got.Name)
+	require.Nil(t, got.Desc, "an empty description clears it")
+
+	err := update(librt.ChannelUpdate{})
+	require.Error(t, err)
+	require.IsType(t, core.BadArgsError(""), err)
+}
+
+// FORK-ONLY. The team's nameless default channel can be renamed here, because
+// the app's one-time #general migration (SECO-FOKS
+// apps/mobile/src/lib/chat/defaultChannelMigration.ts) renames it to
+// "general", with AllowDuplicateName set and the description resent. That is
+// the call this test makes. Upstream #376 refuses the rename, since a renamed
+// default channel leaves every lookup that names no channel with nothing to
+// find. This test exists so the next upstream merge cannot take upstream's
+// refusal without someone deciding to; see the Local row in SECO-UPSTREAM.md.
+func TestDefaultChannelCanBeRenamedInFork(t *testing.T) {
+	sc := setupMutScene(t)
+	none := lcl.NewRTChannelSpecifierDefault(lcl.RTChannelSpecifierType_None)
+	def, err := sc.alice.minder.ListAllChannelsForTeam(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat)
+	require.NoError(t, err)
+	var defID *proto.RTChannelID
+	for i := range def.Channels {
+		if ch := &def.Channels[i]; ch.Name.IsEmpty() && !ch.Private {
+			defID = &ch.Id
+		}
+	}
+	require.NotNil(t, defID, "the scene has a nameless default channel")
+
+	desc := proto.RTChannelDesc("")
+	upd := renameAllowDup(proto.RTGeneralChannel)
+	upd.Desc = &desc
+	require.NoError(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, none, upd))
+
+	got := sc.find(t, sc.bob, *defID)
+	require.NotNil(t, got)
+	require.Equal(t, proto.RTGeneralChannel, got.Name,
+		"the migration's rename of the nameless channel must succeed in the fork")
 }

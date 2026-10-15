@@ -270,19 +270,19 @@ func rtNewChannel(m libclient.MetaContext, top *cobra.Command) {
 
 func rtRenameChannel(m libclient.MetaContext, top *cobra.Command) {
 	var desc, nm string
-	// Captured so the run function can tell "--description ''" (clear it) from
-	// "--description omitted" (leave it alone); its own signature has no
-	// *cobra.Command.
+	// Captured so the run function can tell a flag that was passed (even
+	// empty, as --description '' is) from one that was not; its own signature
+	// has no *cobra.Command.
 	var self *cobra.Command
 	quickRTCmd(
 		m, top,
-		"rename-channel", []string{"rename"},
+		"rename-channel", []string{"rename", "edit-channel"},
 		"rename a channel, or edit its description",
-		"rename a channel and replace its description; admins only. An empty "+
-			"--description clears the description. The new name must not collide "+
-			"with another channel of the same tier, including an archived one, "+
-			"whose name stays reserved until it is renamed or the channel is "+
-			"unarchived.",
+		"rename a channel and/or set its description; admins only. Whatever "+
+			"is not passed is left as it is, and --description '' clears the "+
+			"description. The new name must not collide with another channel of "+
+			"the same tier, including an archived one, whose name stays reserved "+
+			"until it is renamed or the channel is unarchived.",
 		quickRTOpts{SupportChannel: true},
 		func(cmd *cobra.Command) {
 			self = cmd
@@ -291,83 +291,35 @@ func rtRenameChannel(m libclient.MetaContext, top *cobra.Command) {
 		},
 		func(args []string, cfg lcl.RTConfig, cli lcl.RealTimeClient) error {
 			if len(args) != 0 {
-				return ArgsError("no args; specify the new name with --name")
+				return ArgsError("no args; use --name and/or --description")
 			}
-			if len(nm) > 0 && nm[0] == '#' {
-				nm = nm[1:]
-			}
-			var ch proto.RTChannelName
-			if err := ch.ParseFrom(nm); err != nil {
-				return err
-			}
-			var cd proto.RTChannelDesc
-			if err := cd.ParseFrom(desc); err != nil {
-				return err
-			}
-			// --description on its own edits (or clears) the description and
-			// keeps the name. The RPC always carries a name, so look the
-			// current one up rather than making --name mandatory for what the
-			// help text calls a description edit.
-			if ch.IsEmpty() {
-				if self == nil || !self.Flags().Changed("description") {
-					return ArgsError("specify --name, --description, or both")
+			arg := lcl.ClientRTUpdateChannelArg{Cfg: cfg}
+			if self.Flags().Changed("name") {
+				if len(nm) > 0 && nm[0] == '#' {
+					nm = nm[1:]
 				}
-				cur, err := currentChannelName(m, cli, cfg)
-				if err != nil {
+				var ch proto.RTChannelName
+				if err := ch.ParseFrom(nm); err != nil {
 					return err
 				}
-				ch = *cur
+				if ch.IsEmpty() {
+					return ArgsError("--name cannot be empty")
+				}
+				arg.Name = &ch
 			}
-			return cli.ClientRTUpdateChannel(m.Ctx(),
-				lcl.ClientRTUpdateChannelArg{Cfg: cfg, Name: ch, Desc: cd},
-			)
+			if self.Flags().Changed("description") {
+				var cd proto.RTChannelDesc
+				if err := cd.ParseFrom(desc); err != nil {
+					return err
+				}
+				arg.Desc = &cd
+			}
+			if arg.Name == nil && arg.Desc == nil {
+				return ArgsError("nothing to change; pass --name and/or --description")
+			}
+			return cli.ClientRTUpdateChannel(m.Ctx(), arg)
 		},
 	)
-}
-
-// currentChannelName resolves the name of the channel cfg selects, so a
-// description-only edit can resend it unchanged.
-func currentChannelName(
-	m libclient.MetaContext,
-	cli lcl.RealTimeClient,
-	cfg lcl.RTConfig,
-) (
-	*proto.RTChannelName,
-	error,
-) {
-	set, err := cli.ClientRTListChannelsForTeam(m.Ctx(), cfg)
-	if err != nil {
-		return nil, err
-	}
-	t, err := cfg.Channel.GetT()
-	if err != nil {
-		return nil, err
-	}
-	for i := range set.Channels {
-		c := &set.Channels[i]
-		switch t {
-		case lcl.RTChannelSpecifierType_ID:
-			if c.Id.Eq(cfg.Channel.Id()) {
-				return &c.Name, nil
-			}
-		case lcl.RTChannelSpecifierType_Name:
-			want := cfg.Channel.Name()
-			if c.Name.Normalize().Eq(want.Name.Normalize()) &&
-				(want.Tier == proto.RTChannelTier_None || c.Tier == want.Tier) {
-				return &c.Name, nil
-			}
-		case lcl.RTChannelSpecifierType_None:
-			// No --channel means the team's default channel, the same default
-			// every other rt subcommand takes. It is the one with the empty
-			// name.
-			if c.Name.IsEmpty() {
-				return &c.Name, nil
-			}
-		default:
-			return nil, ArgsError("select a channel with --channel")
-		}
-	}
-	return nil, core.RTNotFoundError("channel")
 }
 
 func rtArchiveChannel(m libclient.MetaContext, top *cobra.Command) {
