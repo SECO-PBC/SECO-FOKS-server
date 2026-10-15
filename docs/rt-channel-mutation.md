@@ -332,10 +332,18 @@ func notArchived(chAlias string) string {
 
 ```
 rtUpdateChannel      @207 (chid : lib.RTChannelID, seqno : lib.RTChannelSeqno,
-                           nameBox : lib.RTBoxRG, descBox : Option(lib.RTBoxRG));
+                           nameBox : Option(lib.RTBoxRG), desc : RTChannelDescUpdate);
 rtSetChannelArchived @208 (chid : lib.RTChannelID, seqno : lib.RTChannelSeqno,
                            archived : Bool);
 ```
+
+**As built since 2026-10-15, `@207`'s arguments changed in place** to match
+upstream #376: an absent `nameBox` keeps the name, and `desc` is a Keep /
+Clear / Set variant, so a rename no longer clears the description. It was
+`nameBox : lib.RTBoxRG, descBox : Option(lib.RTBoxRG)`, where an absent
+`descBox` cleared it. Same number, new shape: the server and the app must
+ship together. `clientRTUpdateChannel @9` takes `Option` name and desc to
+match, and `librt.UpdateChannel` takes a `ChannelUpdate`.
 
 `RTChannelMetadata` gains `archived @22 : Bool`.
 

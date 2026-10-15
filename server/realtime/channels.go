@@ -2,7 +2,9 @@ package realtime
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/foks-proj/go-foks/lib/core"
@@ -1295,9 +1297,13 @@ func dropChannelPushes(m shared.MetaContext, tx pgx.Tx, channelID int64) error {
 	return err
 }
 
-// UpdateChannel renames a channel and/or replaces its description. Team admins,
-// or members at or above the team's delegation floor when the host configures
-// rt.channel.edit (enforced by the chokepoint at accessMutate).
+// UpdateChannel renames a channel and/or sets or clears its description. Team
+// admins, or members at or above the team's delegation floor when the host
+// configures rt.channel.edit (enforced by the chokepoint at accessMutate).
+//
+// Each of the two is optional, so a rename that says nothing about the
+// description leaves it alone, and a description edit needs no name. A call
+// that changes neither is rejected.
 //
 // The server cannot check what the name says -- name_box is sealed with the
 // parent team's key -- so two things stay the client's responsibility, and
@@ -1308,6 +1314,48 @@ func dropChannelPushes(m shared.MetaContext, tx pgx.Tx, channelID int64) error {
 // Permitted on an archived channel: renaming one is how its reserved name is
 // released for reuse.
 func UpdateChannel(m shared.MetaContext, arg rem.RtUpdateChannelArg) error {
+	descT, err := arg.Desc.GetT()
+	if err != nil {
+		return err
+	}
+
+	// The SET clause names only the columns this call changes. casSeqno's own
+	// placeholders are $1-$3, so these start at $4.
+	var sets []string
+	var vals []any
+	setCol := func(col string, v any) {
+		vals = append(vals, v)
+		sets = append(sets, fmt.Sprintf("%s=$%d", col, 3+len(vals)))
+	}
+	if arg.NameBox != nil {
+		nameBox, err := core.EncodeToBytes(arg.NameBox)
+		if err != nil {
+			return err
+		}
+		setCol("name_box", nameBox)
+		setCol("name_box_ptk_gen", int(arg.NameBox.Rg.Gen))
+	}
+	var descBox *proto.RTBoxRG
+	switch descT {
+	case rem.RTChannelDescUpdateType_Keep:
+	case rem.RTChannelDescUpdateType_Clear:
+		sets = append(sets, "desc_box=NULL", "desc_box_ptk_gen=NULL")
+	case rem.RTChannelDescUpdateType_Set:
+		box := arg.Desc.Set()
+		descBox = &box
+		enc, err := core.EncodeToBytes(descBox)
+		if err != nil {
+			return err
+		}
+		setCol("desc_box", enc)
+		setCol("desc_box_ptk_gen", int(descBox.Rg.Gen))
+	default:
+		return core.BadArgsError("unknown channel description update")
+	}
+	if len(sets) == 0 {
+		return core.BadArgsError("channel update changes nothing")
+	}
+
 	rtdb, err := m.Db(shared.DbTypeRealTime)
 	if err != nil {
 		return err
@@ -1318,21 +1366,6 @@ func UpdateChannel(m shared.MetaContext, arg rem.RtUpdateChannelArg) error {
 		return err
 	}
 	defer userdb.Release()
-
-	nameBox, err := core.EncodeToBytes(&arg.NameBox)
-	if err != nil {
-		return err
-	}
-	var descBox []byte
-	var descGen *int
-	if arg.DescBox != nil {
-		descBox, err = core.EncodeToBytes(arg.DescBox)
-		if err != nil {
-			return err
-		}
-		g := int(arg.DescBox.Rg.Gen)
-		descGen = &g
-	}
 
 	return shared.RetryTx2(m,
 		rtdb,
@@ -1350,19 +1383,17 @@ func UpdateChannel(m shared.MetaContext, arg rem.RtUpdateChannelArg) error {
 			// The name is sealed at the tier's name role; the description at
 			// the channel's read role. Reject a box sealed at any other role
 			// rather than persisting one nobody (or everybody) can open.
-			if err := checkNameBoxRole(mu.ca, arg.NameBox); err != nil {
-				return nil, err
-			}
-			if arg.DescBox != nil {
-				if err := checkDescBoxRole(mu.ca, *arg.DescBox); err != nil {
+			if arg.NameBox != nil {
+				if err := checkNameBoxRole(mu.ca, *arg.NameBox); err != nil {
 					return nil, err
 				}
 			}
-			err := mu.casSeqno(m,
-				`name_box=$4, name_box_ptk_gen=$5, desc_box=$6, desc_box_ptk_gen=$7`,
-				nameBox, int(arg.NameBox.Rg.Gen), descBox, descGen,
-			)
-			if err != nil {
+			if descBox != nil {
+				if err := checkDescBoxRole(mu.ca, *descBox); err != nil {
+					return nil, err
+				}
+			}
+			if err := mu.casSeqno(m, strings.Join(sets, ", "), vals...); err != nil {
 				return nil, err
 			}
 			if err := mu.finish(m); err != nil {

@@ -2935,8 +2935,20 @@ func keyMgrForRole(
 	return NewKeyMgr(cur, appID)
 }
 
-// UpdateChannel renames a channel and replaces its description. An empty desc
-// clears it. Admin-only, enforced by the server.
+// ChannelUpdate is what UpdateChannel changes. A nil field is left as it is.
+type ChannelUpdate struct {
+	// Name is the channel's new name. It may not be empty.
+	Name *proto.RTChannelName
+	// Desc is the channel's new description. A pointer to the empty
+	// description clears it.
+	Desc *proto.RTChannelDesc
+	// AllowDuplicateName is as on MakeChannelOpts: it skips the name-collision
+	// check and the refusal of "general". The empty name stays refused.
+	AllowDuplicateName bool
+}
+
+// UpdateChannel renames a channel and/or sets or clears its description.
+// Admin-only, enforced by the server.
 //
 // Retries a lost metadata CAS the same way MakeChannel does: another device
 // mutating the same channel bumps its seqno, and the next attempt re-reads it.
@@ -2945,12 +2957,28 @@ func (d *Minder) UpdateChannel(
 	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	spec lcl.RTChannelSpecifier,
-	nm proto.RTChannelName,
-	desc proto.RTChannelDesc,
-	allowDuplicateName bool,
+	upd ChannelUpdate,
 ) error {
+	if upd.Name == nil && upd.Desc == nil {
+		return core.BadArgsError("channel update changes nothing")
+	}
+	// The default channel carries the EMPTY name, and "general" is its
+	// reserved alias (MakeChannel refuses both). Renaming onto either would
+	// produce a second default channel -- and at a different tier the
+	// collision check would not even catch it, since names are compared
+	// per-tier. A caller that identifies channels by id (AllowDuplicateName)
+	// treats "general" as an ordinary name; the empty name stays refused,
+	// because None-specifier lookups resolve it.
+	//
+	// Renaming the default channel itself (FROM the empty name) stays
+	// allowed in the fork, unlike upstream: the SECO blueprint lets #general
+	// be renamed. See the #376 row in SECO-UPSTREAM.md.
+	if nm := upd.Name; nm != nil &&
+		(nm.IsEmpty() || (nm.Eq(proto.RTGeneralChannel) && !upd.AllowDuplicateName)) {
+		return core.RTGenericError("cannot rename a channel to the default channel's name")
+	}
 	return d.retryOnRace(m, nil, func() error {
-		return d.updateChannelOneAttempt(m, team, appID, spec, nm, desc, allowDuplicateName)
+		return d.updateChannelOneAttempt(m, team, appID, spec, upd)
 	})
 }
 
@@ -3072,77 +3100,75 @@ func (d *Minder) updateChannelOneAttempt(
 	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	spec lcl.RTChannelSpecifier,
-	nm proto.RTChannelName,
-	desc proto.RTChannelDesc,
-	allowDuplicateName bool,
+	upd ChannelUpdate,
 ) error {
-	// The default channel carries the EMPTY name, and "general" is its
-	// reserved alias (MakeChannel refuses both). Renaming onto either would
-	// produce a second default channel -- and at a different tier the
-	// collision check would not even catch it, since names are compared
-	// per-tier. A caller that identifies channels by id (allowDuplicateName)
-	// treats "general" as an ordinary name; the empty name stays refused,
-	// because None-specifier lookups resolve it.
-	if nm.IsEmpty() || (nm.Eq(proto.RTGeneralChannel) && !allowDuplicateName) {
-		return core.RTGenericError("cannot rename a channel to the default channel's name")
-	}
-	// Every update here is a rename, so the listing is strict unless the
-	// caller skips the name check. That includes a private channel, which is
-	// exempt from the check below but is only known to be private once the
-	// listing has resolved it; a rename of one fails, retryably, in a team
-	// where some row will not decrypt.
-	rtp, ch, lst, cli, err := d.loadChannelForMutation(m, team, appID, spec,
-		!allowDuplicateName)
-	if err != nil {
-		return err
-	}
-
-	// Name-collision check, against the same list the create path uses. A
-	// private channel is exempt for the same reason it is at create: the
-	// server cannot dedupe names it hides, so the list this is built from is
-	// itself partial. Archived channels are NOT exempt -- their names stay
-	// reserved, which is what makes unarchiving safe.
-	if !ch.Private && !allowDuplicateName {
-		for _, other := range lst.Channels {
-			if other.Id.Eq(ch.Id) {
-				continue // renaming a channel to its own name is a no-op, not a clash
-			}
-			if other.Tier == ch.Tier && other.Name.Normalize().Eq(nm.Normalize()) {
-				return core.RTChannelExistsError{}
-			}
-		}
-	}
-
-	// The name is sealed at the channel's tier role, the description at its
-	// read role -- both properties of the CHANNEL, not of whoever is editing
-	// it. The server rejects a box at any other role.
-	nameKeyMgr, err := keyMgrForRole(m, rtp, appID, nameRoleForTier(ch.Tier), "channel name")
-	if err != nil {
-		return err
-	}
-	namePlain := proto.NewRTChannelNamePlaintextWithUtf8v1(nm)
-	nameEnc, err := nameKeyMgr.SealIntoSecretBox(proto.RTKeyType_ChannelName, &namePlain)
+	// Only a rename checks names, so only a rename needs the strict listing.
+	// That includes a private channel, which is exempt from the check below
+	// but is only known to be private once the listing has resolved it; a
+	// rename of one fails, retryably, in a team where some row will not
+	// decrypt.
+	checkNames := upd.Name != nil && !upd.AllowDuplicateName
+	rtp, ch, lst, cli, err := d.loadChannelForMutation(m, team, appID, spec, checkNames)
 	if err != nil {
 		return err
 	}
 
 	arg := rem.RtUpdateChannelArg{
-		Chid:    ch.Id,
-		Seqno:   ch.Seqno,
-		NameBox: *nameEnc,
+		Chid:  ch.Id,
+		Seqno: ch.Seqno,
+		Desc:  rem.NewRTChannelDescUpdateDefault(rem.RTChannelDescUpdateType_Keep),
 	}
 
-	if !desc.IsEmpty() {
-		descKeyMgr, err := keyMgrForRole(m, rtp, appID, ch.Roles.Read, "channel description")
+	if upd.Name != nil {
+		nm := *upd.Name
+
+		// Name-collision check, against the same list the create path uses.
+		// A private channel is exempt for the same reason it is at create:
+		// the server cannot dedupe names it hides, so the list this is built
+		// from is itself partial. Archived channels are NOT exempt -- their
+		// names stay reserved, which is what makes unarchiving safe.
+		if checkNames && !ch.Private {
+			for _, other := range lst.Channels {
+				if other.Id.Eq(ch.Id) {
+					continue // renaming a channel to its own name is a no-op, not a clash
+				}
+				if other.Tier == ch.Tier && other.Name.Normalize().Eq(nm.Normalize()) {
+					return core.RTChannelExistsError{}
+				}
+			}
+		}
+
+		// The name is sealed at the channel's tier role -- a property of the
+		// CHANNEL, not of whoever is editing it. The server rejects a box at
+		// any other role.
+		nameKeyMgr, err := keyMgrForRole(m, rtp, appID, nameRoleForTier(ch.Tier), "channel name")
 		if err != nil {
 			return err
 		}
-		descPlain := proto.NewRTChannelDescPlaintextWithUtf8v1(desc)
-		descEnc, err := descKeyMgr.SealIntoSecretBox(proto.RTKeyType_ChannelDesc, &descPlain)
+		namePlain := proto.NewRTChannelNamePlaintextWithUtf8v1(nm)
+		nameEnc, err := nameKeyMgr.SealIntoSecretBox(proto.RTKeyType_ChannelName, &namePlain)
 		if err != nil {
 			return err
 		}
-		arg.DescBox = descEnc
+		arg.NameBox = nameEnc
+	}
+
+	if upd.Desc != nil {
+		if upd.Desc.IsEmpty() {
+			arg.Desc = rem.NewRTChannelDescUpdateDefault(rem.RTChannelDescUpdateType_Clear)
+		} else {
+			// Sealed at the channel's read role, as at creation.
+			descKeyMgr, err := keyMgrForRole(m, rtp, appID, ch.Roles.Read, "channel description")
+			if err != nil {
+				return err
+			}
+			descPlain := proto.NewRTChannelDescPlaintextWithUtf8v1(*upd.Desc)
+			descEnc, err := descKeyMgr.SealIntoSecretBox(proto.RTKeyType_ChannelDesc, &descPlain)
+			if err != nil {
+				return err
+			}
+			arg.Desc = rem.NewRTChannelDescUpdateWithSet(*descEnc)
+		}
 	}
 
 	return cli.RtUpdateChannel(m.Ctx(), arg)

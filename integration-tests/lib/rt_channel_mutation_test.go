@@ -110,11 +110,31 @@ func (s *mutScene) specFor(id proto.RTChannelID) lcl.RTChannelSpecifier {
 	return lcl.NewRTChannelSpecifierWithId(id)
 }
 
+// rename renames a channel, setting its description too when desc is
+// non-empty and leaving it alone otherwise.
 func (s *mutScene) rename(
 	t *testing.T, by *privActor, spec lcl.RTChannelSpecifier,
 	nm proto.RTChannelName, desc proto.RTChannelDesc,
 ) error {
-	return by.minder.UpdateChannel(by.m, s.teamCfg(), proto.RTAppID_Chat, spec, nm, desc, false)
+	upd := renameTo(nm)
+	if !desc.IsEmpty() {
+		upd.Desc = &desc
+	}
+	return by.minder.UpdateChannel(by.m, s.teamCfg(), proto.RTAppID_Chat, spec, upd)
+}
+
+// renameTo is a name-only ChannelUpdate; renameAllowDup is the same with
+// AllowDuplicateName set; describe is a description-only one.
+func renameTo(nm proto.RTChannelName) librt.ChannelUpdate {
+	return librt.ChannelUpdate{Name: &nm}
+}
+
+func renameAllowDup(nm proto.RTChannelName) librt.ChannelUpdate {
+	return librt.ChannelUpdate{Name: &nm, AllowDuplicateName: true}
+}
+
+func describe(desc proto.RTChannelDesc) librt.ChannelUpdate {
+	return librt.ChannelUpdate{Desc: &desc}
 }
 
 func (s *mutScene) setArchived(
@@ -246,7 +266,7 @@ func TestRenameCasRace(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			errs[i] = actors[i].minder.UpdateChannel(actors[i].m, sc.teamCfg(),
-				proto.RTAppID_Chat, sc.pubSpec(), names[i], "", false)
+				proto.RTAppID_Chat, sc.pubSpec(), renameTo(names[i]))
 		}(i)
 	}
 	wg.Wait()
@@ -306,17 +326,17 @@ func TestAllowDuplicateNameOnCreateAndRename(t *testing.T) {
 	require.NoError(t, err)
 	require.Error(t, sc.rename(t, sc.alice, sc.specFor(*dup), proto.RTGeneralChannel, ""))
 	require.NoError(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
-		proto.RTAppID_Chat, sc.specFor(*dup), proto.RTGeneralChannel, "", true))
+		proto.RTAppID_Chat, sc.specFor(*dup), renameAllowDup(proto.RTGeneralChannel)))
 
 	// Renaming onto a live name: refused without the flag, allowed with it.
 	require.IsType(t, core.RTChannelExistsError{},
 		sc.rename(t, sc.alice, sc.specFor(*gen), sc.pubName, ""))
 	require.NoError(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
-		proto.RTAppID_Chat, sc.specFor(*gen), sc.pubName, "", true))
+		proto.RTAppID_Chat, sc.specFor(*gen), renameAllowDup(sc.pubName)))
 
 	// The empty name stays refused either way: None lookups resolve it.
 	require.Error(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
-		proto.RTAppID_Chat, sc.specFor(*gen), "", "", true))
+		proto.RTAppID_Chat, sc.specFor(*gen), renameAllowDup("")))
 
 	// …and stays unique on create: the flag never mints a second nameless
 	// channel.
@@ -944,5 +964,61 @@ func TestUnarchiveFansInLateJoiner(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, inboxHas(t, who.a, sc.pubID),
 			"unarchiving must put the channel in the %s's inbox", who.name)
+	}
+}
+
+// A rename that says nothing about the description leaves it alone, and a
+// description can be edited without restating the name. An empty description
+// clears it, and an update that changes nothing is refused. Before the
+// partial update, every rename sent a description and an omitted one cleared
+// it.
+func TestRenameKeepsDescription(t *testing.T) {
+	sc := setupMutScene(t)
+	update := func(upd librt.ChannelUpdate) error {
+		return sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
+			proto.RTAppID_Chat, sc.pubSpec(), upd)
+	}
+
+	newName := randomChannelName(t, "typo-fixed-")
+	require.NoError(t, update(renameTo(newName)))
+	got := sc.find(t, sc.bob, sc.pubID)
+	require.Equal(t, newName, got.Name)
+	require.NotNil(t, got.Desc, "a rename must keep the description")
+	require.Equal(t, proto.RTChannelDesc("a public channel"), *got.Desc)
+
+	require.NoError(t, update(describe("edited")))
+	got = sc.find(t, sc.bob, sc.pubID)
+	require.Equal(t, newName, got.Name, "a description edit must keep the name")
+	require.NotNil(t, got.Desc)
+	require.Equal(t, proto.RTChannelDesc("edited"), *got.Desc)
+
+	require.NoError(t, update(describe("")))
+	got = sc.find(t, sc.bob, sc.pubID)
+	require.Equal(t, newName, got.Name)
+	require.Nil(t, got.Desc, "an empty description clears it")
+
+	err := update(librt.ChannelUpdate{})
+	require.Error(t, err)
+	require.IsType(t, core.BadArgsError(""), err)
+}
+
+// FORK-ONLY. The team's default (nameless) channel can be renamed here, because
+// the SECO blueprint lets #general be renamed. Upstream #376 refuses this in
+// librt, since a renamed default channel leaves every lookup that names no
+// channel with nothing to find. This test exists so the next upstream merge
+// cannot take upstream's refusal without someone deciding to; see the #376
+// row in SECO-UPSTREAM.md.
+func TestDefaultChannelCanBeRenamedInFork(t *testing.T) {
+	sc := setupMutScene(t)
+	none := lcl.NewRTChannelSpecifierDefault(lcl.RTChannelSpecifierType_None)
+	newName := randomChannelName(t, "was-general-")
+	require.NoError(t, sc.alice.minder.UpdateChannel(sc.alice.m, sc.teamCfg(),
+		proto.RTAppID_Chat, none, renameTo(newName)))
+
+	lst, err := sc.bob.minder.ListAllChannelsForTeam(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat)
+	require.NoError(t, err)
+	for _, ch := range lst.Channels {
+		require.False(t, ch.Name.IsEmpty() && !ch.Private,
+			"the default channel was renamed, so no public channel is nameless")
 	}
 }
