@@ -249,18 +249,7 @@ func (h *HostIDMap) LookupByAlias(m MetaContext, hn proto.Hostname) (*core.HostI
 		return h.LookupByShortID(m, shid)
 	}
 
-	db, err := m.Db(DbTypeServerConfig)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Release()
-	var i int
-	err = db.QueryRow(
-		m.Ctx(),
-		`SELECT short_host_id FROM server_aliases WHERE root_short_host_id=$1 AND alias=$2`,
-		m.G().ShortHostID().ExportToDB(),
-		hn.String(),
-	).Scan(&i)
+	i, err := h.aliasDBLookup(m, hn)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, core.HostIDNotFoundError{}
 	} else if err != nil {
@@ -272,6 +261,24 @@ func (h *HostIDMap) LookupByAlias(m MetaContext, hn proto.Hostname) (*core.HostI
 	h.Unlock()
 
 	return h.LookupByShortID(m, shid)
+}
+
+// aliasDBLookup reads the short host ID an alias points to. Like
+// hostnameDBLookup, it gives its connection back before returning.
+func (h *HostIDMap) aliasDBLookup(m MetaContext, hn proto.Hostname) (int, error) {
+	db, err := m.Db(DbTypeServerConfig)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Release()
+	var i int
+	err = db.QueryRow(
+		m.Ctx(),
+		`SELECT short_host_id FROM server_aliases WHERE root_short_host_id=$1 AND alias=$2`,
+		m.G().ShortHostID().ExportToDB(),
+		hn.String(),
+	).Scan(&i)
+	return i, err
 }
 
 type HostnameLookupFallbackBehavior int
@@ -306,18 +313,7 @@ func (h *HostIDMap) LookupByHostnameWithFallbackBehavior(
 		return h.LookupByShortID(m, shid)
 	}
 
-	db, err := m.Db(DbTypeServerConfig)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Release()
-	var i int
-	err = db.QueryRow(
-		m.Ctx(),
-		`SELECT short_host_id FROM hostnames WHERE hostname=$1 AND cancel_id=$2`,
-		hn,
-		proto.NilCancelID(),
-	).Scan(&i)
+	i, err := h.hostnameDBLookup(m, hn)
 
 	// If not found, the default to the primary hostname
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -338,6 +334,28 @@ func (h *HostIDMap) LookupByHostnameWithFallbackBehavior(
 	h.Unlock()
 
 	return h.LookupByShortID(m, shid)
+}
+
+// hostnameDBLookup reads hn's short host ID. It gives its connection back
+// before returning, so the caller's LookupByShortID, which takes a connection
+// of its own on a cold cache, never waits on the pool while holding one. A
+// burst of cold lookups (TLS handshakes resolve SNI through here, and every
+// client reconnects at once after a restart) could otherwise take every
+// connection in the pool and wait on each other forever.
+func (h *HostIDMap) hostnameDBLookup(m MetaContext, hn proto.Hostname) (int, error) {
+	db, err := m.Db(DbTypeServerConfig)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Release()
+	var i int
+	err = db.QueryRow(
+		m.Ctx(),
+		`SELECT short_host_id FROM hostnames WHERE hostname=$1 AND cancel_id=$2`,
+		hn,
+		proto.NilCancelID(),
+	).Scan(&i)
+	return i, err
 }
 
 func (h *HostIDMap) Config(m MetaContext, shid core.ShortHostID) (*proto.HostConfig, error) {
