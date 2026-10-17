@@ -26,6 +26,7 @@ import (
 	"github.com/foks-proj/go-foks/client/librt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/proto/lcl"
@@ -389,6 +390,28 @@ func TestArchivedStaysInTheListing(t *testing.T) {
 		require.True(t, got.Archived)
 		require.Equal(t, sc.pubName, got.Name, "and keep its name, which is the point")
 	}
+}
+
+// The listing says WHEN a channel was archived: an archive stamps the row's
+// mtime, and an archived channel refuses the sends and ACL changes that would
+// stamp it again. The app shows it as "Archived <date>" (fork-only mtime @13).
+func TestArchivedListingCarriesWhen(t *testing.T) {
+	sc := setupMutScene(t)
+	before := sc.find(t, sc.bob, sc.pubID)
+	require.NotZero(t, before.Mtime, "a listed channel carries its mtime")
+
+	require.NoError(t, sc.setArchived(t, sc.alice, sc.pubSpec(), true))
+
+	got := sc.find(t, sc.bob, sc.pubID)
+	require.True(t, got.Archived)
+	require.GreaterOrEqual(t, got.Mtime, before.Mtime, "the archive stamps the row")
+	require.WithinDuration(t, time.Now(), got.Mtime.Import(), time.Minute)
+
+	// A refused send leaves it alone, so the date stays the archive's.
+	_, err := sc.bob.minder.Send(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat,
+		sc.pubSpec(), []byte("too late"))
+	require.Error(t, err)
+	require.Equal(t, got.Mtime, sc.find(t, sc.bob, sc.pubID).Mtime)
 }
 
 // Nothing may take an archived channel's name while it is away. This is what

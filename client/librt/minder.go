@@ -641,6 +641,7 @@ func (k *Minder) decryptChannelMetadata(
 	ret.Private = chmdenc.Private
 	ret.Seqno = chmdenc.Seqno
 	ret.Archived = chmdenc.Archived
+	ret.Mtime = chmdenc.Mtime
 
 	return &ret, nil
 }

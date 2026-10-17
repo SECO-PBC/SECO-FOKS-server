@@ -462,6 +462,7 @@ type RTChannelMetadataPlaintext struct {
 	Private    bool
 	Seqno      lib.RTChannelSeqno
 	Archived   bool
+	Mtime      lib.Time
 }
 type RTChannelMetadataPlaintextInternal__ struct {
 	_struct    struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -478,6 +479,7 @@ type RTChannelMetadataPlaintextInternal__ struct {
 	Private    *bool
 	Seqno      *lib.RTChannelSeqnoInternal__
 	Archived   *bool
+	Mtime      *lib.TimeInternal__
 }
 
 func (r RTChannelMetadataPlaintextInternal__) Import() RTChannelMetadataPlaintext {
@@ -566,6 +568,12 @@ func (r RTChannelMetadataPlaintextInternal__) Import() RTChannelMetadataPlaintex
 			}
 			return *x
 		})(r.Archived),
+		Mtime: (func(x *lib.TimeInternal__) (ret lib.Time) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Mtime),
 	}
 }
 func (r RTChannelMetadataPlaintext) Export() *RTChannelMetadataPlaintextInternal__ {
@@ -588,6 +596,7 @@ func (r RTChannelMetadataPlaintext) Export() *RTChannelMetadataPlaintextInternal
 		Private:    &r.Private,
 		Seqno:      r.Seqno.Export(),
 		Archived:   &r.Archived,
+		Mtime:      r.Mtime.Export(),
 	}
 }
 func (r *RTChannelMetadataPlaintext) Encode(enc rpc.Encoder) error {

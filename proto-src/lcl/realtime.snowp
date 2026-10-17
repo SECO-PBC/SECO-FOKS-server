@@ -71,6 +71,12 @@ struct RTChannelMetadataPlaintext {
     // what reserves its name against a future create or rename. Callers above
     // the agent are what hide it from a channel list.
     archived @12 : Bool;
+    // FORK-ONLY. Mirrors rem.RTChannelMetadata.mtime: when the channel row
+    // last changed. A send, a rename, an ACL change and an archive all stamp
+    // it, and an archived channel refuses every one of those but a rename, so
+    // on an archived channel it reads as when it was archived -- which is
+    // what a caller shows, without a second column on the wire.
+    mtime @13 : lib.Time;
 }
 
 struct RTChannelSetForTeam {
