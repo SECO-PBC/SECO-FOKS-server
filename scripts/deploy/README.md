@@ -7,13 +7,13 @@ git tag v0.1.7-seco.1
 git push origin v0.1.7-seco.1
        │
        ▼
-GH Actions ─ build linux/arm64 (QEMU) ─ push ghcr.io/seco-pbc/foks-{server,tool}
+GH Actions ─ build linux/amd64 ─ push ghcr.io/seco-pbc/foks-{server,tool}
        │
        ▼
 SSH ─ /opt/foks/deploy.sh ─ pull → patch-db → compose up -d → health check
        │                                             (rollback on failure)
        ▼
-   Hetzner CAX11 (ARM64)
+   Hetzner server (x86_64)
 ```
 
 ## One-time setup
@@ -57,6 +57,8 @@ The first deploy will:
 3. Append `FOKS_SERVER_IMAGE=...` to `.env` (initially seeded with the old image — that is the rollback target if the very first deploy fails).
 
 This is idempotent: subsequent deploys skip the rewrite.
+
+The rewrite only touches `docker-compose.yml`. A service defined in `docker-compose.override.yml` keeps whatever image it names, unless that file also says `image: ${FOKS_SERVER_IMAGE}`. Servers bootstrapped by `scripts/srv/build.bash` after `realtime` was added to its service list get `realtime` in `docker-compose.yml` and need no override.
 
 ## Triggering a deploy
 
