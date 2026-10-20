@@ -238,12 +238,16 @@ CREATE TABLE user_channels (
     last_msg_time TIMESTAMPTZ NOT NULL,
     earliest_msg_time TIMESTAMPTZ, /* server's lower bound on this user's reachable history */
     read_through BIGINT NOT NULL, /* max seq the user has read; 0 = unread */
-    /* max seq the user has explicitly read (or sent); fork-only, see p10 */
-    explicit_read_through BIGINT NOT NULL DEFAULT 0,
     hidden BOOLEAN NOT NULL,
     muted BOOLEAN NOT NULL,
     ctime TIMESTAMPTZ NOT NULL,
     mtime TIMESTAMPTZ NOT NULL,
+    /*
+     * Fork-only (p10): max seq the user explicitly read (or sent). Declared
+     * last, like the fork-only columns of `channels`, so a fresh install's
+     * column order matches what ADD COLUMN produces on a migrated database.
+     */
+    explicit_read_through BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY(short_host_id, channel_id, uid),
     FOREIGN KEY(short_host_id, channel_id) REFERENCES channels(short_host_id, channel_id)
 );

@@ -302,8 +302,8 @@ struct RTOutboxDrainRes {
 }
 
 // Singleton row (per RTInboxScope-like party scope): read-marks that couldn't
-// reach the server, one entry per channel holding the highest locally-read
-// seq (intermediate marks are subsumed; the server pointer is monotonic and
+// reach the server, one entry per (channel, explicit) pair holding the
+// highest locally-read seq (intermediate marks are subsumed; the server pointer is monotonic and
 // ignores stale marks). Replayed by the outbox drain.
 struct RTReadThroughPendingEntry {
     chid @0 : lib.RTChannelID;
