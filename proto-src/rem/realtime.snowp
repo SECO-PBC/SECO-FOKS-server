@@ -44,6 +44,11 @@ struct RTGetChangedThreadsArg {
 struct RTReadThroughArg {
     channelID @0 : lib.RTChannelID;
     seq @1 : lib.RTMsgSeq;
+    // FORK-ONLY (cross-device-read-sync). The user read this themselves, as
+    // opposed to a client marking whatever page it fetched: also advances the
+    // explicit pointer (RTInboxChannel.explicitReadThrough) and settles the
+    // user's pushes in the channel. Older clients never set it.
+    explicit @2 : Bool;
 }
 
 // Long-poll subscription: blocks until inbox advances or timeout. Stand-in
@@ -180,6 +185,10 @@ struct RTInboxChannel {
     readThrough @2 : lib.RTMsgSeq;         // max seq this user has read; 0 = unread
     hidden @3 : Bool;
     muted @4 : Bool;
+    // FORK-ONLY (cross-device-read-sync). Max seq the user explicitly read
+    // (RTReadThroughArg.explicit) or sent; page fetches never move it, so it
+    // is the read state other devices follow. 0 = none yet.
+    explicitReadThrough @5 : lib.RTMsgSeq;
 }
 
 // "What changed since lastInboxVersion" snapshot.

@@ -239,10 +239,14 @@ var queryAllowlist = map[string]allowedQueries{
 		"channel's existence, location and contents stay hidden from a non-member"},
 	"messageSender.internSender":  {2, "send path; runs after lockChannel -> authorizeChannel(accessWrite)"},
 	"messageSender.insertMessage": {2, "send path; runs after lockChannel -> authorizeChannel(accessWrite)"},
-	"messageSender.fanoutInboxVersions": {3, "send path; recipients are the channel's user_channels rows, " +
+	"messageSender.fanoutInboxVersions": {4, "send path; recipients are the channel's user_channels rows, " +
 		"which for a private channel equal its ACL (invariant asserted by " +
 		"TestPrivateAclEqualsUserChannels) and are re-validated against the team " +
-		"roster by pruneStaleChannelMembers immediately before this runs"},
+		"roster by pruneStaleChannelMembers immediately before this runs. The fourth " +
+		"reads the sender's own explicit read pointer (cross-device-read-sync)"},
+	"settleReadPushes": {1, "read pushes (readpush.go); called only from readThroughMarker.run (after " +
+		"authorizeChannel(accessRead)) and the send path (after authorizeChannel(accessWrite)), and " +
+		"copies the already-authorized channel's id into the caller's own push row"},
 	"touchChannelSet":                     {2, "grant and metadata-mutation paths; runs after authorizeChannel(accessManage, accessMutate or accessArchive) and touches only version bookkeeping"},
 	"channelMutator.casSeqno":             {1, "metadata mutation; runs after authorizeChannel(accessMutate or accessArchive), and writes only the row that call already authorized"},
 	"channelMutator.channelMemberUIDs":    {1, "metadata mutation; lists the delivery rows of the already-authorized channel, so restamp can re-stamp them and avoid re-fanning a member who has one. Returns no channel identity"},

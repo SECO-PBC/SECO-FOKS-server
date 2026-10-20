@@ -235,11 +235,13 @@ func (r *RTGetChangedThreadsArg) Bytes() []byte { return nil }
 type RTReadThroughArg struct {
 	ChannelID lib.RTChannelID
 	Seq       lib.RTMsgSeq
+	Explicit  bool
 }
 type RTReadThroughArgInternal__ struct {
 	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
 	ChannelID *lib.RTChannelIDInternal__
 	Seq       *lib.RTMsgSeqInternal__
+	Explicit  *bool
 }
 
 func (r RTReadThroughArgInternal__) Import() RTReadThroughArg {
@@ -256,12 +258,19 @@ func (r RTReadThroughArgInternal__) Import() RTReadThroughArg {
 			}
 			return x.Import()
 		})(r.Seq),
+		Explicit: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Explicit),
 	}
 }
 func (r RTReadThroughArg) Export() *RTReadThroughArgInternal__ {
 	return &RTReadThroughArgInternal__{
 		ChannelID: r.ChannelID.Export(),
 		Seq:       r.Seq.Export(),
+		Explicit:  &r.Explicit,
 	}
 }
 func (r *RTReadThroughArg) Encode(enc rpc.Encoder) error {
@@ -1093,19 +1102,21 @@ func (r *RTMsg) GetTypeUniqueID() rpc.TypeUniqueID {
 func (r *RTMsg) Bytes() []byte { return nil }
 
 type RTInboxChannel struct {
-	Md           RTChannelMetadata
-	InboxVersion lib.RTInboxVersion
-	ReadThrough  lib.RTMsgSeq
-	Hidden       bool
-	Muted        bool
+	Md                  RTChannelMetadata
+	InboxVersion        lib.RTInboxVersion
+	ReadThrough         lib.RTMsgSeq
+	Hidden              bool
+	Muted               bool
+	ExplicitReadThrough lib.RTMsgSeq
 }
 type RTInboxChannelInternal__ struct {
-	_struct      struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Md           *RTChannelMetadataInternal__
-	InboxVersion *lib.RTInboxVersionInternal__
-	ReadThrough  *lib.RTMsgSeqInternal__
-	Hidden       *bool
-	Muted        *bool
+	_struct             struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Md                  *RTChannelMetadataInternal__
+	InboxVersion        *lib.RTInboxVersionInternal__
+	ReadThrough         *lib.RTMsgSeqInternal__
+	Hidden              *bool
+	Muted               *bool
+	ExplicitReadThrough *lib.RTMsgSeqInternal__
 }
 
 func (r RTInboxChannelInternal__) Import() RTInboxChannel {
@@ -1140,15 +1151,22 @@ func (r RTInboxChannelInternal__) Import() RTInboxChannel {
 			}
 			return *x
 		})(r.Muted),
+		ExplicitReadThrough: (func(x *lib.RTMsgSeqInternal__) (ret lib.RTMsgSeq) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.ExplicitReadThrough),
 	}
 }
 func (r RTInboxChannel) Export() *RTInboxChannelInternal__ {
 	return &RTInboxChannelInternal__{
-		Md:           r.Md.Export(),
-		InboxVersion: r.InboxVersion.Export(),
-		ReadThrough:  r.ReadThrough.Export(),
-		Hidden:       &r.Hidden,
-		Muted:        &r.Muted,
+		Md:                  r.Md.Export(),
+		InboxVersion:        r.InboxVersion.Export(),
+		ReadThrough:         r.ReadThrough.Export(),
+		Hidden:              &r.Hidden,
+		Muted:               &r.Muted,
+		ExplicitReadThrough: r.ExplicitReadThrough.Export(),
 	}
 }
 func (r *RTInboxChannel) Encode(enc rpc.Encoder) error {

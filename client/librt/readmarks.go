@@ -22,6 +22,21 @@ import (
 // atomic without an index. Mutations run under the per-user outbox lock (see
 // outbox.go), and every write compacts the set to one entry per channel, so a
 // duplicate can never survive to make clear/render semantics diverge.
+//
+// Fork-only (cross-device-read-sync): an explicit mark -- the user read the
+// channel, not a client marking a fetched page -- is its own entry, so a
+// channel holds at most one explicit and one implicit mark, and an explicit
+// read made offline replays as explicit.
+
+// pendingKey is what a pending entry is unique by.
+type pendingKey struct {
+	chid     proto.RTChannelID
+	explicit bool
+}
+
+func keyOf(e lcl.RTReadThroughPendingEntry) pendingKey {
+	return pendingKey{chid: e.Chid, explicit: e.Explicit}
+}
 
 func (d *Minder) dbGetPendingMarks(m MetaContext) (lcl.RTReadThroughPendingSet, error) {
 	return dbGetSingleton[lcl.RTReadThroughPendingSet](d, m, lcl.DataType_RTReadThroughPending)
@@ -31,20 +46,21 @@ func (d *Minder) dbPutPendingMarks(m MetaContext, set *lcl.RTReadThroughPendingS
 	return d.dbPutSingleton(m, lcl.DataType_RTReadThroughPending, set)
 }
 
-// compactMarks collapses the set to at most one entry per channel, keeping
-// the highest seq. Defense against any historical duplicate: rendering takes
-// the max and clearing acts on the canonical entry either way.
+// compactMarks collapses the set to at most one entry per (channel,
+// explicit), keeping the highest seq. Defense against any historical
+// duplicate: rendering takes the max and clearing acts on the canonical entry
+// either way.
 func compactMarks(set *lcl.RTReadThroughPendingSet) {
-	seen := make(map[proto.RTChannelID]int, len(set.Entries))
+	seen := make(map[pendingKey]int, len(set.Entries))
 	kept := set.Entries[:0]
 	for _, e := range set.Entries {
-		if i, ok := seen[e.Chid]; ok {
+		if i, ok := seen[keyOf(e)]; ok {
 			if e.Seq > kept[i].Seq {
 				kept[i].Seq = e.Seq
 			}
 			continue
 		}
-		seen[e.Chid] = len(kept)
+		seen[keyOf(e)] = len(kept)
 		kept = append(kept, e)
 	}
 	set.Entries = kept
@@ -56,6 +72,7 @@ func (d *Minder) queuePendingMark(
 	m MetaContext,
 	chid proto.RTChannelID,
 	seq proto.RTMsgSeq,
+	explicit bool,
 ) error {
 	lk, err := d.lockOutbox(m)
 	if err != nil {
@@ -69,7 +86,7 @@ func (d *Minder) queuePendingMark(
 	}
 	compactMarks(&set)
 	for i := range set.Entries {
-		if set.Entries[i].Chid == chid {
+		if set.Entries[i].Chid == chid && set.Entries[i].Explicit == explicit {
 			if set.Entries[i].Seq >= seq {
 				return nil
 			}
@@ -78,19 +95,20 @@ func (d *Minder) queuePendingMark(
 		}
 	}
 	set.Entries = append(set.Entries, lcl.RTReadThroughPendingEntry{
-		Chid: chid,
-		Seq:  seq,
+		Chid:     chid,
+		Seq:      seq,
+		Explicit: explicit,
 	})
 	return d.dbPutPendingMarks(m, &set)
 }
 
-// clearPendingMarks drops the given channels' pending marks, each up to the
-// seq the server has been told about; a mark raised concurrently past its
-// acked seq survives for the next replay. One locked read-modify-write for
-// the whole batch.
+// clearPendingMarks drops the given pending marks, each up to the seq the
+// server has been told about; a mark raised concurrently past its acked seq
+// survives for the next replay. One locked read-modify-write for the whole
+// batch.
 func (d *Minder) clearPendingMarks(
 	m MetaContext,
-	acked map[proto.RTChannelID]proto.RTMsgSeq,
+	acked map[pendingKey]proto.RTMsgSeq,
 ) error {
 	if len(acked) == 0 {
 		return nil
@@ -109,7 +127,7 @@ func (d *Minder) clearPendingMarks(
 	kept := set.Entries[:0]
 	changed := false
 	for _, e := range set.Entries {
-		if seq, ok := acked[e.Chid]; ok && e.Seq <= seq {
+		if seq, ok := acked[keyOf(e)]; ok && e.Seq <= seq {
 			changed = true
 			continue
 		}
@@ -127,10 +145,12 @@ func (d *Minder) attemptReadThrough(
 	m MetaContext,
 	chid proto.RTChannelID,
 	seq proto.RTMsgSeq,
+	explicit bool,
 ) error {
 	arg := rem.RTReadThroughArg{
 		ChannelID: chid,
 		Seq:       seq,
+		Explicit:  explicit,
 	}
 	if d.testHooks != nil && d.testHooks.ReadThroughRPC != nil {
 		return d.testHooks.ReadThroughRPC(m, arg)
@@ -154,13 +174,13 @@ func (d *Minder) drainPendingMarks(
 		return err
 	}
 	compactMarks(&set)
-	acked := make(map[proto.RTChannelID]proto.RTMsgSeq)
+	acked := make(map[pendingKey]proto.RTMsgSeq)
 	var replayErr error
 	for _, e := range set.Entries {
 		if only != nil && e.Chid != *only {
 			continue
 		}
-		err := d.attemptReadThrough(m, e.Chid, e.Seq)
+		err := d.attemptReadThrough(m, e.Chid, e.Seq, e.Explicit)
 		if err != nil {
 			if core.IsTransportError(err) {
 				replayErr = err
@@ -170,7 +190,7 @@ func (d *Minder) drainPendingMarks(
 			// rather than wedging the queue.
 			m.Warnw("drainPendingMarks", "chid", e.Chid, "err", err)
 		}
-		acked[e.Chid] = e.Seq
+		acked[keyOf(e)] = e.Seq
 	}
 	err = d.clearPendingMarks(m, acked)
 	if err != nil {

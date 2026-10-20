@@ -275,9 +275,14 @@ func (d *Minder) LocalInbox(
 	if err != nil {
 		m.Warnw("LocalInbox", "stage", "pendingMarks", "err", err)
 	}
+	// An explicit mark also raises the plain pointer, so it counts for both.
 	pendingMark := make(map[proto.RTChannelID]proto.RTMsgSeq, len(marks.Entries))
+	pendingExplicit := make(map[proto.RTChannelID]proto.RTMsgSeq)
 	for _, e := range marks.Entries {
-		pendingMark[e.Chid] = e.Seq
+		pendingMark[e.Chid] = max(pendingMark[e.Chid], e.Seq)
+		if e.Explicit {
+			pendingExplicit[e.Chid] = max(pendingExplicit[e.Chid], e.Seq)
+		}
 	}
 	numPending, numFailed, err := d.outboxCounts(m)
 	if err != nil {
@@ -310,6 +315,9 @@ func (d *Minder) LocalInbox(
 			if rv.LastSeq > pm {
 				rv.NumUnread = uint64(rv.LastSeq - pm)
 			}
+		}
+		if pe := pendingExplicit[chid]; pe > rv.ExplicitReadThrough {
+			rv.ExplicitReadThrough = pe
 		}
 		rv.NumPending = numPending[chid]
 		rv.NumFailed = numFailed[chid]
@@ -374,6 +382,8 @@ func (d *Minder) renderInboxRow(
 		ReadThrough:  row.ReadThrough,
 		Hidden:       row.Hidden,
 		Muted:        row.Muted,
+		// fork-only (cross-device-read-sync)
+		ExplicitReadThrough: row.ExplicitReadThrough,
 	}
 
 	// Team display name, via the teamname cache -- the GetParty above fills it

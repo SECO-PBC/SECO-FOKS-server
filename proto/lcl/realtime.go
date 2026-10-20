@@ -820,35 +820,37 @@ func (r *RTInboxSyncState) Decode(dec rpc.Decoder) error {
 func (r *RTInboxSyncState) Bytes() []byte { return nil }
 
 type RTInboxRowView struct {
-	Ch           RTChannelMetadataPlaintext
-	InboxVersion lib.RTInboxVersion
-	ReadThrough  lib.RTMsgSeq
-	LastSeq      lib.RTMsgSeq
-	LastTime     lib.Time
-	NumUnread    uint64
-	Hidden       bool
-	Muted        bool
-	TeamName     lib.NameUtf8
-	Snippet      *string
-	LastSender   lib.NameUtf8
-	NumPending   uint64
-	NumFailed    uint64
+	Ch                  RTChannelMetadataPlaintext
+	InboxVersion        lib.RTInboxVersion
+	ReadThrough         lib.RTMsgSeq
+	LastSeq             lib.RTMsgSeq
+	LastTime            lib.Time
+	NumUnread           uint64
+	Hidden              bool
+	Muted               bool
+	TeamName            lib.NameUtf8
+	Snippet             *string
+	LastSender          lib.NameUtf8
+	NumPending          uint64
+	NumFailed           uint64
+	ExplicitReadThrough lib.RTMsgSeq
 }
 type RTInboxRowViewInternal__ struct {
-	_struct      struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Ch           *RTChannelMetadataPlaintextInternal__
-	InboxVersion *lib.RTInboxVersionInternal__
-	ReadThrough  *lib.RTMsgSeqInternal__
-	LastSeq      *lib.RTMsgSeqInternal__
-	LastTime     *lib.TimeInternal__
-	NumUnread    *uint64
-	Hidden       *bool
-	Muted        *bool
-	TeamName     *lib.NameUtf8Internal__
-	Snippet      *string
-	LastSender   *lib.NameUtf8Internal__
-	NumPending   *uint64
-	NumFailed    *uint64
+	_struct             struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Ch                  *RTChannelMetadataPlaintextInternal__
+	InboxVersion        *lib.RTInboxVersionInternal__
+	ReadThrough         *lib.RTMsgSeqInternal__
+	LastSeq             *lib.RTMsgSeqInternal__
+	LastTime            *lib.TimeInternal__
+	NumUnread           *uint64
+	Hidden              *bool
+	Muted               *bool
+	TeamName            *lib.NameUtf8Internal__
+	Snippet             *string
+	LastSender          *lib.NameUtf8Internal__
+	NumPending          *uint64
+	NumFailed           *uint64
+	ExplicitReadThrough *lib.RTMsgSeqInternal__
 }
 
 func (r RTInboxRowViewInternal__) Import() RTInboxRowView {
@@ -937,23 +939,30 @@ func (r RTInboxRowViewInternal__) Import() RTInboxRowView {
 			}
 			return *x
 		})(r.NumFailed),
+		ExplicitReadThrough: (func(x *lib.RTMsgSeqInternal__) (ret lib.RTMsgSeq) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.ExplicitReadThrough),
 	}
 }
 func (r RTInboxRowView) Export() *RTInboxRowViewInternal__ {
 	return &RTInboxRowViewInternal__{
-		Ch:           r.Ch.Export(),
-		InboxVersion: r.InboxVersion.Export(),
-		ReadThrough:  r.ReadThrough.Export(),
-		LastSeq:      r.LastSeq.Export(),
-		LastTime:     r.LastTime.Export(),
-		NumUnread:    &r.NumUnread,
-		Hidden:       &r.Hidden,
-		Muted:        &r.Muted,
-		TeamName:     r.TeamName.Export(),
-		Snippet:      r.Snippet,
-		LastSender:   r.LastSender.Export(),
-		NumPending:   &r.NumPending,
-		NumFailed:    &r.NumFailed,
+		Ch:                  r.Ch.Export(),
+		InboxVersion:        r.InboxVersion.Export(),
+		ReadThrough:         r.ReadThrough.Export(),
+		LastSeq:             r.LastSeq.Export(),
+		LastTime:            r.LastTime.Export(),
+		NumUnread:           &r.NumUnread,
+		Hidden:              &r.Hidden,
+		Muted:               &r.Muted,
+		TeamName:            r.TeamName.Export(),
+		Snippet:             r.Snippet,
+		LastSender:          r.LastSender.Export(),
+		NumPending:          &r.NumPending,
+		NumFailed:           &r.NumFailed,
+		ExplicitReadThrough: r.ExplicitReadThrough.Export(),
 	}
 }
 func (r *RTInboxRowView) Encode(enc rpc.Encoder) error {
@@ -3091,13 +3100,15 @@ func (r *RTOutboxDrainRes) Decode(dec rpc.Decoder) error {
 func (r *RTOutboxDrainRes) Bytes() []byte { return nil }
 
 type RTReadThroughPendingEntry struct {
-	Chid lib.RTChannelID
-	Seq  lib.RTMsgSeq
+	Chid     lib.RTChannelID
+	Seq      lib.RTMsgSeq
+	Explicit bool
 }
 type RTReadThroughPendingEntryInternal__ struct {
-	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Chid    *lib.RTChannelIDInternal__
-	Seq     *lib.RTMsgSeqInternal__
+	_struct  struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Chid     *lib.RTChannelIDInternal__
+	Seq      *lib.RTMsgSeqInternal__
+	Explicit *bool
 }
 
 func (r RTReadThroughPendingEntryInternal__) Import() RTReadThroughPendingEntry {
@@ -3114,12 +3125,19 @@ func (r RTReadThroughPendingEntryInternal__) Import() RTReadThroughPendingEntry 
 			}
 			return x.Import()
 		})(r.Seq),
+		Explicit: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Explicit),
 	}
 }
 func (r RTReadThroughPendingEntry) Export() *RTReadThroughPendingEntryInternal__ {
 	return &RTReadThroughPendingEntryInternal__{
-		Chid: r.Chid.Export(),
-		Seq:  r.Seq.Export(),
+		Chid:     r.Chid.Export(),
+		Seq:      r.Seq.Export(),
+		Explicit: &r.Explicit,
 	}
 }
 func (r *RTReadThroughPendingEntry) Encode(enc rpc.Encoder) error {
