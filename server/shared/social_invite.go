@@ -497,24 +497,32 @@ func ListSocialInvites(m MetaContext, inviter proto.UID) ([]rem.SocialInviteRow,
 // turn that is no longer current fails with SocialInviteStaleTurnError, and
 // a second reply to the same turn is a lost-ack retry that replaces the
 // invitee's message rather than appending.
-func ReplySocialInvite(m MetaContext, arg rem.ReplyArg, invitee proto.UID) error {
+//
+// FORK-ONLY (invite-review-push): it returns the row's inviter when the reply
+// appended a new turn, so the caller can wake them (QueueInviteReplyPush); nil
+// for a lost-ack replacement, which the inviter was already woken for.
+func ReplySocialInvite(m MetaContext, arg rem.ReplyArg, invitee proto.UID) (*proto.UID, error) {
 	msgBox, err := core.EncodeToBytes(&arg.Msg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	shid := m.ShortHostID().ExportToDB()
 
-	return RetryTxUserDB(m, "ReplySocialInvite", func(m MetaContext, tx pgx.Tx) error {
+	var newTurnFor *proto.UID
+	err = RetryTxUserDB(m, "ReplySocialInvite", func(m MetaContext, tx pgx.Tx) error {
+		// Set per attempt: a retried attempt must not inherit an earlier one's.
+		newTurnFor = nil
 		var stateRaw string
 		var lastSeq uint64
 		var wkCommitRaw []byte
+		var inviterRaw []byte
 		err := tx.QueryRow(m.Ctx(),
-			`SELECT state, last_seq, wk_commit FROM social_invites
+			`SELECT state, last_seq, wk_commit, inviter FROM social_invites
 			 WHERE short_host_id=$1 AND id=$2
 			 AND etime > NOW() AND state != 'canceled'
 			 FOR UPDATE`,
 			shid, arg.Id[:],
-		).Scan(&stateRaw, &lastSeq, &wkCommitRaw)
+		).Scan(&stateRaw, &lastSeq, &wkCommitRaw, &inviterRaw)
 		if err == pgx.ErrNoRows {
 			return core.SocialInviteNotFoundError{}
 		}
@@ -563,7 +571,8 @@ func ReplySocialInvite(m MetaContext, arg rem.ReplyArg, invitee proto.UID) error
 			if tags.RowsAffected() != 1 {
 				return core.UpdateError("social_invites")
 			}
-			return nil
+			newTurnFor, err = proto.ImportUIDFromBytes(inviterRaw)
+			return err
 
 		case proto.SocialInviteState_Replied:
 			// last_seq is the invitee's own turn; a repeat of the same
@@ -601,6 +610,34 @@ func ReplySocialInvite(m MetaContext, arg rem.ReplyArg, invitee proto.UID) error
 			return core.SocialInviteWrongStateError{}
 		}
 	})
+	if err != nil {
+		return nil, err
+	}
+	return newTurnFor, nil
+}
+
+// inviteReplyPushMarker is an invitation-reply push row's data; the relay
+// sends it as "k" (seco-server/push-relay, invite-review-push).
+const inviteReplyPushMarker = "invite"
+
+// QueueInviteReplyPush (FORK-ONLY, invite-review-push) queues one
+// content-free push to wake an inviter whose invitation was just answered.
+// The row is about no channel (channel_id 0; real ids are random 63-bit), so
+// no push hold or mute applies, and it names no invitation, team or person.
+// It runs after the reply committed: push_outbox lives in the realtime
+// database, which the users-DB transaction cannot span.
+func QueueInviteReplyPush(m MetaContext, inviter proto.UID) error {
+	rtdb, err := m.Db(DbTypeRealTime)
+	if err != nil {
+		return err
+	}
+	defer rtdb.Release()
+	_, err = rtdb.Exec(m.Ctx(),
+		`INSERT INTO push_outbox (short_host_id, uid, channel_id, kind, seq, data, status, ctime, mtime)
+		 VALUES ($1, $2, 0, 'system', NULL, $3, 'queued', NOW(), NOW())`,
+		m.ShortHostID().ExportToDB(), inviter.ExportToDB(), []byte(inviteReplyPushMarker),
+	)
+	return err
 }
 
 // AskAgainSocialInvite appends an inviter turn to a replied row. Rows the

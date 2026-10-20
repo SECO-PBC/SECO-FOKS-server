@@ -824,3 +824,49 @@ func TestSocialInviteAuthz(t *testing.T) {
 	})
 	require.Error(t, err)
 }
+
+// inviteReplyPushes counts the invitation-reply wakes queued for u
+// (FORK-ONLY, invite-review-push): rows about no channel carrying the marker.
+func inviteReplyPushes(t *testing.T, tew *TestEnvWrapper, u *TestUser) int {
+	m := tew.MetaContext()
+	db, err := m.Db(shared.DbTypeRealTime)
+	require.NoError(t, err)
+	defer db.Release()
+	var n int
+	require.NoError(t, db.QueryRow(m.Ctx(),
+		`SELECT count(*) FROM push_outbox
+		 WHERE short_host_id=$1 AND uid=$2 AND channel_id=0 AND kind='system'
+		   AND data='invite'::bytea AND status='queued'`,
+		m.ShortHostID().ExportToDB(), u.uid.ExportToDB(),
+	).Scan(&n))
+	return n
+}
+
+// A reply that answers the inviter's turn wakes the inviter, once per turn: a
+// lost-ack replacement queues nothing, a reply after ask-again queues again,
+// and the invitee is never woken for their own reply.
+func TestSocialInviteReplyQueuesInviterPush(t *testing.T) {
+	f := newSocialInviteFixture(t)
+	m := f.tew.MetaContext()
+	f.create(t, nil)
+	require.Equal(t, 0, inviteReplyPushes(t, f.tew, f.alice))
+
+	bob := f.tew.NewTestUser(t)
+	f.tew.DirectDoubleMerklePokeInTest(t)
+	bcli, closeBob := bob.newSocialInviteClient(t, m.Ctx())
+	defer closeBob()
+
+	require.NoError(t, bcli.Reply(m.Ctx(), f.replyArg(t, bob, 1, "it's bob")))
+	require.Equal(t, 1, inviteReplyPushes(t, f.tew, f.alice))
+	require.Equal(t, 0, inviteReplyPushes(t, f.tew, bob))
+
+	require.NoError(t, bcli.Reply(m.Ctx(), f.replyArg(t, bob, 1, "it's bob, again")))
+	require.Equal(t, 1, inviteReplyPushes(t, f.tew, f.alice))
+
+	require.NoError(t, f.cli.AskAgain(m.Ctx(), rem.AskAgainArg{
+		Id:  f.kit.id,
+		Msg: f.kit.seal(t, &rem.SocialInviteMsgPayload{Text: "prove it"}),
+	}))
+	require.NoError(t, bcli.Reply(m.Ctx(), f.replyArg(t, bob, 3, "fine: proof")))
+	require.Equal(t, 2, inviteReplyPushes(t, f.tew, f.alice))
+}
