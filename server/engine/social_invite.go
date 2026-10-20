@@ -26,7 +26,19 @@ func (c *UserClientConn) List(ctx context.Context) ([]rem.SocialInviteRow, error
 
 func (c *UserClientConn) Reply(ctx context.Context, arg rem.ReplyArg) error {
 	m := shared.NewMetaContextConn(ctx, c)
-	return shared.ReplySocialInvite(m, arg, m.UID())
+	inviter, err := shared.ReplySocialInvite(m, arg, m.UID())
+	if err != nil {
+		return err
+	}
+	// FORK-ONLY (invite-review-push): wake the inviter. Best-effort: the
+	// reply is stored, and failing it now would only make the invitee retry
+	// into a replacement, which queues nothing.
+	if inviter != nil {
+		if err := shared.QueueInviteReplyPush(m, *inviter); err != nil {
+			m.Warnw("SocialInvite.Reply", "stage", "queue inviter push", "err", err)
+		}
+	}
+	return nil
 }
 
 func (c *UserClientConn) AskAgain(ctx context.Context, arg rem.AskAgainArg) error {
