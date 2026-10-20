@@ -238,6 +238,8 @@ CREATE TABLE user_channels (
     last_msg_time TIMESTAMPTZ NOT NULL,
     earliest_msg_time TIMESTAMPTZ, /* server's lower bound on this user's reachable history */
     read_through BIGINT NOT NULL, /* max seq the user has read; 0 = unread */
+    /* max seq the user has explicitly read (or sent); fork-only, see p10 */
+    explicit_read_through BIGINT NOT NULL DEFAULT 0,
     hidden BOOLEAN NOT NULL,
     muted BOOLEAN NOT NULL,
     ctime TIMESTAMPTZ NOT NULL,
@@ -311,6 +313,8 @@ CREATE INDEX push_outbox_queue_idx ON push_outbox(status, ctime) WHERE status IN
 CREATE INDEX push_outbox_user_idx ON push_outbox(short_host_id, uid, ctime);
 /* fork-only (p8): the holder's release and hold-end scans */
 CREATE INDEX push_outbox_held_idx ON push_outbox(short_host_id, channel_id, uid, seq) WHERE status = 'held';
+/* fork-only (p10): settleReadPushes' per-user, per-channel lookups */
+CREATE INDEX push_outbox_user_channel_idx ON push_outbox(short_host_id, uid, channel_id, seq);
 
 /*
  * push_holds (fork-only, p8): delegated push release. At most one per
@@ -357,3 +361,4 @@ INSERT INTO schema_patches (id, ctime) VALUES (6, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (7, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (8, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (9, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (10, NOW());

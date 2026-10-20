@@ -118,6 +118,9 @@ struct RTInboxRowView {
     lastSender @10 : lib.NameUtf8;        // last message's sender; empty if unresolved
     numPending @11 : Uint;                // viewer's own outbox messages queued here
     numFailed @12 : Uint;                 // viewer's own rejected (Failed) outbox messages here
+    // FORK-ONLY (cross-device-read-sync). rem.RTInboxChannel.explicitReadThrough,
+    // raised by this device's own explicit marks still queued offline.
+    explicitReadThrough @13 : lib.RTMsgSeq;
 }
 
 // The viewer's inbox, rendered entirely from local storage.
@@ -305,6 +308,9 @@ struct RTOutboxDrainRes {
 struct RTReadThroughPendingEntry {
     chid @0 : lib.RTChannelID;
     seq @1 : lib.RTMsgSeq;
+    // FORK-ONLY (cross-device-read-sync). Replayed as an explicit mark; a
+    // channel can hold one explicit and one implicit entry.
+    explicit @2 : Bool;
 }
 
 struct RTReadThroughPendingSet {

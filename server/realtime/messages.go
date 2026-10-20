@@ -281,13 +281,34 @@ func (s *messageSender) fanoutInboxVersions(
 	// count against their unread badge. No extra version is consumed -- the row
 	// was bumping for the delivery anyway, so other devices pick the read state
 	// up along with the message.
+	//
+	// The sender's explicit pointer (fork-only, cross-device-read-sync) moves
+	// with it -- sending is the clearest sign of having read -- and settles
+	// the sender's own pushes in this channel, below. Its old value is read
+	// first.
+	var senderExplicit int64
+	err = s.tx.QueryRow(
+		m.Ctx(),
+		`SELECT explicit_read_through FROM user_channels
+		 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3`,
+		m.ShortHostID(),
+		s.channelID(),
+		s.sender.ExportToDB(),
+	).Scan(&senderExplicit)
+	senderRow := err == nil
+	if err != nil && err != pgx.ErrNoRows {
+		return err
+	}
 	_, err = s.tx.Exec(
 		m.Ctx(),
 		`UPDATE user_channels uc
 		 SET inbox_version = ui.inbox_version, last_msg_time = $3, mtime = NOW(),
 		     read_through = CASE WHEN uc.uid = $4
 		                         THEN GREATEST(uc.read_through, $5)
-		                         ELSE uc.read_through END
+		                         ELSE uc.read_through END,
+		     explicit_read_through = CASE WHEN uc.uid = $4
+		                                  THEN GREATEST(uc.explicit_read_through, $5)
+		                                  ELSE uc.explicit_read_through END
 		 FROM user_inbox ui
 		 WHERE ui.short_host_id = uc.short_host_id
 		   AND ui.uid = uc.uid AND ui.app_id = uc.app_id
@@ -300,6 +321,12 @@ func (s *messageSender) fanoutInboxVersions(
 	)
 	if err != nil {
 		return err
+	}
+	if senderRow && seq.Int64() > senderExplicit {
+		err = settleReadPushes(m, s.tx, s.sender, s.channelID(), senderExplicit, seq.Int64())
+		if err != nil {
+			return err
+		}
 	}
 
 	// Queue one content-free push row per recipient (not the sender, and not
@@ -624,39 +651,56 @@ func (r *readThroughMarker) run(m shared.MetaContext) error {
 		return err
 	}
 
+	// Both pointers, under the row lock: a missing row means the user was never
+	// fanned into this channel.
+	var readThrough, explicitThrough int64
+	err = r.tx.QueryRow(
+		m.Ctx(),
+		`SELECT read_through, explicit_read_through FROM user_channels
+		 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3
+		 FOR UPDATE`,
+		m.ShortHostID(),
+		r.channelID(),
+		r.reader.ExportToDB(),
+	).Scan(&readThrough, &explicitThrough)
+	if err == pgx.ErrNoRows {
+		return core.RowNotFoundError{}
+	}
+	if err != nil {
+		return err
+	}
+
 	// Advance monotonically. A stale or repeated mark (seq at or below the
 	// current pointer) is a no-op and must NOT bump the inbox version, or
 	// out-of-order marks from racing devices would churn every device's sync.
-	tag, err := r.tx.Exec(
+	// An explicit mark (fork-only, cross-device-read-sync) moves both
+	// pointers; any other moves only read_through.
+	explicitMoved := r.arg.Explicit && seq > explicitThrough
+	if seq <= readThrough && !explicitMoved {
+		return nil
+	}
+	_, err = r.tx.Exec(
 		m.Ctx(),
 		`UPDATE user_channels
-		 SET read_through=$4, mtime=NOW()
-		 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3
-		   AND read_through < $4`,
+		 SET read_through=GREATEST(read_through, $4),
+		     explicit_read_through=CASE WHEN $5 THEN GREATEST(explicit_read_through, $4)
+		                                ELSE explicit_read_through END,
+		     mtime=NOW()
+		 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3`,
 		m.ShortHostID(),
 		r.channelID(),
 		r.reader.ExportToDB(),
 		seq,
+		explicitMoved,
 	)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		// Distinguish a stale mark (no-op success) from a missing membership
-		// row (the user was never fanned into this channel).
-		var one int
-		err = r.tx.QueryRow(
-			m.Ctx(),
-			`SELECT 1 FROM user_channels
-			 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3`,
-			m.ShortHostID(),
-			r.channelID(),
-			r.reader.ExportToDB(),
-		).Scan(&one)
-		if err == pgx.ErrNoRows {
-			return core.RowNotFoundError{}
+	if explicitMoved {
+		err = settleReadPushes(m, r.tx, r.reader, r.channelID(), explicitThrough, seq)
+		if err != nil {
+			return err
 		}
-		return err
 	}
 
 	// The pointer moved: bump the caller's global inbox version and stamp this

@@ -1127,6 +1127,30 @@ func (d *Minder) ReadThrough(
 	channel lcl.RTChannelSpecifier,
 	seq proto.RTMsgSeq,
 ) error {
+	return d.readThrough(m, team, appID, channel, seq, false)
+}
+
+// MarkRead is ReadThrough for a read the user made themselves (fork-only,
+// cross-device-read-sync): it also advances the explicit read pointer, which
+// page fetches never move, and settles the user's pushes in the channel.
+func (d *Minder) MarkRead(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	seq proto.RTMsgSeq,
+) error {
+	return d.readThrough(m, team, appID, channel, seq, true)
+}
+
+func (d *Minder) readThrough(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	seq proto.RTMsgSeq,
+	explicit bool,
+) error {
 	err := assertTeam(team)
 	if err != nil {
 		return err
@@ -1139,14 +1163,14 @@ func (d *Minder) ReadThrough(
 	if err != nil {
 		return err
 	}
-	err = d.attemptReadThrough(m, ch.Id, seq)
+	err = d.attemptReadThrough(m, ch.Id, seq, explicit)
 	if err != nil {
 		if core.IsTransportError(err) {
-			return d.queuePendingMark(m, ch.Id, seq)
+			return d.queuePendingMark(m, ch.Id, seq, explicit)
 		}
 		return err
 	}
-	return d.clearPendingMarks(m, map[proto.RTChannelID]proto.RTMsgSeq{ch.Id: seq})
+	return d.clearPendingMarks(m, map[pendingKey]proto.RTMsgSeq{{chid: ch.Id, explicit: explicit}: seq})
 }
 
 // SetChannelMuted sets the caller's own push mute in a channel

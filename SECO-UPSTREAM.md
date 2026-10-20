@@ -96,6 +96,21 @@ one row. Name the row if a third is ever added between them.)
 
 ### Not going upstream (for now)
 
+**Explicit read pointer and read pushes (cross-device-read-sync).** SECO's
+answer to "a read on one device leaves the others unread, and the phone keeps
+the push". `read_through` moves on every page `GetThreadView` fetches, so the
+fork adds `user_channels.explicit_read_through` (`foks_realtime` **p10**),
+moved only by an `rtReadThrough` with the fork-only `RTReadThroughArg.explicit
+@2` (`librt.Minder.MarkRead`) and by the user's own send, and returned as
+`RTInboxChannel.explicitReadThrough @5` (lcl `RTInboxRowView @13`,
+`RTReadThroughPendingEntry.explicit @2`). Moving it settles the user's pushes
+in that channel (`server/realtime/readpush.go`): queued/held `msg` rows at or
+below it are deleted, and one `kind='read'` row is queued when a delivered
+push lies in the newly read range. Worth proposing upstream once the shape has
+settled, since upstream's own "viewing implies reading" has the same problem;
+until then the field numbers are fork-only and the next merge reconciles them
+by content.
+
 **KV offline mode (client half).** The server half is #352 above. The client
 half stays local; `docs/offline-kv` is an *integration* branch carrying RT +
 sigchain + KV together, not a KV-only slice. If any part is ever proposed,

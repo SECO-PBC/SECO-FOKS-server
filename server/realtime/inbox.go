@@ -102,13 +102,16 @@ type inboxChannelRaw struct {
 	readThrough int64
 	hidden      bool
 	muted       bool
+	// fork-only (cross-device-read-sync)
+	explicitReadThrough int64
 }
 
 // scanDests matches the changed-threads SELECT: the shared channel-metadata
 // columns followed by the parent team and the caller's per-channel state.
 func (r *inboxChannelRaw) scanDests() []any {
 	return append(r.md.scanDests(),
-		&r.teamRaw, &r.inboxVers, &r.readThrough, &r.hidden, &r.muted)
+		&r.teamRaw, &r.inboxVers, &r.readThrough, &r.hidden, &r.muted,
+		&r.explicitReadThrough)
 }
 
 // GetChangedThreads implements the inbox sync (see "Inbox View" in
@@ -220,11 +223,12 @@ func GetChangedThreads(
 		}
 
 		ret.Channels = append(ret.Channels, rem.RTInboxChannel{
-			Md:           *md,
-			InboxVersion: proto.RTInboxVersion(raw.inboxVers),
-			ReadThrough:  proto.RTMsgSeq(raw.readThrough),
-			Hidden:       raw.hidden,
-			Muted:        raw.muted,
+			Md:                  *md,
+			InboxVersion:        proto.RTInboxVersion(raw.inboxVers),
+			ReadThrough:         proto.RTMsgSeq(raw.readThrough),
+			Hidden:              raw.hidden,
+			Muted:               raw.muted,
+			ExplicitReadThrough: proto.RTMsgSeq(raw.explicitReadThrough),
 		})
 	}
 	return &ret, nil
@@ -258,7 +262,8 @@ func readChangedChannels(
 		m.Ctx(),
 		`SELECT `+channelMetadataCols+channelForkCols("$2")+`,
 		        c.parent_team_id,
-		        uc.inbox_version, uc.read_through, uc.hidden, uc.muted
+		        uc.inbox_version, uc.read_through, uc.hidden, uc.muted,
+		        uc.explicit_read_through
 		 FROM user_channels uc
 		 JOIN channels c ON
 		     c.short_host_id = uc.short_host_id
