@@ -123,3 +123,28 @@ func TestEditSettlesSendersPushes(t *testing.T) {
 	require.Empty(t, sc.pushRowsByStatus(t, ch, sc.cleo),
 		"the edit's sender has read the channel, so their push is dropped")
 }
+
+// An edit returns before the hold check, so it does not notice a holder who
+// has left the team: the hold and its held row stay until the next ordinary
+// send, which ends the hold and releases them.
+func TestEditDoesNotEndDepartedHoldersHold(t *testing.T) {
+	sc, ch := setupEditScene(t)
+	sc.setHold(t, sc.dara)
+	s1 := sc.sendSeq(t, sc.bob, ch, "lunch?")
+	require.Equal(t, held(1), sc.pushRowsByStatus(t, ch, sc.cleo))
+
+	sc.tm.makeChanges(t, sc.tew.MetaContext(), sc.alice.u,
+		[]proto.MemberRole{
+			sc.dara.u.toMemberRole(t, proto.NewRoleDefault(proto.RoleType_NONE), nil),
+		}, nil)
+
+	sc.sendTypedSeq(t, sc.bob, ch, "lunch at 1?", proto.RTMsgType_Edit,
+		sc.msgIDAt(t, sc.bob, ch, s1))
+	require.Equal(t, 1, sc.holdCount(t), "an edit leaves the hold in place")
+	require.Equal(t, held(1), sc.pushRowsByStatus(t, ch, sc.cleo))
+
+	sc.sendSeq(t, sc.bob, ch, "the send that notices")
+	require.Equal(t, 0, sc.holdCount(t))
+	require.Equal(t, queued(2), sc.pushRowsByStatus(t, ch, sc.cleo),
+		"the held row is released and the new one queued")
+}
