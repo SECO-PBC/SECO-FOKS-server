@@ -45,12 +45,15 @@ type messageSender struct {
 func (s *messageSender) channelID() int64 { return int64(s.arg.Chid) }
 
 // typeWakesPhone reports whether a send of this type queues push rows. Edits
-// and deletes change a message the member has already been told about, so
-// they never notify. Clients delete by editing to an empty body, so Edit
-// covers both in practice; Delete is listed for what the type means. The
-// type is the sender's plaintext claim, which is safe here: readers reject a
-// message whose type does not match its sealed body, so a sender can only
-// silence a message nobody can read.
+// and deletes never notify (fork, queued for upstream in SECO-UPSTREAM.md):
+// the app's rule is that changing or removing a message is not news. The app
+// deletes by editing to an empty body, so Edit covers both in practice;
+// Delete is listed for what the type means.
+//
+// The type is the sender's plaintext claim. Mislabelling a new message as an
+// edit gains nothing: readers reject a message whose type does not match its
+// sealed body. A real edit does deliver its new text without a push, which is
+// the point.
 func typeWakesPhone(t proto.RTMsgType) bool {
 	switch t {
 	case proto.RTMsgType_Edit, proto.RTMsgType_Delete:
@@ -361,11 +364,12 @@ func (s *messageSender) fanoutInboxVersions(
 	if s.noPush {
 		return nil
 	}
-	// An edit or a delete skips the fan-out the same way: the message is
-	// stored and every member's inbox is bumped above, but no phone is woken.
-	// The type travels in the clear for exactly this. This return comes
-	// before pushStatusForSend, so an edit does not end a hold whose holder
-	// has left the team; the next ordinary send does.
+	// An edit or a delete (fork, typeWakesPhone) skips the fan-out the same
+	// way: the message is stored and every member's inbox is bumped and
+	// stamped above, but no phone is woken. The server can tell because the
+	// message type travels in the clear. This return comes before
+	// pushStatusForSend, so an edit does not end a hold whose holder has left
+	// the team; the next ordinary send does.
 	if !typeWakesPhone(s.arg.Md.Typ) {
 		return nil
 	}

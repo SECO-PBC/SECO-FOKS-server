@@ -18,6 +18,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// setupEditScene is a privScene with one open channel made by bob, checked
+// against the realtime invariants at the end: the skip returns early from the
+// function that also stamps memberships, so a bump without a stamp must fail.
+func setupEditScene(t *testing.T) (*privScene, proto.RTChannelID) {
+	sc := setupPrivScene(t, true)
+	t.Cleanup(func() { sc.requireRTInvariants(t) })
+	return sc, sc.makeChannelWithOpts(t, sc.bob, librt.MakeChannelOpts{})
+}
+
 // msgIDAt is the id of the message at seq in chid, read as `by`: the peg
 // target an Edit or Reactji needs.
 func (s *privScene) msgIDAt(
@@ -46,11 +55,10 @@ func (s *privScene) sendTypedSeq(
 }
 
 // An edit and a delete queue no push row for anyone, while a message and a
-// reaction in the same channel still queue one per recipient, and every send
-// still bumps the recipients' inbox versions.
+// reaction in the same channel still queue one per recipient, and the edits
+// still bump the recipients' inbox versions.
 func TestEditQueuesNoPushRows(t *testing.T) {
-	sc := setupPrivScene(t, true)
-	ch := sc.makeChannelWithOpts(t, sc.bob, librt.MakeChannelOpts{})
+	sc, ch := setupEditScene(t)
 	recipients := []*privActor{sc.alice, sc.cleo, sc.dara, sc.eddie}
 
 	s1 := sc.sendSeq(t, sc.bob, ch, "lunch?")
@@ -84,25 +92,28 @@ func TestEditQueuesNoPushRows(t *testing.T) {
 // for the edit's seq, which now matches nothing, is accepted and changes
 // nothing.
 func TestEditUnderHoldWritesNoHeldRow(t *testing.T) {
-	sc := setupPrivScene(t, true)
-	ch := sc.makeChannelWithOpts(t, sc.bob, librt.MakeChannelOpts{})
+	sc, ch := setupEditScene(t)
 	sc.setHold(t, sc.dara)
 
 	s1 := sc.sendSeq(t, sc.bob, ch, "lunch?")
 	s2 := sc.sendTypedSeq(t, sc.bob, ch, "lunch at 1?", proto.RTMsgType_Edit,
 		sc.msgIDAt(t, sc.bob, ch, s1))
-	require.Equal(t, held(1), sc.pushRowsByStatus(t, ch, sc.eddie))
+	recipients := []*privActor{sc.alice, sc.cleo, sc.dara, sc.eddie}
+	for _, a := range recipients {
+		require.Equal(t, held(1), sc.pushRowsByStatus(t, ch, a))
+	}
 
 	require.NoError(t, sc.dara.minder.ReleasePushes(sc.dara.m, ch, s2, nil,
 		[]rem.RTPushDrop{{Uid: sc.eddie.u.uid, Seq: s2}}))
-	require.Equal(t, []int64{s1.Int64()}, sc.queuedSeqs(t, ch, sc.eddie))
+	for _, a := range recipients {
+		require.Equal(t, []int64{s1.Int64()}, sc.queuedSeqs(t, ch, a))
+	}
 }
 
 // Sending an edit still counts as reading: the sender's queued pushes for
 // what came before are settled, as for any send.
 func TestEditSettlesSendersPushes(t *testing.T) {
-	sc := setupPrivScene(t, true)
-	ch := sc.makeChannelWithOpts(t, sc.bob, librt.MakeChannelOpts{})
+	sc, ch := setupEditScene(t)
 
 	s1 := sc.sendSeq(t, sc.bob, ch, "lunch?")
 	require.Equal(t, queued(1), sc.pushRowsByStatus(t, ch, sc.cleo))
