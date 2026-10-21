@@ -44,6 +44,25 @@ type messageSender struct {
 
 func (s *messageSender) channelID() int64 { return int64(s.arg.Chid) }
 
+// typeWakesPhone reports whether a send of this type queues push rows. Edits
+// and deletes never notify (fork, queued for upstream in SECO-UPSTREAM.md):
+// the app's rule is that changing or removing a message is not news. The app
+// deletes by editing to an empty body, so Edit covers both in practice;
+// Delete is listed for what the type means.
+//
+// The type is the sender's plaintext claim. Mislabelling a new message as an
+// edit gains nothing: readers reject a message whose type does not match its
+// sealed body. A real edit does deliver its new text without a push, which is
+// the point.
+func typeWakesPhone(t proto.RTMsgType) bool {
+	switch t {
+	case proto.RTMsgType_Edit, proto.RTMsgType_Delete:
+		return false
+	default:
+		return true
+	}
+}
+
 // lockChannel reads (and row-locks) the channel being sent into, and
 // authorizes the sender. The FOR UPDATE serializes concurrent sends to the
 // same channel, so seq assignment below is race-free.
@@ -343,6 +362,15 @@ func (s *messageSender) fanoutInboxVersions(
 	// Channel names are PTK-encrypted at rest, so this per-channel flag is
 	// the only way the server can tell a control channel from conversation.
 	if s.noPush {
+		return nil
+	}
+	// An edit or a delete (fork, typeWakesPhone) skips the fan-out the same
+	// way: the message is stored and every member's inbox is bumped and
+	// stamped above, but no phone is woken. The server can tell because the
+	// message type travels in the clear. This return comes before
+	// pushStatusForSend, so an edit does not end a hold whose holder has left
+	// the team; the next ordinary send does.
+	if !typeWakesPhone(s.arg.Md.Typ) {
 		return nil
 	}
 	// Under a push hold (fork-only, pushhold.go) the rows are 'held' until
