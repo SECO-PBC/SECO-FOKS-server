@@ -1531,13 +1531,15 @@ func (c *ClientRTListChannelsForTeamArg) Decode(dec rpc.Decoder) error {
 func (c *ClientRTListChannelsForTeamArg) Bytes() []byte { return nil }
 
 type ClientRTSendArg struct {
-	Cfg  RTConfig
-	Body []byte
+	Cfg    RTConfig
+	Body   []byte
+	NoPush bool
 }
 type ClientRTSendArgInternal__ struct {
 	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
 	Cfg     *RTConfigInternal__
 	Body    *[]byte
+	NoPush  *bool
 }
 
 func (c ClientRTSendArgInternal__) Import() ClientRTSendArg {
@@ -1554,12 +1556,19 @@ func (c ClientRTSendArgInternal__) Import() ClientRTSendArg {
 			}
 			return *x
 		})(c.Body),
+		NoPush: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(c.NoPush),
 	}
 }
 func (c ClientRTSendArg) Export() *ClientRTSendArgInternal__ {
 	return &ClientRTSendArgInternal__{
-		Cfg:  c.Cfg.Export(),
-		Body: &c.Body,
+		Cfg:    c.Cfg.Export(),
+		Body:   &c.Body,
+		NoPush: &c.NoPush,
 	}
 }
 func (c *ClientRTSendArg) Encode(enc rpc.Encoder) error {
@@ -3247,6 +3256,7 @@ type RTOutboxEntry struct {
 	Attempts    uint64
 	LastErrCode lib.StatusCode
 	Ord         uint64
+	NoPush      bool
 }
 type RTOutboxEntryInternal__ struct {
 	_struct     struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -3255,6 +3265,7 @@ type RTOutboxEntryInternal__ struct {
 	Attempts    *uint64
 	LastErrCode *lib.StatusCodeInternal__
 	Ord         *uint64
+	NoPush      *bool
 }
 
 func (r RTOutboxEntryInternal__) Import() RTOutboxEntry {
@@ -3289,6 +3300,12 @@ func (r RTOutboxEntryInternal__) Import() RTOutboxEntry {
 			}
 			return *x
 		})(r.Ord),
+		NoPush: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.NoPush),
 	}
 }
 func (r RTOutboxEntry) Export() *RTOutboxEntryInternal__ {
@@ -3298,6 +3315,7 @@ func (r RTOutboxEntry) Export() *RTOutboxEntryInternal__ {
 		Attempts:    &r.Attempts,
 		LastErrCode: r.LastErrCode.Export(),
 		Ord:         &r.Ord,
+		NoPush:      &r.NoPush,
 	}
 }
 func (r *RTOutboxEntry) Encode(enc rpc.Encoder) error {

@@ -1114,6 +1114,23 @@ func (d *Minder) Send(
 	return d.SendWithTestHooks(m, team, appID, channel, body, nil)
 }
 
+// SendSilent is Send for a message no phone should be woken for (fork-only,
+// silent-system-notices): it is stored and delivered to online members as
+// any send, but the server queues no push for it (rem.RTSendArg.NoPush). A
+// send queued offline keeps the flag until the outbox drains it.
+func (d *Minder) SendSilent(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	body []byte,
+) (
+	*rem.RTSendRes,
+	error,
+) {
+	return d.sendTyped(m, team, appID, channel, body, proto.RTMsgType_Basic, nil, nil, true)
+}
+
 // ReadThrough advances the caller's read pointer in a channel to seq, so
 // their other devices learn the read state via the resulting inbox-version
 // bump. The pointer is monotonic server-side: a stale or repeated mark is a
@@ -1303,7 +1320,7 @@ func (d *Minder) SendWithTestHooks(
 	*rem.RTSendRes,
 	error,
 ) {
-	return d.sendTyped(m, team, appID, channel, body, proto.RTMsgType_Basic, nil, test)
+	return d.sendTyped(m, team, appID, channel, body, proto.RTMsgType_Basic, nil, test, false)
 }
 
 // SendTyped sends a non-Basic message type: Reply / Reactji /
@@ -1320,7 +1337,7 @@ func (d *Minder) SendTyped(
 	*rem.RTSendRes,
 	error,
 ) {
-	return d.sendTyped(m, team, appID, channel, body, typ, replyTo, nil)
+	return d.sendTyped(m, team, appID, channel, body, typ, replyTo, nil, false)
 }
 
 func (d *Minder) sendTyped(
@@ -1332,6 +1349,7 @@ func (d *Minder) sendTyped(
 	typ proto.RTMsgType,
 	replyTo *proto.RTMsgID,
 	test *SendTestHooks,
+	noPush bool,
 ) (
 	*rem.RTSendRes,
 	error,
@@ -1399,7 +1417,7 @@ func (d *Minder) sendTyped(
 	// Queue durably before the first network attempt: from here the message
 	// survives transport failures and crashes, and re-attempting is safe
 	// because rtSend is idempotent on msgID (docs/rt_offline.md, D1/D2).
-	hasEarlier, err := d.enqueueOutbox(m, msgCached)
+	hasEarlier, err := d.enqueueOutbox(m, msgCached, noPush)
 	if err != nil {
 		return nil, err
 	}
@@ -1430,7 +1448,7 @@ func (d *Minder) sendTyped(
 		return nil, core.RTMsgQueuedError{MsgID: md.MsgID}
 	}
 
-	res, err := d.attemptSend(m, &msgCached)
+	res, err := d.attemptSend(m, &msgCached, noPush)
 	if err != nil {
 		if core.IsTransportError(err) {
 			// The message sits durably in the outbox, to drain on reconnect.

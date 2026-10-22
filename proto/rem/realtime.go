@@ -57,6 +57,7 @@ type RTSendArg struct {
 	Chid            lib.RTChannelIDShort
 	Mw              lib.RTMsgWrapper
 	ExpectedPrevSeq lib.RTMsgSeq
+	NoPush          bool
 }
 type RTSendArgInternal__ struct {
 	_struct         struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -64,6 +65,7 @@ type RTSendArgInternal__ struct {
 	Chid            *lib.RTChannelIDShortInternal__
 	Mw              *lib.RTMsgWrapperInternal__
 	ExpectedPrevSeq *lib.RTMsgSeqInternal__
+	NoPush          *bool
 }
 
 func (r RTSendArgInternal__) Import() RTSendArg {
@@ -92,6 +94,12 @@ func (r RTSendArgInternal__) Import() RTSendArg {
 			}
 			return x.Import()
 		})(r.ExpectedPrevSeq),
+		NoPush: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.NoPush),
 	}
 }
 func (r RTSendArg) Export() *RTSendArgInternal__ {
@@ -100,6 +108,7 @@ func (r RTSendArg) Export() *RTSendArgInternal__ {
 		Chid:            r.Chid.Export(),
 		Mw:              r.Mw.Export(),
 		ExpectedPrevSeq: r.ExpectedPrevSeq.Export(),
+		NoPush:          &r.NoPush,
 	}
 }
 func (r *RTSendArg) Encode(enc rpc.Encoder) error {

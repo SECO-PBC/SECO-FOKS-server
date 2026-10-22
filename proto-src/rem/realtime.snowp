@@ -22,6 +22,14 @@ struct RTSendArg {
     chid @1 : lib.RTChannelIDShort; // send short channel ID to save bytes
     mw @2 : lib.RTMsgWrapper;
     expectedPrevSeq @3 : lib.RTMsgSeq; // 0 if unspecified
+    // FORK-ONLY (silent-system-notices). The sender asks that this one send
+    // queue no push_outbox row: it is stored and every member's inbox is
+    // bumped as usual, so online delivery is unchanged, but no phone is
+    // woken. The app sets it on its in-app system notices (joins, role
+    // changes, identity edits), which the server cannot tell from a message
+    // because their kind lives in the sealed body. An old server drops the
+    // extra positional field and pushes as before.
+    noPush @4 : Bool;
 }
 
 struct RTSendRes {
