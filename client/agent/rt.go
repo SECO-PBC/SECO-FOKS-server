@@ -244,7 +244,11 @@ func (c *AgentConn) ClientRTSend(
 	if err != nil {
 		return zed, err
 	}
-	res, err := minder.Send(m, arg.Cfg.Team, arg.Cfg.AppID, arg.Cfg.Channel, arg.Body)
+	send := minder.Send
+	if arg.NoPush {
+		send = minder.SendSilent
+	}
+	res, err := send(m, arg.Cfg.Team, arg.Cfg.AppID, arg.Cfg.Channel, arg.Body)
 	if err != nil {
 		return zed, err
 	}

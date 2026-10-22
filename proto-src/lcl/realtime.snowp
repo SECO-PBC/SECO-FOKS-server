@@ -202,7 +202,10 @@ protocol RealTime
 
     clientRTSend @2 (
         cfg @0 : RTConfig, /* contains team, AppID and channel to send into */
-        body @1 : Blob     /* plaintext message body */
+        body @1 : Blob,    /* plaintext message body */
+        /* FORK-ONLY (silent-system-notices): send without a push; see
+           rem.RTSendArg.noPush. */
+        noPush @2 : Bool
     ) -> lib.RTMsgSeq;     /* server-assigned sequence number */
 
     clientRTGetThread @3 (
@@ -338,6 +341,11 @@ struct RTOutboxEntry {
     // reaches the logs at the point of failure.
     lastErrCode @3 : lib.StatusCode;
     ord @4 : Uint;
+    // FORK-ONLY (silent-system-notices): the send asked for no push
+    // (rem.RTSendArg.noPush). Kept with the row so a send queued offline and
+    // drained later stays silent; a row written before the field decodes it
+    // false and pushes, as it would have.
+    noPush @5 : Bool;
 }
 
 struct RTOutboxIndexEntry {

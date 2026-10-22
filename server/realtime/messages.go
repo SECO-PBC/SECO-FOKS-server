@@ -373,6 +373,13 @@ func (s *messageSender) fanoutInboxVersions(
 	if !typeWakesPhone(s.arg.Md.Typ) {
 		return nil
 	}
+	// A send the sender flagged noPush (fork-only, silent-system-notices) skips
+	// it the same way, and for the same reason sits before pushStatusForSend.
+	// The app sets it on its in-app system notices, whose kind is sealed in the
+	// body, so the type above cannot tell them from a message.
+	if s.arg.NoPush {
+		return nil
+	}
 	// Under a push hold (fork-only, pushhold.go) the rows are 'held' until
 	// the holder decides them.
 	status, err := s.pushStatusForSend(m)
