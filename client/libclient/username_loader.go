@@ -4,8 +4,10 @@
 package libclient
 
 import (
+	"errors"
 	"sync"
 
+	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 )
@@ -55,8 +57,8 @@ func NewUsernameLoader() *UsernameLoader {
 // arguments, since the winner's auth mode may not apply to them.
 //
 // If the load fails (e.g. the device is offline) and an expired name for fqu
-// is still cached, that name is returned instead of the error; see
-// staleOnError. A fresh load still wins whenever it succeeds, and a stale
+// is still cached, that name is returned instead of the error, except for a
+// stale team bearer token; see staleOnError. A fresh load still wins whenever it succeeds, and a stale
 // name is never shared with flight waiters.
 //
 // The returned UserWrapper is non-nil only when this call performed the load
@@ -106,11 +108,18 @@ func (u *UsernameLoader) Load(
 // staleOnError falls back to an expired cached name for fqu after a failed
 // load, and returns err only when nothing is cached. Without it a device that
 // stays offline past the cache TTL loses every name it already knew.
+//
+// A stale team bearer token is passed through regardless: the caller cures it
+// by refreshing the token and loading again (see librt's resolveSenderName),
+// which a fallback here would skip, leaving the token and the name stale.
 func (u *UsernameLoader) staleOnError(
 	m MetaContext,
 	fqu proto.FQUser,
 	err error,
 ) (proto.NameUtf8, *UserWrapper, error) {
+	if errors.As(err, &core.TeamBearerTokenStaleError{}) {
+		return "", nil, err
+	}
 	nm, ok := u.GetStale(m, fqu)
 	if !ok {
 		return "", nil, err

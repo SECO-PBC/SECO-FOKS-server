@@ -104,7 +104,8 @@ func (c *nameCache[K]) Set(m MetaContext, k K, nm proto.NameUtf8) error {
 
 // getMem returns an unexpired entry from the memory tier. An expired entry is
 // reported as a miss but left in place rather than deleted (no lock upgrade);
-// the Set or DB-warm that follows a miss overwrites it.
+// the Set or DB-warm that follows a miss overwrites it. GetStale relies on
+// expired entries staying, so don't evict them here.
 func (c *nameCache[K]) getMem(m MetaContext, k K) (proto.NameUtf8, bool) {
 	c.RLock()
 	defer c.RUnlock()

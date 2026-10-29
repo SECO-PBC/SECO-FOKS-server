@@ -24,6 +24,7 @@ func newNameCacheTestContext(t *testing.T) (MetaContext, clockwork.FakeClock) {
 	g.Cfg().TestSetLogTargets("stdout", "stderr")
 	g.Cfg().TestSetTestingMode()
 	require.NoError(t, g.Configure(ctx))
+	t.Cleanup(g.Shutdown)
 	clock := clockwork.NewFakeClockAt(time.Now())
 	g.SetClock(clock)
 	return NewMetaContextTODO(g), clock
@@ -72,4 +73,22 @@ func TestUsernameLoaderErrorWithoutCachedName(t *testing.T) {
 	fqu := proto.FQUser{Uid: core.RandomUID(), HostID: core.RandomHostID()}
 	_, _, err := NewUsernameLoader().Load(m, fqu, LoadUserArg{LoadMode: LoadModeOthers})
 	require.Error(t, err)
+}
+
+// TestUsernameLoaderPassesStaleTokenThrough: a stale team bearer token is
+// returned to the caller, which refreshes the token and retries, even when an
+// expired name is cached.
+func TestUsernameLoaderPassesStaleTokenThrough(t *testing.T) {
+	m, clock := newNameCacheTestContext(t)
+	fqu := proto.FQUser{Uid: core.RandomUID(), HostID: core.RandomHostID()}
+	u := NewUsernameLoader()
+	require.NoError(t, u.Set(m, fqu, "alice"))
+	clock.Advance(pastNameTTL)
+
+	_, _, err := u.staleOnError(m, fqu, core.TeamBearerTokenStaleError{})
+	require.ErrorAs(t, err, &core.TeamBearerTokenStaleError{})
+
+	nm, _, err := u.staleOnError(m, fqu, core.PermissionError("offline"))
+	require.NoError(t, err)
+	require.Equal(t, proto.NameUtf8("alice"), nm)
 }

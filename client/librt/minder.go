@@ -1763,6 +1763,7 @@ func (d *Minder) ResolveSenderNames(
 	error,
 ) {
 	ret := make(map[proto.UID]proto.NameUtf8)
+	tried := make(map[proto.UID]bool) // failures too, so each sender loads once
 	for i := range msgs {
 		sender := msgs[i].Sender
 		if sender == nil || !sender.IsUser() {
@@ -1772,9 +1773,10 @@ func (d *Minder) ResolveSenderNames(
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := ret[uid]; ok {
+		if tried[uid] {
 			continue
 		}
+		tried[uid] = true
 		nm, err := d.resolveSenderName(m, team, rtp, uid)
 		if err != nil {
 			continue
@@ -1839,6 +1841,16 @@ func (d *Minder) resolveSenderName(
 		m.Warnw("resolveSenderName", "stage", "nonStale", "uid", uid, "err", err)
 		return "", err
 	}
+	// The loader passes a stale-token error through, unlike other failures,
+	// so the refresh below can run; if the refresh or the retry fails, fall
+	// back to an expired cached name as the loader would have.
+	recoveryFailed := func(stage string, err error) (proto.NameUtf8, error) {
+		m.Warnw("resolveSenderName", "stage", stage, "uid", uid, "err", err)
+		if nm, ok := m.G().UsernameLoader().GetStale(m.Base(), fqu); ok {
+			return nm, nil
+		}
+		return "", err
+	}
 	// Stale token. If a concurrent resolve already refreshed the team, the
 	// shared node holds a new token -- just use it. Otherwise force one
 	// refresh; it lands in the node, so later resolves fast-path. ViewTok
@@ -1848,15 +1860,13 @@ func (d *Minder) resolveSenderName(
 	} else {
 		rtp, err := d.base.GetPartyForceRefresh(m.Base(), team)
 		if err != nil {
-			m.Warnw("resolveSenderName", "stage", "staleRefresh", "uid", uid, "err", err)
-			return "", err
+			return recoveryFailed("staleRefresh", err)
 		}
 		tok = rtp.PLCNode().ViewTok()
 	}
 	nm, err = load(tok)
 	if err != nil {
-		m.Warnw("resolveSenderName", "stage", "staleRetry", "uid", uid, "err", err)
-		return "", err
+		return recoveryFailed("staleRetry", err)
 	}
 	return nm, nil
 }

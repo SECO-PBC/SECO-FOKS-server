@@ -30,6 +30,7 @@ func TestResolveSenderNamesOffline(t *testing.T) {
 	g.Cfg().TestSetLogTargets("stdout", "stderr")
 	g.Cfg().TestSetTestingMode()
 	require.NoError(t, g.Configure(ctx))
+	t.Cleanup(g.Shutdown)
 	m := NewMetaContext(libclient.NewMetaContextTODO(g))
 
 	host := core.RandomHostID()
