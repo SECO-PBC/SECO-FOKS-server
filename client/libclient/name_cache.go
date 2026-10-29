@@ -67,6 +67,22 @@ func (c *nameCache[K]) Get(m MetaContext, k K) (proto.NameUtf8, bool) {
 	return c.getDb(m, k)
 }
 
+// GetStale returns a cached display name for k regardless of expiry, trying
+// the memory tier and then the soft DB. It's the fallback for when a fresh
+// load fails (e.g. the device is offline): the TTL bounds how long a name goes
+// without a refresh, not how long it may be shown. It never warms the memory
+// tier, so the next Get still misses and a later load can refresh the entry.
+func (c *nameCache[K]) GetStale(m MetaContext, k K) (proto.NameUtf8, bool) {
+	c.RLock()
+	ent, ok := c.m[k]
+	c.RUnlock()
+	if ok {
+		return ent.name, true
+	}
+	nm, _, ok := c.readDb(m, k)
+	return nm, ok
+}
+
 // Set records k -> name in both tiers, with a fresh jittered TTL. A DB-tier
 // write failure is returned but the memory tier is set regardless.
 func (c *nameCache[K]) Set(m MetaContext, k K, nm proto.NameUtf8) error {
@@ -88,7 +104,8 @@ func (c *nameCache[K]) Set(m MetaContext, k K, nm proto.NameUtf8) error {
 
 // getMem returns an unexpired entry from the memory tier. An expired entry is
 // reported as a miss but left in place rather than deleted (no lock upgrade);
-// the Set or DB-warm that follows a miss overwrites it.
+// the Set or DB-warm that follows a miss overwrites it. GetStale relies on
+// expired entries staying, so don't evict them here.
 func (c *nameCache[K]) getMem(m MetaContext, k K) (proto.NameUtf8, bool) {
 	c.RLock()
 	defer c.RUnlock()
@@ -112,22 +129,31 @@ func (c *nameCache[K]) putMem(k K, nm proto.NameUtf8, expiresAt time.Time) {
 }
 
 func (c *nameCache[K]) getDb(m MetaContext, k K) (proto.NameUtf8, bool) {
+	nm, writtenAt, ok := c.readDb(m, k)
+	if !ok {
+		return "", false
+	}
+	expiresAt := writtenAt.Add(jitteredNameTTL())
+	if !m.Now().Before(expiresAt) {
+		return "", false
+	}
+	c.putMem(k, nm, expiresAt)
+	return nm, true
+}
+
+// readDb returns k's soft-DB row and its write time, expired or not.
+func (c *nameCache[K]) readDb(m MetaContext, k K) (proto.NameUtf8, time.Time, bool) {
 	if c.rowAddr == nil {
-		return "", false // zero-value cache; see Set
+		return "", time.Time{}, false // zero-value cache; see Set
 	}
 	var nm proto.NameUtf8
 	scope, key := c.rowAddr(k)
 	tm, err := m.DbGet(&nm, DbTypeSoft, scope, c.typ, key)
 	if err != nil {
 		if !errors.Is(err, core.RowNotFoundError{}) {
-			m.Warnw("nameCache.getDb", "typ", c.typ, "key", k, "err", err)
+			m.Warnw("nameCache.readDb", "typ", c.typ, "key", k, "err", err)
 		}
-		return "", false
+		return "", time.Time{}, false
 	}
-	expiresAt := tm.Import().Add(jitteredNameTTL())
-	if !m.Now().Before(expiresAt) {
-		return "", false
-	}
-	c.putMem(k, nm, expiresAt)
-	return nm, true
+	return nm, tm.Import(), true
 }

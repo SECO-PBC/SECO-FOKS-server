@@ -1683,8 +1683,9 @@ func (p *rosterPackage) load(m MetaContext, l *TeamLoader) error {
 		// If we only need this member's username (MemberLoadNames), go
 		// through the UsernameLoader: a cache hit skips
 		// the user-chain load, concurrent loads of the same user are
-		// single-flighted, and if this call did perform the load we keep the
-		// wrapper anyway.
+		// single-flighted, a failed load falls back to an expired cached
+		// name, and if this call did perform the load we keep the wrapper
+		// anyway.
 		if l.Arg.MemberLoad < MemberLoadFull && !p.isRemote {
 			fqu := proto.FQUser{Uid: *uid, HostID: p.fqp.Host}
 			nm, uw, err := m.G().UsernameLoader().Load(m, fqu, arg)

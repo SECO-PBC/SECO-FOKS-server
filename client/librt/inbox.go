@@ -437,7 +437,14 @@ func (d *Minder) fillSnippet(
 	msg := msgs[0]
 	sn := snippet(msg.Body)
 	out.Snippet = &sn
-	out.LastSender = d.resolveSenderNameFromPartyIDShowError(m, cfgTeam, rtp, msg.Sender)
+	names, err := d.ResolveSenderNames(m, cfgTeam, rtp, msgs)
+	if err != nil {
+		m.Warnw("fillSnippet", "stage", "senderName", "chid", row.Md.Id, "err", err)
+		return
+	}
+	if nm := threadMessageToView(&msg, names).SenderName; nm != nil {
+		out.LastSender = *nm
+	}
 }
 
 // snippetMaxLen bounds the snippet payload shipped over the agent RPC; it is

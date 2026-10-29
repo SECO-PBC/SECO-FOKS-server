@@ -4,8 +4,10 @@
 package libclient
 
 import (
+	"errors"
 	"sync"
 
+	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 )
@@ -54,8 +56,13 @@ func NewUsernameLoader() *UsernameLoader {
 // on a failed load each waiter falls back to its own load with its own auth
 // arguments, since the winner's auth mode may not apply to them.
 //
+// If the load fails (e.g. the device is offline) and an expired name for fqu
+// is still cached, that name is returned instead of the error, except for a
+// stale team bearer token; see staleOnError. A fresh load still wins whenever it succeeds, and a stale
+// name is never shared with flight waiters.
+//
 // The returned UserWrapper is non-nil only when this call performed the load
-// itself; cache hits and flight waiters get (name, nil).
+// itself; cache hits, stale fallbacks and flight waiters get (name, nil).
 func (u *UsernameLoader) Load(
 	m MetaContext,
 	fqu proto.FQUser,
@@ -75,7 +82,11 @@ func (u *UsernameLoader) Load(
 		if f.ok {
 			return f.nm, nil, nil
 		}
-		return u.loadAndFill(m, fqu, arg)
+		nm, uw, err := u.loadAndFill(m, fqu, arg)
+		if err != nil {
+			return u.staleOnError(m, fqu, err)
+		}
+		return nm, uw, nil
 	}
 	defer u.retireFlight(fqu, f)
 
@@ -88,10 +99,33 @@ func (u *UsernameLoader) Load(
 
 	nm, uw, err := u.loadAndFill(m, fqu, arg)
 	if err != nil {
-		return "", nil, err
+		return u.staleOnError(m, fqu, err)
 	}
 	f.nm, f.ok = nm, true
 	return nm, uw, nil
+}
+
+// staleOnError falls back to an expired cached name for fqu after a failed
+// load, and returns err only when nothing is cached. Without it a device that
+// stays offline past the cache TTL loses every name it already knew.
+//
+// A stale team bearer token is passed through regardless: the caller cures it
+// by refreshing the token and loading again (see librt's resolveSenderName),
+// which a fallback here would skip, leaving the token and the name stale.
+func (u *UsernameLoader) staleOnError(
+	m MetaContext,
+	fqu proto.FQUser,
+	err error,
+) (proto.NameUtf8, *UserWrapper, error) {
+	if errors.As(err, &core.TeamBearerTokenStaleError{}) {
+		return "", nil, err
+	}
+	nm, ok := u.GetStale(m, fqu)
+	if !ok {
+		return "", nil, err
+	}
+	m.Warnw("UsernameLoader.Load", "stage", "staleFallback", "fqu", fqu, "err", err)
+	return nm, nil, nil
 }
 
 // joinFlight returns the in-flight slot for fqu, creating it (and returning

@@ -1763,6 +1763,7 @@ func (d *Minder) ResolveSenderNames(
 	error,
 ) {
 	ret := make(map[proto.UID]proto.NameUtf8)
+	tried := make(map[proto.UID]bool) // failures too, so each sender loads once
 	for i := range msgs {
 		sender := msgs[i].Sender
 		if sender == nil || !sender.IsUser() {
@@ -1772,53 +1773,24 @@ func (d *Minder) ResolveSenderNames(
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := ret[uid]; ok {
+		if tried[uid] {
 			continue
 		}
-		ret[uid] = d.resolveSenderNameFromUIDShowError(m, team, rtp, uid)
+		tried[uid] = true
+		nm, err := d.resolveSenderName(m, team, rtp, uid)
+		if err != nil {
+			continue
+		}
+		ret[uid] = nm
 	}
 	return ret, nil
 }
 
-func fmtNameUtf8Error(err error) proto.NameUtf8 {
-	return proto.NameUtf8(fmt.Sprintf("<error: %s>", err.Error()))
-}
-
-func (d *Minder) resolveSenderNameFromUIDShowError(
-	m MetaContext,
-	team lcl.ConfigTeam,
-	rtp *RTParty,
-	uid proto.UID,
-) proto.NameUtf8 {
-	nm, err := d.resolveSenderName(m, team, rtp, uid)
-	if err != nil {
-		return fmtNameUtf8Error(err)
-	}
-	return nm
-}
-
-func (d *Minder) resolveSenderNameFromPartyIDShowError(
-	m MetaContext,
-	team lcl.ConfigTeam,
-	rtp *RTParty,
-	partyID *proto.PartyID,
-) proto.NameUtf8 {
-	if partyID == nil {
-		return "<nil>"
-	}
-	if !partyID.IsUser() {
-		return "<non-user>"
-	}
-	uid, err := partyID.UID()
-	if err != nil {
-		return fmtNameUtf8Error(err)
-	}
-	return d.resolveSenderNameFromUIDShowError(m, team, rtp, uid)
-}
-
 // resolveSenderName returns the display name for a single sender UID, via the
 // UsernameLoader: cache tiers first, then a single-flighted user-chain load.
-// Returns false if the user can't be loaded. Ad-hoc teams live on
+// Returns an error if the user can't be loaded. The active user is named from
+// their own UserInfo with no load at all, so the viewer's own messages keep
+// their name offline even with a cold cache. Ad-hoc teams live on
 // open-viewership hosts and are loaded via LoadModeForAdHoc
 // (open-vhost-or-as-local-user), which resolves symmetrically for any
 // co-member; named teams use the team-mediated (AsLocalTeam) load via the VO
@@ -1839,8 +1811,12 @@ func (d *Minder) resolveSenderName(
 	proto.NameUtf8,
 	error,
 ) {
-	// The loader is keyed by FQUser; senders are always on the active user's
-	// host (see decryptAndVerifyMsg's HostMismatchError check).
+	// Senders are always on the active user's host (see decryptAndVerifyMsg's
+	// HostMismatchError check), so a UID match is the active user.
+	if info := d.au.UserInfo(); uid.Eq(info.Fqu.Uid) {
+		return info.Username.NameUtf8, nil
+	}
+	// The loader is keyed by FQUser, on the active user's host as above.
 	fqu := proto.FQUser{Uid: uid, HostID: d.au.HostID()}
 	loadMode := libclient.LoadModeOthers
 	if typ, err := team.GetT(); err == nil && typ == lcl.ConfigTeamType_AdHoc {
@@ -1865,6 +1841,16 @@ func (d *Minder) resolveSenderName(
 		m.Warnw("resolveSenderName", "stage", "nonStale", "uid", uid, "err", err)
 		return "", err
 	}
+	// The loader passes a stale-token error through, unlike other failures,
+	// so the refresh below can run; if the refresh or the retry fails, fall
+	// back to an expired cached name as the loader would have.
+	recoveryFailed := func(stage string, err error) (proto.NameUtf8, error) {
+		m.Warnw("resolveSenderName", "stage", stage, "uid", uid, "err", err)
+		if nm, ok := m.G().UsernameLoader().GetStale(m.Base(), fqu); ok {
+			return nm, nil
+		}
+		return "", err
+	}
 	// Stale token. If a concurrent resolve already refreshed the team, the
 	// shared node holds a new token -- just use it. Otherwise force one
 	// refresh; it lands in the node, so later resolves fast-path. ViewTok
@@ -1874,15 +1860,13 @@ func (d *Minder) resolveSenderName(
 	} else {
 		rtp, err := d.base.GetPartyForceRefresh(m.Base(), team)
 		if err != nil {
-			m.Warnw("resolveSenderName", "stage", "staleRefresh", "uid", uid, "err", err)
-			return "", err
+			return recoveryFailed("staleRefresh", err)
 		}
 		tok = rtp.PLCNode().ViewTok()
 	}
 	nm, err = load(tok)
 	if err != nil {
-		m.Warnw("resolveSenderName", "stage", "staleRetry", "uid", uid, "err", err)
-		return "", err
+		return recoveryFailed("staleRetry", err)
 	}
 	return nm, nil
 }
