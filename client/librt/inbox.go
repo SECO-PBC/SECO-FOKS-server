@@ -384,6 +384,8 @@ func (d *Minder) renderInboxRow(
 		Muted:        row.Muted,
 		// fork-only (cross-device-read-sync)
 		ExplicitReadThrough: row.ExplicitReadThrough,
+		// fork-only (dm-read-receipts)
+		PeerReadThrough: row.PeerReadThrough,
 	}
 
 	// Team display name, via the teamname cache -- the GetParty above fills it

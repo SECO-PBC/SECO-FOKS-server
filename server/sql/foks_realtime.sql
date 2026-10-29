@@ -248,6 +248,11 @@ CREATE TABLE user_channels (
      * column order matches what ADD COLUMN produces on a migrated database.
      */
     explicit_read_through BIGINT NOT NULL DEFAULT 0,
+    /*
+     * Fork-only (p11): this row's user marked the channel as a 1:1 DM
+     * (RTReadThroughArg.dm). Read receipts flow only where both rows are.
+     */
+    receipts BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY(short_host_id, channel_id, uid),
     FOREIGN KEY(short_host_id, channel_id) REFERENCES channels(short_host_id, channel_id)
 );
@@ -274,6 +279,8 @@ CREATE TABLE user_inbox (
     app_id app_id NOT NULL,
     inbox_version BIGINT NOT NULL,
     mtime TIMESTAMPTZ NOT NULL,
+    /* Fork-only (p11): the user's Read receipts switch is off. */
+    read_receipts_off BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY(short_host_id, uid, app_id)
 );
 
@@ -366,3 +373,4 @@ INSERT INTO schema_patches (id, ctime) VALUES (7, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (8, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (9, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (10, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (11, NOW());

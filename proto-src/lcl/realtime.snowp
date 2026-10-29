@@ -121,6 +121,8 @@ struct RTInboxRowView {
     // FORK-ONLY (cross-device-read-sync). rem.RTInboxChannel.explicitReadThrough,
     // raised by this device's own explicit marks still queued offline.
     explicitReadThrough @13 : lib.RTMsgSeq;
+    // FORK-ONLY (dm-read-receipts). rem.RTInboxChannel.peerReadThrough.
+    peerReadThrough @14 : lib.RTMsgSeq;
 }
 
 // The viewer's inbox, rendered entirely from local storage.
@@ -314,6 +316,8 @@ struct RTReadThroughPendingEntry {
     // FORK-ONLY (cross-device-read-sync). Replayed as an explicit mark; a
     // channel can hold one explicit and one implicit entry.
     explicit @2 : Bool;
+    // FORK-ONLY (dm-read-receipts). Replayed with RTReadThroughArg.dm.
+    dm @3 : Bool;
 }
 
 struct RTReadThroughPendingSet {

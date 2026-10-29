@@ -26,7 +26,9 @@ import (
 // Fork-only (cross-device-read-sync): an explicit mark -- the user read the
 // channel, not a client marking a fetched page -- is its own entry, so a
 // channel holds at most one explicit and one implicit mark, and an explicit
-// read made offline replays as explicit.
+// read made offline replays as explicit. Fork-only (dm-read-receipts): an
+// entry also keeps whether any read it subsumes was marked as a DM's, so the
+// replay still marks the caller's row.
 
 // pendingKey is what a pending entry is unique by.
 type pendingKey struct {
@@ -58,6 +60,7 @@ func compactMarks(set *lcl.RTReadThroughPendingSet) {
 			if e.Seq > kept[i].Seq {
 				kept[i].Seq = e.Seq
 			}
+			kept[i].Dm = kept[i].Dm || e.Dm
 			continue
 		}
 		seen[keyOf(e)] = len(kept)
@@ -73,6 +76,7 @@ func (d *Minder) queuePendingMark(
 	chid proto.RTChannelID,
 	seq proto.RTMsgSeq,
 	explicit bool,
+	dm bool,
 ) error {
 	lk, err := d.lockOutbox(m)
 	if err != nil {
@@ -87,10 +91,13 @@ func (d *Minder) queuePendingMark(
 	compactMarks(&set)
 	for i := range set.Entries {
 		if set.Entries[i].Chid == chid && set.Entries[i].Explicit == explicit {
-			if set.Entries[i].Seq >= seq {
+			if set.Entries[i].Seq >= seq && (set.Entries[i].Dm || !dm) {
 				return nil
 			}
-			set.Entries[i].Seq = seq
+			if seq > set.Entries[i].Seq {
+				set.Entries[i].Seq = seq
+			}
+			set.Entries[i].Dm = set.Entries[i].Dm || dm
 			return d.dbPutPendingMarks(m, &set)
 		}
 	}
@@ -98,6 +105,7 @@ func (d *Minder) queuePendingMark(
 		Chid:     chid,
 		Seq:      seq,
 		Explicit: explicit,
+		Dm:       dm,
 	})
 	return d.dbPutPendingMarks(m, &set)
 }
@@ -146,11 +154,13 @@ func (d *Minder) attemptReadThrough(
 	chid proto.RTChannelID,
 	seq proto.RTMsgSeq,
 	explicit bool,
+	dm bool,
 ) error {
 	arg := rem.RTReadThroughArg{
 		ChannelID: chid,
 		Seq:       seq,
 		Explicit:  explicit,
+		Dm:        dm,
 	}
 	if d.testHooks != nil && d.testHooks.ReadThroughRPC != nil {
 		return d.testHooks.ReadThroughRPC(m, arg)
@@ -180,7 +190,7 @@ func (d *Minder) drainPendingMarks(
 		if only != nil && e.Chid != *only {
 			continue
 		}
-		err := d.attemptReadThrough(m, e.Chid, e.Seq, e.Explicit)
+		err := d.attemptReadThrough(m, e.Chid, e.Seq, e.Explicit, e.Dm)
 		if err != nil {
 			if core.IsTransportError(err) {
 				replayErr = err
