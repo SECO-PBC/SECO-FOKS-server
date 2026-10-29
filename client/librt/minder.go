@@ -1775,50 +1775,20 @@ func (d *Minder) ResolveSenderNames(
 		if _, ok := ret[uid]; ok {
 			continue
 		}
-		ret[uid] = d.resolveSenderNameFromUIDShowError(m, team, rtp, uid)
+		nm, err := d.resolveSenderName(m, team, rtp, uid)
+		if err != nil {
+			continue
+		}
+		ret[uid] = nm
 	}
 	return ret, nil
 }
 
-func fmtNameUtf8Error(err error) proto.NameUtf8 {
-	return proto.NameUtf8(fmt.Sprintf("<error: %s>", err.Error()))
-}
-
-func (d *Minder) resolveSenderNameFromUIDShowError(
-	m MetaContext,
-	team lcl.ConfigTeam,
-	rtp *RTParty,
-	uid proto.UID,
-) proto.NameUtf8 {
-	nm, err := d.resolveSenderName(m, team, rtp, uid)
-	if err != nil {
-		return fmtNameUtf8Error(err)
-	}
-	return nm
-}
-
-func (d *Minder) resolveSenderNameFromPartyIDShowError(
-	m MetaContext,
-	team lcl.ConfigTeam,
-	rtp *RTParty,
-	partyID *proto.PartyID,
-) proto.NameUtf8 {
-	if partyID == nil {
-		return "<nil>"
-	}
-	if !partyID.IsUser() {
-		return "<non-user>"
-	}
-	uid, err := partyID.UID()
-	if err != nil {
-		return fmtNameUtf8Error(err)
-	}
-	return d.resolveSenderNameFromUIDShowError(m, team, rtp, uid)
-}
-
 // resolveSenderName returns the display name for a single sender UID, via the
 // UsernameLoader: cache tiers first, then a single-flighted user-chain load.
-// Returns false if the user can't be loaded. Ad-hoc teams live on
+// Returns an error if the user can't be loaded. The active user is named from
+// their own UserInfo with no load at all, so the viewer's own messages keep
+// their name offline even with a cold cache. Ad-hoc teams live on
 // open-viewership hosts and are loaded via LoadModeForAdHoc
 // (open-vhost-or-as-local-user), which resolves symmetrically for any
 // co-member; named teams use the team-mediated (AsLocalTeam) load via the VO
@@ -1839,8 +1809,12 @@ func (d *Minder) resolveSenderName(
 	proto.NameUtf8,
 	error,
 ) {
-	// The loader is keyed by FQUser; senders are always on the active user's
-	// host (see decryptAndVerifyMsg's HostMismatchError check).
+	// Senders are always on the active user's host (see decryptAndVerifyMsg's
+	// HostMismatchError check), so a UID match is the active user.
+	if info := d.au.UserInfo(); uid.Eq(info.Fqu.Uid) {
+		return info.Username.NameUtf8, nil
+	}
+	// The loader is keyed by FQUser, on the active user's host as above.
 	fqu := proto.FQUser{Uid: uid, HostID: d.au.HostID()}
 	loadMode := libclient.LoadModeOthers
 	if typ, err := team.GetT(); err == nil && typ == lcl.ConfigTeamType_AdHoc {
