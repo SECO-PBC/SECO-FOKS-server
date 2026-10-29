@@ -62,62 +62,46 @@ func (c *channelMuter) run(m shared.MetaContext) error {
 		return err
 	}
 
-	tag, err := c.tx.Exec(
+	// The current value, under the row lock: a missing row means the caller
+	// was never fanned into this channel.
+	var muted bool
+	err = c.tx.QueryRow(
 		m.Ctx(),
-		`UPDATE user_channels
-		 SET muted=$4, mtime=NOW()
+		`SELECT muted FROM user_channels
 		 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3
-		   AND muted <> $4`,
+		 FOR UPDATE`,
 		m.ShortHostID(),
 		c.channelID(),
 		c.uid.ExportToDB(),
-		c.arg.Muted,
-	)
+	).Scan(&muted)
+	if err == pgx.ErrNoRows {
+		return core.RowNotFoundError{}
+	}
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		// Already at this value (a no-op, bumping nothing), or no delivery
-		// row at all.
-		var one int
-		err = c.tx.QueryRow(
-			m.Ctx(),
-			`SELECT 1 FROM user_channels
-			 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3`,
-			m.ShortHostID(),
-			c.channelID(),
-			c.uid.ExportToDB(),
-		).Scan(&one)
-		if err == pgx.ErrNoRows {
-			return core.RowNotFoundError{}
-		}
-		return err
+	if muted == c.arg.Muted {
+		// Already at this value: a no-op, bumping nothing.
+		return nil
 	}
 
+	// ONE update of the row, with the stamp folded in: a second UPDATE of it
+	// would re-run its foreign-key check and deadlock against a send (see
+	// readThroughMarker.run).
 	c.changed = true
-	var vers int64
-	err = c.tx.QueryRow(
-		m.Ctx(),
-		`INSERT INTO user_inbox (short_host_id, uid, app_id, inbox_version, mtime)
-		 VALUES ($1, $2, $3, 1, NOW())
-		 ON CONFLICT (short_host_id, uid, app_id)
-		 DO UPDATE SET inbox_version = user_inbox.inbox_version + 1, mtime = NOW()
-		 RETURNING inbox_version`,
-		m.ShortHostID(),
-		c.uid.ExportToDB(),
-		c.appDB,
-	).Scan(&vers)
+	vers, err := bumpInbox(m, c.tx, c.uid, c.appDB)
 	if err != nil {
 		return err
 	}
 	_, err = c.tx.Exec(
 		m.Ctx(),
 		`UPDATE user_channels
-		 SET inbox_version=$4
+		 SET muted=$4, inbox_version=$5, mtime=NOW()
 		 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3`,
 		m.ShortHostID(),
 		c.channelID(),
 		c.uid.ExportToDB(),
+		c.arg.Muted,
 		vers,
 	)
 	return err

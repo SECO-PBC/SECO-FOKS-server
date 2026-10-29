@@ -3,11 +3,12 @@
 // The contract: a muted member gets no push_outbox row from a send or a
 // notify, and nothing else about the channel changes for them. The flag is
 // set only by its owner, a change reaches their other devices through an
-// inbox-version bump, and a channel created startMuted pushes nobody but its
-// creator until they unmute.
+// inbox-version bump, a channel created startMuted pushes nobody but its
+// creator until they unmute, and a mute racing a send never deadlocks.
 package lib
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/foks-proj/go-foks/client/librt"
@@ -140,4 +141,42 @@ func TestPushNotifySkipsMuted(t *testing.T) {
 	}))
 	require.Equal(t, queued(1), sc.pushRowsByStatus(t, ch, sc.alice))
 	require.Empty(t, sc.pushRowsByStatus(t, ch, sc.cleo))
+}
+
+// A mute takes the caller's user_inbox row lock, and a send to the channel
+// holds the channels row FOR UPDATE while it waits for that same lock. The
+// mute must therefore update its delivery row once: a second UPDATE of a row
+// this transaction already wrote re-runs the foreign-key check, which wants a
+// KEY SHARE lock on that channels row -- a deadlock (40P01) that RetryTx2 does
+// not retry.
+func TestSetChannelMutedRacingSendDoesNotDeadlock(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	sc.grant(t, sc.alice, sc.bob, false)
+
+	// One send per round: librt queues a send behind an earlier one still in
+	// flight in the same channel, so parallel sends from one client would
+	// test its outbox rather than this race.
+	const rounds = 20
+	errs := make(chan error, 2*rounds)
+	for i := 0; i < rounds; i++ {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func(muted bool) {
+			defer wg.Done()
+			errs <- sc.setMuted(t, sc.bob, sc.chid, muted)
+		}(i%2 == 0)
+		go func() {
+			defer wg.Done()
+			_, err := sc.alice.minder.Send(sc.alice.m, sc.teamCfg(), proto.RTAppID_Chat,
+				sc.spec(), []byte("round"))
+			errs <- err
+		}()
+		wg.Wait()
+	}
+	close(errs)
+	for err := range errs {
+		require.False(t, isDeadlock(err), "deadlock: %v", err)
+		require.NoError(t, err)
+	}
+	sc.requireRTInvariants(t)
 }

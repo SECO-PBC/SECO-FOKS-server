@@ -285,7 +285,7 @@ var queryAllowlist = map[string]allowedQueries{
 		"both members marked as a DM (dm-read-receipts), so the caller learns another member's " +
 		"read position only where both apps consented. Rows the caller cannot read are dropped " +
 		"with the rest of the row (aclMember / team re-authorization)"},
-	"channelMuter.run": {3, "calls authorizeChannel(accessRead) before anything else; touches only the caller's own row"},
+	"channelMuter.run": {2, "calls authorizeChannel(accessRead) before anything else; touches only the caller's own row"},
 
 	// --- shared SQL fragments (top-level consts). The functions that
 	// interpolate these carry no protected-table reference of their own, so
