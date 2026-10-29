@@ -245,12 +245,14 @@ type RTReadThroughArg struct {
 	ChannelID lib.RTChannelID
 	Seq       lib.RTMsgSeq
 	Explicit  bool
+	Dm        bool
 }
 type RTReadThroughArgInternal__ struct {
 	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
 	ChannelID *lib.RTChannelIDInternal__
 	Seq       *lib.RTMsgSeqInternal__
 	Explicit  *bool
+	Dm        *bool
 }
 
 func (r RTReadThroughArgInternal__) Import() RTReadThroughArg {
@@ -273,6 +275,12 @@ func (r RTReadThroughArgInternal__) Import() RTReadThroughArg {
 			}
 			return *x
 		})(r.Explicit),
+		Dm: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Dm),
 	}
 }
 func (r RTReadThroughArg) Export() *RTReadThroughArgInternal__ {
@@ -280,6 +288,7 @@ func (r RTReadThroughArg) Export() *RTReadThroughArgInternal__ {
 		ChannelID: r.ChannelID.Export(),
 		Seq:       r.Seq.Export(),
 		Explicit:  &r.Explicit,
+		Dm:        &r.Dm,
 	}
 }
 func (r *RTReadThroughArg) Encode(enc rpc.Encoder) error {
@@ -1117,6 +1126,7 @@ type RTInboxChannel struct {
 	Hidden              bool
 	Muted               bool
 	ExplicitReadThrough lib.RTMsgSeq
+	PeerReadThrough     lib.RTMsgSeq
 }
 type RTInboxChannelInternal__ struct {
 	_struct             struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -1126,6 +1136,7 @@ type RTInboxChannelInternal__ struct {
 	Hidden              *bool
 	Muted               *bool
 	ExplicitReadThrough *lib.RTMsgSeqInternal__
+	PeerReadThrough     *lib.RTMsgSeqInternal__
 }
 
 func (r RTInboxChannelInternal__) Import() RTInboxChannel {
@@ -1166,6 +1177,12 @@ func (r RTInboxChannelInternal__) Import() RTInboxChannel {
 			}
 			return x.Import()
 		})(r.ExplicitReadThrough),
+		PeerReadThrough: (func(x *lib.RTMsgSeqInternal__) (ret lib.RTMsgSeq) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.PeerReadThrough),
 	}
 }
 func (r RTInboxChannel) Export() *RTInboxChannelInternal__ {
@@ -1176,6 +1193,7 @@ func (r RTInboxChannel) Export() *RTInboxChannelInternal__ {
 		Hidden:              &r.Hidden,
 		Muted:               &r.Muted,
 		ExplicitReadThrough: r.ExplicitReadThrough.Export(),
+		PeerReadThrough:     r.PeerReadThrough.Export(),
 	}
 }
 func (r *RTInboxChannel) Encode(enc rpc.Encoder) error {
@@ -2719,6 +2737,93 @@ func (r *RtSetChannelMutedArg) Decode(dec rpc.Decoder) error {
 
 func (r *RtSetChannelMutedArg) Bytes() []byte { return nil }
 
+type RtSetReadReceiptsArg struct {
+	AppID lib.RTAppID
+	On    bool
+}
+type RtSetReadReceiptsArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	AppID   *lib.RTAppIDInternal__
+	On      *bool
+}
+
+func (r RtSetReadReceiptsArgInternal__) Import() RtSetReadReceiptsArg {
+	return RtSetReadReceiptsArg{
+		AppID: (func(x *lib.RTAppIDInternal__) (ret lib.RTAppID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.AppID),
+		On: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.On),
+	}
+}
+func (r RtSetReadReceiptsArg) Export() *RtSetReadReceiptsArgInternal__ {
+	return &RtSetReadReceiptsArgInternal__{
+		AppID: r.AppID.Export(),
+		On:    &r.On,
+	}
+}
+func (r *RtSetReadReceiptsArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RtSetReadReceiptsArg) Decode(dec rpc.Decoder) error {
+	var tmp RtSetReadReceiptsArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RtSetReadReceiptsArg) Bytes() []byte { return nil }
+
+type RtGetReadReceiptsArg struct {
+	AppID lib.RTAppID
+}
+type RtGetReadReceiptsArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	AppID   *lib.RTAppIDInternal__
+}
+
+func (r RtGetReadReceiptsArgInternal__) Import() RtGetReadReceiptsArg {
+	return RtGetReadReceiptsArg{
+		AppID: (func(x *lib.RTAppIDInternal__) (ret lib.RTAppID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.AppID),
+	}
+}
+func (r RtGetReadReceiptsArg) Export() *RtGetReadReceiptsArgInternal__ {
+	return &RtGetReadReceiptsArgInternal__{
+		AppID: r.AppID.Export(),
+	}
+}
+func (r *RtGetReadReceiptsArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *RtGetReadReceiptsArg) Decode(dec rpc.Decoder) error {
+	var tmp RtGetReadReceiptsArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *RtGetReadReceiptsArg) Bytes() []byte { return nil }
+
 type RealTimeInterface interface {
 	RtNewChannel(context.Context, RtNewChannelArg) error
 	RtGetChannel(context.Context, lib.RTChannelID) (RTChannelMetadata, error)
@@ -2742,6 +2847,8 @@ type RealTimeInterface interface {
 	RtUpdateChannel(context.Context, RtUpdateChannelArg) error
 	RtSetChannelArchived(context.Context, RtSetChannelArchivedArg) error
 	RtSetChannelMuted(context.Context, RtSetChannelMutedArg) error
+	RtSetReadReceipts(context.Context, RtSetReadReceiptsArg) error
+	RtGetReadReceipts(context.Context, lib.RTAppID) (bool, error)
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h lib.Header) error
 	MakeResHeader() lib.Header
@@ -3278,6 +3385,50 @@ func (c RealTimeClient) RtSetChannelMuted(ctx context.Context, arg RtSetChannelM
 			return
 		}
 	}
+	return
+}
+func (c RealTimeClient) RtSetReadReceipts(ctx context.Context, arg RtSetReadReceiptsArg) (err error) {
+	warg := &rpc.DataWrap[lib.Header, *RtSetReadReceiptsArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, interface{}]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(RealTimeProtocolID, 210, "RealTime.rtSetReadReceipts"), warg, &tmp, 0*time.Millisecond, realTimeErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+func (c RealTimeClient) RtGetReadReceipts(ctx context.Context, appID lib.RTAppID) (res bool, err error) {
+	arg := RtGetReadReceiptsArg{
+		AppID: appID,
+	}
+	warg := &rpc.DataWrap[lib.Header, *RtGetReadReceiptsArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, bool]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(RealTimeProtocolID, 211, "RealTime.rtGetReadReceipts"), warg, &tmp, 0*time.Millisecond, realTimeErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	res = tmp.Data
 	return
 }
 func RealTimeProtocol(i RealTimeInterface) rpc.ProtocolV2 {
@@ -3921,6 +4072,63 @@ func RealTimeProtocol(i RealTimeInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "rtSetChannelMuted",
+			},
+			210: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *RtSetReadReceiptsArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *RtSetReadReceiptsArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *RtSetReadReceiptsArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						err := i.RtSetReadReceipts(ctx, (typedArg.Import()))
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[lib.Header, interface{}]{
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "rtSetReadReceipts",
+			},
+			211: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *RtGetReadReceiptsArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *RtGetReadReceiptsArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *RtGetReadReceiptsArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						tmp, err := i.RtGetReadReceipts(ctx, (typedArg.Import()).AppID)
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[lib.Header, bool]{
+							Data:   tmp,
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "rtGetReadReceipts",
 			},
 		},
 		WrapError: RealTimeMakeGenericErrorWrapper(i.ErrorWrapper()),

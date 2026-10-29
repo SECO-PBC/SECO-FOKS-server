@@ -21,7 +21,7 @@ import (
 
 func (s *privScene) markRead(t *testing.T, by *privActor, chid proto.RTChannelID, seq proto.RTMsgSeq) {
 	require.NoError(t, by.minder.MarkRead(by.m, s.teamCfg(), proto.RTAppID_Chat,
-		lcl.NewRTChannelSpecifierWithId(chid), seq))
+		lcl.NewRTChannelSpecifierWithId(chid), seq, false))
 }
 
 func (s *privScene) readThrough(t *testing.T, by *privActor, chid proto.RTChannelID, seq proto.RTMsgSeq) {

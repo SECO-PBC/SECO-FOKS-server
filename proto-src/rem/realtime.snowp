@@ -57,6 +57,12 @@ struct RTReadThroughArg {
     // explicit pointer (RTInboxChannel.explicitReadThrough) and settles the
     // user's pushes in the channel. Older clients never set it.
     explicit @2 : Bool;
+    // FORK-ONLY (dm-read-receipts). The caller's app says this channel is a
+    // 1:1 DM: marks the CALLER's own delivery row (user_channels.receipts).
+    // A member's explicit pointer reaches the other member only on a
+    // two-member channel whose rows are both marked. Older clients never set
+    // it.
+    dm @3 : Bool;
 }
 
 // Long-poll subscription: blocks until inbox advances or timeout. Stand-in
@@ -197,6 +203,10 @@ struct RTInboxChannel {
     // (RTReadThroughArg.explicit) or sent; page fetches never move it, so it
     // is the read state other devices follow. 0 = none yet.
     explicitReadThrough @5 : lib.RTMsgSeq;
+    // FORK-ONLY (dm-read-receipts). The other member's explicitReadThrough,
+    // only on a two-member channel both members marked as a DM
+    // (RTReadThroughArg.dm) with neither one's read receipts off; 0 otherwise.
+    peerReadThrough @6 : lib.RTMsgSeq;
 }
 
 // "What changed since lastInboxVersion" snapshot.
@@ -427,4 +437,18 @@ protocol RealTime
         channelID @0 : lib.RTChannelID,
         muted @1 : Bool
     );
+
+    // FORK-ONLY (dm-read-receipts). Set the CALLER's Read receipts switch:
+    // off withholds RTInboxChannel.peerReadThrough both ways on every one of
+    // their DMs. A change bumps both members of each qualifying DM so every
+    // receipt appears or vanishes at once; the same value again is a no-op.
+    rtSetReadReceipts @210 (
+        appID @0 : lib.RTAppID,
+        on @1 : Bool
+    );
+
+    // FORK-ONLY (dm-read-receipts). The caller's Read receipts switch.
+    rtGetReadReceipts @211 (
+        appID @0 : lib.RTAppID
+    ) -> Bool;
 }

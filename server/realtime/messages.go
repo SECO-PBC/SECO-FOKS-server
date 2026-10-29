@@ -596,8 +596,13 @@ func wakeInboxPollers(m shared.MetaContext, app proto.RTAppID, uids []proto.UID)
 // and, if the pointer actually moved, bumps the caller's global inbox version
 // and stamps their user_channels row at it -- exactly as a delivery would (see
 // "read_through" in chat-server-design.md). That's how the caller's *other*
-// devices learn the read state on their next inbox sync. Unlike the send
-// fanout, only the calling user's rows are touched.
+// devices learn the read state on their next inbox sync.
+//
+// Fork-only (dm-read-receipts): with arg.Dm it also marks the caller's row as
+// a 1:1 DM, and in a channel that then qualifies for read receipts (see
+// receipts.go) a moved explicit pointer, or the mark itself, also bumps the
+// OTHER member's inbox and stamps their row, so their sync returns the new
+// peerReadThrough.
 type readThroughMarker struct {
 	arg    rem.RTReadThroughArg
 	reader proto.UID
@@ -611,10 +616,11 @@ type readThroughMarker struct {
 	appID      string
 	app        proto.RTAppID
 
-	// bumped records whether the pointer actually advanced (and hence the
-	// caller's inbox version was bumped); a stale mark leaves it false and
-	// must not wake any pollers.
+	// bumped records whether the caller's inbox version was bumped; a stale
+	// mark leaves it false and must not wake any pollers.
 	bumped bool
+	// peerBumped is the other member, when their inbox was bumped too.
+	peerBumped *proto.UID
 }
 
 func (r *readThroughMarker) channelID() int64 { return r.arg.ChannelID.Short().Int64() }
@@ -659,45 +665,52 @@ func (r *readThroughMarker) run(m shared.MetaContext) error {
 		return core.BadArgsError("read-through seq exceeds last message")
 	}
 
-	// Take the user_inbox row lock BEFORE touching user_channels, without
-	// bumping it. Every other writer in this package locks user_inbox first
-	// (fanoutInboxVersions says so explicitly; so do the channel-creation
-	// fanout, the metadata mutations and the revoke path), and this path used
-	// to be the one exception: it updated user_channels and only then bumped
-	// user_inbox, so a concurrent send or revoke holding the inbox row and
-	// waiting for the membership row deadlocked against it.
-	//
-	// A plain SELECT ... FOR UPDATE rather than moving the bump up, because
-	// the bump must stay conditional -- see the monotonicity note below.
-	// Anyone with a user_channels row has a user_inbox row (fanUserIntoChannel
-	// writes the inbox row first), so this finds one whenever the update below
-	// can succeed; when it finds none, the update below fails anyway.
-	var lockedVers int64
-	err = r.tx.QueryRow(
-		m.Ctx(),
-		`SELECT inbox_version FROM user_inbox
-		 WHERE short_host_id=$1 AND uid=$2 AND app_id=$3
-		 FOR UPDATE`,
-		m.ShortHostID(),
-		r.reader.ExportToDB(),
-		r.appID,
-	).Scan(&lockedVers)
-	if err != nil && err != pgx.ErrNoRows {
+	// Read receipts: a channel that can qualify is a two-row one whose other
+	// row is marked, with the caller's row marked or about to be. Then both
+	// members' user_inbox rows are locked in one ascending-uid statement --
+	// the order sends use -- so two members reading their DM at once, or a
+	// read racing a send to both, cannot deadlock.
+	pair, err := loadDmPair(m, r.tx, r.channelID(), r.reader)
+	if err != nil {
 		return err
 	}
+	if pair != nil && !(pair.peerMarked && (pair.callerMarked || r.arg.Dm)) {
+		pair = nil
+	}
+
+	// Take the user_inbox row lock(s) BEFORE touching user_channels, without
+	// bumping. Every other writer in this package locks user_inbox first
+	// (fanoutInboxVersions says so explicitly; so do the channel-creation
+	// fanout, the metadata mutations and the revoke path). The bump must stay
+	// conditional -- see the monotonicity note below. Anyone with a
+	// user_channels row has a user_inbox row (fanUserIntoChannel writes the
+	// inbox row first), so this finds one whenever the update below can
+	// succeed; when it finds none, the update below fails anyway.
+	locked := []proto.UID{r.reader}
+	if pair != nil {
+		locked = append(locked, pair.peer)
+		sortUIDs(locked)
+	}
+	off, err := lockInboxes(m, r.tx, r.appID, locked)
+	if err != nil {
+		return err
+	}
+	receiptsOn := pair != nil &&
+		!off[string(r.reader.ExportToDB())] && !off[string(pair.peer.ExportToDB())]
 
 	// Both pointers, under the row lock: a missing row means the user was never
 	// fanned into this channel.
 	var readThrough, explicitThrough int64
+	var marked bool
 	err = r.tx.QueryRow(
 		m.Ctx(),
-		`SELECT read_through, explicit_read_through FROM user_channels
+		`SELECT read_through, explicit_read_through, receipts FROM user_channels
 		 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3
 		 FOR UPDATE`,
 		m.ShortHostID(),
 		r.channelID(),
 		r.reader.ExportToDB(),
-	).Scan(&readThrough, &explicitThrough)
+	).Scan(&readThrough, &explicitThrough, &marked)
 	if err == pgx.ErrNoRows {
 		return core.RowNotFoundError{}
 	}
@@ -709,10 +722,29 @@ func (r *readThroughMarker) run(m shared.MetaContext) error {
 	// current pointer) is a no-op and must NOT bump the inbox version, or
 	// out-of-order marks from racing devices would churn every device's sync.
 	// An explicit mark (fork-only, cross-device-read-sync) moves both
-	// pointers; any other moves only read_through.
+	// pointers; any other moves only read_through. Marking the row as a DM is
+	// a change of its own: the first dm read after an update usually carries
+	// a seq the pointer has already reached.
 	explicitMoved := r.arg.Explicit && seq > explicitThrough
-	if seq <= readThrough && !explicitMoved {
+	newlyMarked := r.arg.Dm && !marked
+	if seq <= readThrough && !explicitMoved && !newlyMarked {
 		return nil
+	}
+
+	// Something moved: bump the caller's global inbox version and stamp this
+	// row at it, "like a send would do" (chat-server-design.md), so the
+	// caller's other devices pick the read state up on their next sync.
+	//
+	// ONE update of the row, with the stamp folded in. A second UPDATE of a
+	// row this transaction already updated re-runs its foreign-key check
+	// (Postgres skips it only for a row another transaction wrote), which
+	// takes a KEY SHARE lock on the channels row -- and a send holds that row
+	// FOR UPDATE while it waits for this reader's user_inbox row: a deadlock
+	// on every read racing a send in the same channel.
+	r.bumped = true
+	vers, err := bumpInbox(m, r.tx, r.reader, r.appID)
+	if err != nil {
+		return err
 	}
 	_, err = r.tx.Exec(
 		m.Ctx(),
@@ -720,6 +752,8 @@ func (r *readThroughMarker) run(m shared.MetaContext) error {
 		 SET read_through=GREATEST(read_through, $4),
 		     explicit_read_through=CASE WHEN $5 THEN GREATEST(explicit_read_through, $4)
 		                                ELSE explicit_read_through END,
+		     receipts = receipts OR $6,
+		     inbox_version=$7,
 		     mtime=NOW()
 		 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3`,
 		m.ShortHostID(),
@@ -727,6 +761,8 @@ func (r *readThroughMarker) run(m shared.MetaContext) error {
 		r.reader.ExportToDB(),
 		seq,
 		explicitMoved,
+		newlyMarked,
+		vers,
 	)
 	if err != nil {
 		return err
@@ -738,36 +774,16 @@ func (r *readThroughMarker) run(m shared.MetaContext) error {
 		}
 	}
 
-	// The pointer moved: bump the caller's global inbox version and stamp this
-	// row at it, "like a send would do" (chat-server-design.md), so the
-	// caller's other devices pick the read state up on their next sync.
-	r.bumped = true
-	var vers int64
-	err = r.tx.QueryRow(
-		m.Ctx(),
-		`INSERT INTO user_inbox (short_host_id, uid, app_id, inbox_version, mtime)
-		 VALUES ($1, $2, $3, 1, NOW())
-		 ON CONFLICT (short_host_id, uid, app_id)
-		 DO UPDATE SET inbox_version = user_inbox.inbox_version + 1, mtime = NOW()
-		 RETURNING inbox_version`,
-		m.ShortHostID(),
-		r.reader.ExportToDB(),
-		r.appID,
-	).Scan(&vers)
-	if err != nil {
-		return err
+	// The other member sees this read, or the receipts the mark just turned
+	// on, only through their own row's peerReadThrough.
+	if receiptsOn && (explicitMoved || newlyMarked) {
+		err = bumpAndStamp(m, r.tx, pair.peer, r.appID, r.channelID())
+		if err != nil {
+			return err
+		}
+		r.peerBumped = &pair.peer
 	}
-	_, err = r.tx.Exec(
-		m.Ctx(),
-		`UPDATE user_channels
-		 SET inbox_version=$4
-		 WHERE short_host_id=$1 AND channel_id=$2 AND uid=$3`,
-		m.ShortHostID(),
-		r.channelID(),
-		r.reader.ExportToDB(),
-		vers,
-	)
-	return err
+	return nil
 }
 
 // MarkReadThrough advances the authenticated user's (m.UID()) read pointer in
@@ -805,9 +821,14 @@ func MarkReadThrough(
 				return nil, nil
 			}
 			// Once the bump commits, wake the caller's own parked pollers
-			// (their other devices).
+			// (their other devices), and the other member's when their row
+			// was stamped too (dm-read-receipts).
+			woken := []proto.UID{r.reader}
+			if r.peerBumped != nil {
+				woken = append(woken, *r.peerBumped)
+			}
 			return func(m shared.MetaContext) {
-				wakeInboxPollers(m, r.app, []proto.UID{r.reader})
+				wakeInboxPollers(m, r.app, woken)
 			}, nil
 		},
 	)

@@ -199,6 +199,16 @@ func (c *ClientConn) RtSetChannelMuted(ctx context.Context, arg rem.RtSetChannel
 	return SetChannelMuted(m, arg)
 }
 
+func (c *ClientConn) RtSetReadReceipts(ctx context.Context, arg rem.RtSetReadReceiptsArg) error {
+	m := shared.NewMetaContextConn(ctx, c)
+	return SetReadReceipts(m, arg)
+}
+
+func (c *ClientConn) RtGetReadReceipts(ctx context.Context, arg proto.RTAppID) (bool, error) {
+	m := shared.NewMetaContextConn(ctx, c)
+	return GetReadReceipts(m, rem.RtGetReadReceiptsArg{AppID: arg})
+}
+
 var _ shared.RPCServer = (*Server)(nil)
 
 var _ rem.RealTimeInterface = (*ClientConn)(nil)

@@ -107,6 +107,9 @@ var realtimePatch9 string
 //go:embed patches/foks_realtime/p10.sql
 var realtimePatch10 string
 
+//go:embed patches/foks_realtime/p11.sql
+var realtimePatch11 string
+
 //go:embed patches/foks_kv_store/p1.sql
 var kvStorePatch1 string
 
@@ -142,5 +145,6 @@ var Patches = map[string]map[int]string{
 		8:  realtimePatch8,
 		9:  realtimePatch9,
 		10: realtimePatch10,
+		11: realtimePatch11,
 	},
 }

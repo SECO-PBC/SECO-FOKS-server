@@ -834,6 +834,7 @@ type RTInboxRowView struct {
 	NumPending          uint64
 	NumFailed           uint64
 	ExplicitReadThrough lib.RTMsgSeq
+	PeerReadThrough     lib.RTMsgSeq
 }
 type RTInboxRowViewInternal__ struct {
 	_struct             struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -851,6 +852,7 @@ type RTInboxRowViewInternal__ struct {
 	NumPending          *uint64
 	NumFailed           *uint64
 	ExplicitReadThrough *lib.RTMsgSeqInternal__
+	PeerReadThrough     *lib.RTMsgSeqInternal__
 }
 
 func (r RTInboxRowViewInternal__) Import() RTInboxRowView {
@@ -945,6 +947,12 @@ func (r RTInboxRowViewInternal__) Import() RTInboxRowView {
 			}
 			return x.Import()
 		})(r.ExplicitReadThrough),
+		PeerReadThrough: (func(x *lib.RTMsgSeqInternal__) (ret lib.RTMsgSeq) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.PeerReadThrough),
 	}
 }
 func (r RTInboxRowView) Export() *RTInboxRowViewInternal__ {
@@ -963,6 +971,7 @@ func (r RTInboxRowView) Export() *RTInboxRowViewInternal__ {
 		NumPending:          &r.NumPending,
 		NumFailed:           &r.NumFailed,
 		ExplicitReadThrough: r.ExplicitReadThrough.Export(),
+		PeerReadThrough:     r.PeerReadThrough.Export(),
 	}
 }
 func (r *RTInboxRowView) Encode(enc rpc.Encoder) error {
@@ -3112,12 +3121,14 @@ type RTReadThroughPendingEntry struct {
 	Chid     lib.RTChannelID
 	Seq      lib.RTMsgSeq
 	Explicit bool
+	Dm       bool
 }
 type RTReadThroughPendingEntryInternal__ struct {
 	_struct  struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
 	Chid     *lib.RTChannelIDInternal__
 	Seq      *lib.RTMsgSeqInternal__
 	Explicit *bool
+	Dm       *bool
 }
 
 func (r RTReadThroughPendingEntryInternal__) Import() RTReadThroughPendingEntry {
@@ -3140,6 +3151,12 @@ func (r RTReadThroughPendingEntryInternal__) Import() RTReadThroughPendingEntry 
 			}
 			return *x
 		})(r.Explicit),
+		Dm: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(r.Dm),
 	}
 }
 func (r RTReadThroughPendingEntry) Export() *RTReadThroughPendingEntryInternal__ {
@@ -3147,6 +3164,7 @@ func (r RTReadThroughPendingEntry) Export() *RTReadThroughPendingEntryInternal__
 		Chid:     r.Chid.Export(),
 		Seq:      r.Seq.Export(),
 		Explicit: &r.Explicit,
+		Dm:       &r.Dm,
 	}
 }
 func (r *RTReadThroughPendingEntry) Encode(enc rpc.Encoder) error {

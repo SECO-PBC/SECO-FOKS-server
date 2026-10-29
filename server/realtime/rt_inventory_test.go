@@ -76,6 +76,16 @@ var rpcAccessClass = map[string]rpcClassification{
 		"TestSetChannelMutedWithoutAccess, TestMutedMemberGetsNoPush. Writes only the " +
 			"caller's own delivery row; chokepoint at accessRead, like rtReadThrough",
 	},
+	"rtSetReadReceipts": {
+		channelWrite,
+		"TestReadReceiptsSwitch. Writes only the caller's own switch; re-stamps the " +
+			"two delivery rows of each channel where both rows are marked as a DM " +
+			"(dm-read-receipts), which returns no channel data to the caller",
+	},
+	"rtGetReadReceipts": {
+		noChannelData,
+		"returns the caller's own switch, one bool, no channel identity (TestReadReceiptsSwitch)",
+	},
 	"rtNewChannel": {
 		channelWrite,
 		"TestPrivateCreateRequiresAdmin, TestPrivateCreateFansOutToCreatorOnly (row 11), " +
@@ -259,8 +269,23 @@ var queryAllowlist = map[string]allowedQueries{
 	"readChannelSet":                      {1, "channel-set version only; no per-channel data"},
 
 	// --- reads that run after the chokepoint authorized the caller ---
-	"readThroughMarker.run": {3, "calls loadChannel -> authorizeChannel(accessRead) before anything else"},
-	"channelMuter.run":      {3, "calls authorizeChannel(accessRead) before anything else; touches only the caller's own row"},
+	"readThroughMarker.run": {2, "calls loadChannel -> authorizeChannel(accessRead) before anything else"},
+	"loadDmPair": {1, "read receipts (receipts.go); reached only from readThroughMarker.run after " +
+		"authorizeChannel(accessRead) on that channel. Reads its delivery rows' uids and DM marks to " +
+		"decide whose inbox rows to lock; returns nothing to the caller"},
+	"bumpAndStamp": {2, "checks for and re-stamps one delivery row of a channel its callers already resolved: " +
+		"readThroughMarker.run (after authorizeChannel(accessRead)) or receiptsSetter.run (the " +
+		"caller's own marked DMs). Carries no channel identity to anyone who lacks the row"},
+	"receiptsSetter.markedDms": {3, "read receipts switch (receipts.go): lists only the CALLER's " +
+		"own delivery rows that the caller marked as a DM, in channels of exactly two rows whose " +
+		"other row is marked too, to re-stamp both. Returns nothing to the caller; a row lingering " +
+		"after a team leave is re-authorized by GetChangedThreads before any sync shows it"},
+	"peerReadThroughCol": {2, "fragment interpolated only by readChangedChannels (SET-BASED, row 7), " +
+		"per row of the caller's own: the other member's explicit pointer on a two-row channel " +
+		"both members marked as a DM (dm-read-receipts), so the caller learns another member's " +
+		"read position only where both apps consented. Rows the caller cannot read are dropped " +
+		"with the rest of the row (aclMember / team re-authorization)"},
+	"channelMuter.run": {3, "calls authorizeChannel(accessRead) before anything else; touches only the caller's own row"},
 
 	// --- shared SQL fragments (top-level consts). The functions that
 	// interpolate these carry no protected-table reference of their own, so

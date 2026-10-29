@@ -1144,20 +1144,23 @@ func (d *Minder) ReadThrough(
 	channel lcl.RTChannelSpecifier,
 	seq proto.RTMsgSeq,
 ) error {
-	return d.readThrough(m, team, appID, channel, seq, false)
+	return d.readThrough(m, team, appID, channel, seq, false, false)
 }
 
 // MarkRead is ReadThrough for a read the user made themselves (fork-only,
 // cross-device-read-sync): it also advances the explicit read pointer, which
-// page fetches never move, and settles the user's pushes in the channel.
+// page fetches never move, and settles the user's pushes in the channel. dm
+// (fork-only, dm-read-receipts) says the caller's app knows the channel as a
+// 1:1 DM, which marks the caller's own row for read receipts.
 func (d *Minder) MarkRead(
 	m MetaContext,
 	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	channel lcl.RTChannelSpecifier,
 	seq proto.RTMsgSeq,
+	dm bool,
 ) error {
-	return d.readThrough(m, team, appID, channel, seq, true)
+	return d.readThrough(m, team, appID, channel, seq, true, dm)
 }
 
 func (d *Minder) readThrough(
@@ -1167,6 +1170,7 @@ func (d *Minder) readThrough(
 	channel lcl.RTChannelSpecifier,
 	seq proto.RTMsgSeq,
 	explicit bool,
+	dm bool,
 ) error {
 	err := assertTeam(team)
 	if err != nil {
@@ -1180,10 +1184,10 @@ func (d *Minder) readThrough(
 	if err != nil {
 		return err
 	}
-	err = d.attemptReadThrough(m, ch.Id, seq, explicit)
+	err = d.attemptReadThrough(m, ch.Id, seq, explicit, dm)
 	if err != nil {
 		if core.IsTransportError(err) {
-			return d.queuePendingMark(m, ch.Id, seq, explicit)
+			return d.queuePendingMark(m, ch.Id, seq, explicit, dm)
 		}
 		return err
 	}
@@ -1221,6 +1225,27 @@ func (d *Minder) SetChannelMuted(
 		ChannelID: ch.Id,
 		Muted:     muted,
 	})
+}
+
+// SetReadReceipts sets the caller's Read receipts switch for the app
+// (fork-only, dm-read-receipts): off withholds read receipts both ways on
+// every one of their DMs. The same value again is a no-op server-side.
+func (d *Minder) SetReadReceipts(m MetaContext, appID proto.RTAppID, on bool) error {
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return err
+	}
+	return cli.RtSetReadReceipts(m.Ctx(), rem.RtSetReadReceiptsArg{AppID: appID, On: on})
+}
+
+// ReadReceipts returns the caller's Read receipts switch for the app
+// (fork-only, dm-read-receipts).
+func (d *Minder) ReadReceipts(m MetaContext, appID proto.RTAppID) (bool, error) {
+	_, cli, err := d.clientLocal(m.Base(), d.au)
+	if err != nil {
+		return false, err
+	}
+	return cli.RtGetReadReceipts(m.Ctx(), appID)
 }
 
 // GetInboxVersion returns the caller's current global inbox version for the

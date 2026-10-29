@@ -411,6 +411,7 @@ func TestRealtimeLockOrder(t *testing.T) {
 		"MakeChannel", "SendMessage", "MarkReadThrough",
 		"UpdateChannel", "SetChannelArchived",
 		"GrantChannelMember", "RevokeChannelMember",
+		"SetReadReceipts",
 	}
 
 	seqs := map[string][]string{}
