@@ -232,9 +232,12 @@ var queryAllowlist = map[string]allowedQueries{
 		"authorizeChannel(accessRead) on the channel and the holder check; inserts a push row " +
 		"only for a uid that holds a delivery row AND clears the read role AND, for a private " +
 		"channel, holds an ACL row (canReadChannel). Returns nothing"},
-	"messageSender.run": {1, "send path; the msg_id EXISTS probe runs after lockChannel -> " +
-		"authorizeChannel(accessWrite), returns only a bool, and feeds two error " +
-		"paths (replay vs race). It is deliberately NOT channel-scoped -- msg_id is " +
+	"messageSender.msgIDExists": {1, "send path; the msg_id EXISTS probe, called from run() " +
+		"after lockChannel -> authorizeChannel(accessWrite) passed, and from lockChannel " +
+		"only when authorizeChannel refused with RTChannelArchivedError, which its last " +
+		"gate returns after every access check passed (upstream #392). Returns only a " +
+		"bool, and feeds the replay-vs-race and replay-vs-archived error paths. It is " +
+		"deliberately NOT channel-scoped -- msg_id is " +
 		"globally unique -- but a caller must already hold write access to the " +
 		"channel they named to reach it, and msg_ids are random 16-byte values, so " +
 		"it affords no enumeration of another channel's messages"},
