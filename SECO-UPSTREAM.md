@@ -10,7 +10,7 @@ or AI — has to re-derive a decision we already made, re-propose something
 already proposed, or wonder why half a change went out and half did not.
 
 Last synced against upstream: `8b9af08` (2026-10-25), merged by
-`chore/upstream-sync-2026-11` (opened 2026-10-30). It brought in #361 with its
+fork PR [#85](https://github.com/SECO-PBC/SECO-FOKS-server/pull/85) (`chore/upstream-sync-2026-11`, opened 2026-10-30). It brought in #361 with its
 review follow-up #391, #376 with its follow-up #392, #382, #372, and the merged
 copies of #369, #384 and #385; numbering decisions are in the #361, #376, #382
 and #392 rows under Upstreamed. The sync before it was `438f351` (2026-10-06,
