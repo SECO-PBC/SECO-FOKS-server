@@ -85,7 +85,7 @@ func (c *RegClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server)
 		rem.SocialInviteGuestProtocol(c),
 	}
 	for _, p := range prots {
-		if err := srv.RegisterV2(p); err != nil {
+		if err := srv.RegisterV2(shared.InstrumentProtocol(m.G(), p)); err != nil {
 			return err
 		}
 	}

@@ -32,7 +32,7 @@ func (s *Server) NewClientConn(xp rpc.Transporter, uhc shared.UserHostContext) s
 	}
 }
 func (c *ClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
-	return srv.RegisterV2(rem.RealTimeProtocol(c))
+	return srv.RegisterV2(shared.InstrumentProtocol(m.G(), rem.RealTimeProtocol(c)))
 }
 
 func (c *ClientConn) ErrorWrapper() func(error) proto.Status {

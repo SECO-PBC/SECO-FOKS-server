@@ -1,0 +1,87 @@
+# Server observability (OpenTelemetry)
+
+The FOKS server processes can export OpenTelemetry **metrics** and **traces** over OTLP/gRPC. In SECO staging they go to a Datadog Agent sidecar (setup: `scripts/deploy/README.md`, "Telemetry (Datadog)"). The code is vendor-neutral: anything that accepts OTLP works, including an OTel Collector, Grafana Alloy or Jaeger.
+
+Telemetry is **off by default**. When it's off the server installs no-op providers, does not wrap RPC handlers, and attaches no pgx tracer, so the cost is a few nil-free calls.
+
+**Not covered: the SECO daemon.** The daemon (`SECO-FOKS/apps/daemon`) is not instrumented. Its RPCs to this server are measured server-side like any client's, and can't be told apart from phone traffic. Nothing inside it is measured: poll lag, AI backend latency, its own queueing. Daemon telemetry is deferred. It has its own constraints: it runs in a TEE with plaintext access, and dstack can't run an agent sidecar.
+
+## Privacy rule
+
+SECO promises end-to-end encryption, and the team has ruled out client-style telemetry (2026-06-19). Server telemetry therefore carries **only aggregate, non-identifying attributes**:
+
+| Allowed | Never allowed |
+|---|---|
+| server type (`service.name`), RPC method name, proto status code name, DB type, SQL operation keyword, static transaction names (`shared.TxName`), phase/outcome/result enums, counts | UIDs, usernames, FQNs, team / channel / device IDs, user host names, remote IPs, message metadata, SQL parameters, raw error strings |
+
+How the code enforces this:
+- **RPC spans** record the proto status code name, never `err.Error()`.
+- **pgx spans** record the SQLSTATE, never the Postgres message (messages can echo values). They are named `pg.<OP>`. SQL text is recorded only when `db_statement: true`; all server SQL is parameterized (`$n`), and parameters are never recorded.
+- **Container logs are not shipped.** zap logs can contain UIDs and remote IPs. Datadog log collection is off in the sidecar config.
+- **The `allowedTelemetryKeys` test** in `server/shared/telemetry_test.go` is the allowlist. Every exported attribute key must be in it, and a planted user ID must not appear in any attribute, span name, status or event. Adding a key is a privacy decision.
+
+## Configuration
+
+This is the `telemetry` block in the server jsonnet config. It is present but disabled in `conf/srv/*.jsonnet`; turn it on per host in `local.pre.libsonnet`'s `final()`.
+
+| Key | Default | |
+|---|---|---|
+| `enabled` | `false` | |
+| `otlp_endpoint` | `datadog-agent:4317` | OTLP/gRPC `host:port` |
+| `secure` | `false` | TLS to the endpoint; the sidecar is on the private compose network |
+| `env` | — | becomes `deployment.environment.name` (Datadog `env`) |
+| `trace_sample_ratio` | `1.0` | fraction of root spans kept |
+| `metric_interval_ms` | `10000` | export period |
+| `db_statement` | `false` | record parameterized SQL text on DB spans |
+
+The resource sets `service.name = foks-<server type>`, e.g. `foks-realtime` or `foks-user`. Counters and histograms use **delta** temporality. Histograms are **base-2 exponential**, which Datadog turns into distributions, so p50, p95 and p99 are accurate without picking bucket boundaries.
+
+## Metrics
+
+| Metric | Type | Attributes | Where |
+|---|---|---|---|
+| `foks.rpc.server.duration` | histogram, ms | `rpc.method`, `outcome` | every RPC (`shared.InstrumentProtocol`) |
+| `foks.rpc.server.errors` | counter | `rpc.method`, `error.code` | |
+| `foks.rpc.server.active` | up-down | `rpc.method` | in-flight handlers |
+| `foks.rpc.server.connections` | up-down | — | open client connections |
+| `foks.db.query.duration` | histogram, ms | `db.type`, `db.operation.name`, `outcome` | every pgx query (`pgTracer`) |
+| `foks.db.query.errors` | counter | `db.type`, `db.operation.name`, `db.response.status_code` | |
+| `foks.db.pool.acquire.duration` | histogram, ms | `db.type` | wait to acquire a pooled connection |
+| `foks.db.pool.{acquired,idle,total,max}` | gauge | `db.type` (+ `db.kv_shard`) | `pgxpool.Stat()` |
+| `foks.db.pool.empty_acquires`, `foks.db.pool.acquire_wait` | counter | `db.type` | acquires that had to wait, and for how long |
+| `foks.db.tx.duration` | histogram, ms | `db.tx.name`, `outcome` | `RetryTx`/`RetryTx2`, from the first BEGIN to the final COMMIT, including retries but **not** the success hook |
+| `foks.db.tx.post_commit.duration` | histogram, ms | `db.tx.name` | the `RetryTx2` success hook, run after COMMIT (for sends, the wake) |
+| `foks.db.tx.retries` | counter | `db.tx.name` | |
+| `foks.rt.phase.duration` | histogram, ms | `phase` | realtime: `lock`, `prune`, `insert`, `fanout`, `wake`, `reconcile` |
+| `foks.rt.fanout.members` | histogram | — | inboxes bumped and woken per write |
+| `foks.rt.poll.duration` | histogram, ms | `outcome` | `rtPollInbox`: `bumped_immediate`, `bumped`, `timeout`, `cancelled`, `error` |
+| `foks.rt.reconcile` | counter | `result` | late-join fan-in: `memory`, `cursor` or `full` (slow path) |
+| `foks.rt.pollers.parked` | gauge | — | parked long-polls (realtime only) |
+| `foks.rt.push_outbox.backlog` | gauge | `status` | `queued`/`sending` rows, sampled every 30s (realtime only) |
+| `foks.rt.push_outbox.oldest_age` | gauge, s | — | |
+| Go runtime (`go.*`) | various | — | `contrib/instrumentation/runtime` |
+
+`rtPollInbox` is a long poll (up to 55s), so its `foks.rpc.server.duration` measures wait time, not work. Filter it out of RPC latency views, and use `foks.rt.poll.duration` by `outcome` instead.
+
+## Traces
+
+- **One root span per RPC**, named `<Protocol>.<method>`. The snowpack wire format carries no trace context, so spans are not linked across services (for example `user` → `merkle_query`). Each service's traces stand alone.
+- **Child spans:** `rt.<phase>`, `pg.<OP>` per query, and for each `RetryTx`:
+  ```
+  db.tx  <name>                      first BEGIN → final COMMIT
+    db.tx.attempt  #0  result=retry   each try, with its queries
+    db.tx.attempt  #1  result=committed
+  db.tx.post_commit  <name>          success hook, a sibling of db.tx
+  ```
+  `TxName` values become the `db.tx.name` label, so they must be fixed strings.
+- **Query spans only exist under a sampled parent.** Background loops record query metrics but produce no orphan spans.
+
+## Diagnosing the realtime send path
+
+For one `RealTime.rtSend`, read the following together:
+
+1. **`foks.rt.phase.duration` by `phase`.** `lock` is time waiting on the channel row's `FOR UPDATE`, so all sends to one channel run one at a time. `fanout` is the set-based `user_inbox`/`user_channels`/`push_outbox` writes. `wake` is post-commit hub wakes, which take one global lock per member.
+2. **`foks.rt.fanout.members`** to see how fan-out cost scales with channel size.
+3. **`foks.db.pool.acquire.duration` and `foks.db.pool.empty_acquires`** for pool starvation.
+4. **`foks.db.tx.retries{db.tx.name=realtime.SendMessage}`** for serialization retries, and `foks.db.tx.post_commit.duration` for the wake cost outside the transaction.
+5. **Datadog DBM → Query Metrics** for the `INSERT INTO user_inbox ... SELECT` fan-out statement: lock waits, rows and I/O.

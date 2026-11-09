@@ -345,7 +345,7 @@ type MerkleSignerClientConn struct {
 }
 
 func (c *MerkleSignerClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
-	return srv.RegisterV2(proto.MerkleSignerProtocol(c))
+	return srv.RegisterV2(shared.InstrumentProtocol(m.G(), proto.MerkleSignerProtocol(c)))
 }
 
 func (c *MerkleSignerClientConn) Poke(ctx context.Context) error {

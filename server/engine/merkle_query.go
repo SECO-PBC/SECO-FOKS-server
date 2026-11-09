@@ -50,7 +50,7 @@ type MerkleQueryClientConn struct {
 }
 
 func (c *MerkleQueryClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
-	return srv.RegisterV2(rem.MerkleQueryProtocol(c))
+	return srv.RegisterV2(shared.InstrumentProtocol(m.G(), rem.MerkleQueryProtocol(c)))
 }
 
 func (c *MerkleQueryClientConn) ErrorWrapper() func(error) proto.Status {

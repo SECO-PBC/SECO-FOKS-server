@@ -51,7 +51,7 @@ func (b *MerkleBuilderServer) Setup(m shared.MetaContext) error {
 }
 
 func (c *MerkleBuilderClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
-	return srv.RegisterV2(proto.MerkleBuilderProtocol(c))
+	return srv.RegisterV2(shared.InstrumentProtocol(m.G(), proto.MerkleBuilderProtocol(c)))
 }
 
 func (c *MerkleBuilderClientConn) Poke(ctx context.Context) error {

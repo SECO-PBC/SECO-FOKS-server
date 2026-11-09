@@ -104,6 +104,41 @@ This used to say the opposite, and that is how `foks_kv_store/p1` reached produc
 
 `patch-db` only patches databases that already exist — it cannot create one. A brand-new database (as `realtime` was for v0.1.7-seco.3) needs a one-off `foks-tool init-db --db <name>` first; the deploy script logs it as "not present on this server, skipping" until then. The base `.sql` schemas self-stamp their `schema_patches` rows, so a freshly init'd DB is already at the current patch level and the next `patch-db` reports "up to date".
 
+## Telemetry (Datadog)
+
+The server can export OpenTelemetry metrics and traces over OTLP to a Datadog Agent sidecar. The agent also collects host and container metrics, plus Postgres Database Monitoring. Telemetry is off unless `telemetry.enabled` is set. See `docs/observability.md` for the metric list and the privacy rule.
+
+One-time setup on the server, in `/opt/foks/workdir`:
+
+1. **Secrets.** Add these to `.env`:
+   - `DD_API_KEY=<key>`
+   - `DD_SITE=<site>` (for example `datadoghq.com` or `datadoghq.eu`)
+   - `DD_PG_PASSWORD=<random>`
+   - `DD_ENV=staging` (optional; this is the default)
+2. **Load the sidecar.** Copy `scripts/deploy/datadog/docker-compose.datadog.yml` into the workdir. Then add this line to `.env`:
+
+   `COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.datadog.yml`
+
+   Setting `COMPOSE_FILE` turns off automatic loading of the override file, so it has to be listed. Do **not** copy the file over `docker-compose.override.yml`, which already holds the port mappings and the Postgres `max_connections` flag.
+3. **Turn on `pg_stat_statements`.** In `docker-compose.override.yml`, extend the existing `postgresql` command as shown below. Keep it in that file: a second file that also sets `command` would replace the whole line and drop `max_connections`. Then run `docker compose up -d postgresql`; this briefly restarts Postgres.
+   ```yaml
+   command: ["postgres", "-c", "max_connections=200",
+             "-c", "shared_preload_libraries=pg_stat_statements",
+             "-c", "pg_stat_statements.track=all", "-c", "track_io_timing=on"]
+   ```
+4. **Create the monitoring role.** Run `DD_PG_PASSWORD=<same value> ./pg-setup.sh` (from `scripts/deploy/datadog/`). It is idempotent.
+5. **Point the servers at the agent.** Add `telemetry +: { enabled : true, env : "staging" },` to `final()` in `conf-guest/local.pre.libsonnet`.
+6. **Start the agent and restart the servers.** Run `docker compose up -d` to start `datadog-agent`; this also recreates `postgresql` with its new labels. Then restart the FOKS servers so they re-read their config: `docker compose restart $(docker compose config --services | grep -vxE 'postgresql|datadog-agent')`. A plain `up -d` doesn't do this, because editing `local.pre.libsonnet` changes no compose definition. If you finish these steps *before* deploying a tag, the deploy recreates the servers anyway. Later CI deploys run `docker compose up -d`, which picks up `COMPOSE_FILE` and keeps the agent running.
+
+**Check that it works:**
+- `docker compose exec datadog-agent agent status` shows the OTLP receiver and the `postgres` check as OK.
+- Each server logs `telemetry stage=enabled` at startup.
+- `foks.*` metrics appear in Datadog within a minute.
+
+**Turn it off:** set `enabled : false` (or remove the line), then restart the servers with the same `docker compose restart ...` command. To also remove the agent, take `docker-compose.datadog.yml` out of `COMPOSE_FILE`.
+
+**Capacity:** the staging host has 2 vCPU and 2 GB RAM. The agent is capped at 512 MB and 0.5 CPU, but it still shares the box with the server, so compare benchmark runs with telemetry on and off.
+
 ## What lives where
 
 | File                                     | Role                                  |
@@ -111,3 +146,4 @@ This used to say the opposite, and that is how `foks_kv_store/p1` reached produc
 | `.github/workflows/deploy.yml`           | CI: build images, SCP script, run it  |
 | `scripts/deploy/server-deploy.sh`        | Server: pull, migrate, restart, check |
 | `server/foks-tool/patch_db.go` (`--yes`) | Non-interactive migration confirmation |
+| `scripts/deploy/datadog/`                | Datadog Agent sidecar + Postgres DBM setup (telemetry) |

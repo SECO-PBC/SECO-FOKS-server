@@ -485,7 +485,10 @@ func (s *messageSender) msgIDExists(m shared.MetaContext) (bool, error) {
 }
 
 func (s *messageSender) run(m shared.MetaContext) (*rem.RTSendRes, error) {
-	err := s.lockChannel(m)
+	tel := m.G().Telemetry()
+	lm, done := tel.RTPhase(m, "lock")
+	err := s.lockChannel(lm)
+	done()
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +502,9 @@ func (s *messageSender) run(m shared.MetaContext) (*rem.RTSendRes, error) {
 		if err != nil {
 			return nil, err
 		}
-		err = pruneStaleChannelMembers(m, s.tx, s.userdb, s.parentTeam, s.channelID(), appDB)
+		pm, done := tel.RTPhase(m, "prune")
+		err = pruneStaleChannelMembers(pm, s.tx, s.userdb, s.parentTeam, s.channelID(), appDB)
+		done()
 		if err != nil {
 			return nil, err
 		}
@@ -521,15 +526,20 @@ func (s *messageSender) run(m shared.MetaContext) (*rem.RTSendRes, error) {
 		}
 		return nil, core.RTRaceError{Which: "messages"}
 	}
-	senderNo, err := s.internSender(m)
+	im, done := tel.RTPhase(m, "insert")
+	senderNo, err := s.internSender(im)
+	if err != nil {
+		done()
+		return nil, err
+	}
+	insertTime, err := s.insertMessage(im, senderNo, seq)
+	done()
 	if err != nil {
 		return nil, err
 	}
-	insertTime, err := s.insertMessage(m, senderNo, seq)
-	if err != nil {
-		return nil, err
-	}
-	err = s.fanoutInboxVersions(m, insertTime.Import(), seq)
+	fm, done := tel.RTPhase(m, "fanout")
+	err = s.fanoutInboxVersions(fm, insertTime.Import(), seq)
+	done()
 	if err != nil {
 		return nil, err
 	}
@@ -659,6 +669,10 @@ func loadReplay(
 // after the transaction that bumped their inbox versions has committed; see
 // shared.RTInboxHub.
 func wakeInboxPollers(m shared.MetaContext, app proto.RTAppID, uids []proto.UID) {
+	tel := m.G().Telemetry()
+	m, done := tel.RTPhase(m, "wake")
+	defer done()
+	tel.RTFanout(m.Ctx(), len(uids))
 	hub := m.G().RTInboxHub()
 	for _, uid := range uids {
 		hub.Wake(shared.RTInboxHubKey{

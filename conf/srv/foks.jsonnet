@@ -194,6 +194,15 @@ post.final(pre.final({
         }
     },
     stripe : {},
+    // OpenTelemetry metrics + traces over OTLP/gRPC (see docs/observability.md).
+    // Off by default. Turn on per host in local.pre.libsonnet's final(), e.g.
+    //   telemetry +: { enabled : true, env : "staging" },
+    telemetry : {
+        enabled : false,
+        otlp_endpoint : "localhost:4317",
+        trace_sample_ratio : 1.0,
+        db_statement : false,
+    },
     cks : {},
     dns_aliases : [] + test_dns_aliases(base, self),
 }))

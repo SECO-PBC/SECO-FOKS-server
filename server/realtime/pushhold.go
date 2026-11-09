@@ -171,7 +171,7 @@ func adminTx(
 	m shared.MetaContext,
 	team proto.TeamID,
 	appID proto.RTAppID,
-	which string,
+	which shared.TxName,
 	fn func(m shared.MetaContext, tx pgx.Tx, appDB string) error,
 ) error {
 	appDB, err := appID.ExportToDB()
@@ -243,7 +243,7 @@ func ClearPushHold(m shared.MetaContext, arg rem.RtClearPushHoldArg) error {
 func holderTx(
 	m shared.MetaContext,
 	chid proto.RTChannelID,
-	which string,
+	which shared.TxName,
 	fn func(m shared.MetaContext, tx pgx.Tx, ca *channelAuth, userdb shared.Querier) error,
 ) error {
 	rtdb, err := m.Db(shared.DbTypeRealTime)

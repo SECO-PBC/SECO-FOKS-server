@@ -37,6 +37,7 @@ func (g *GlobalContext) dbPoolWithLock(ctx context.Context, which DbType) (*pgxp
 	if err != nil {
 		return nil, err
 	}
+	g.Telemetry().InstallPgTracer(opts, which.ToString())
 
 	pool, err = pgxpool.NewWithConfig(ctx, opts)
 	if err != nil {
@@ -90,7 +91,14 @@ func (g *GlobalContext) DbTx(ctx context.Context, which DbType) (pgx.Tx, func() 
 	return tx, retFn, nil
 }
 
-func RetryTxUserDB(m MetaContext, nm string, tryFn func(m MetaContext, tx pgx.Tx) error) error {
+// TxName names a transaction in logs and telemetry. It becomes a metric
+// label (foks.db.tx.*), so it must be a fixed string such as
+// "realtime.SendMessage", never one built from user or request data. Callers
+// passing a string literal need no conversion; a TxName(...) conversion of a
+// variable is the thing to look at in review.
+type TxName string
+
+func RetryTxUserDB(m MetaContext, nm TxName, tryFn func(m MetaContext, tx pgx.Tx) error) error {
 	db, err := m.Db(DbTypeUsers)
 	if err != nil {
 		return err
@@ -101,7 +109,7 @@ func RetryTxUserDB(m MetaContext, nm string, tryFn func(m MetaContext, tx pgx.Tx
 
 func RetryTxServerConfigDB(
 	m MetaContext,
-	nm string,
+	nm TxName,
 	tryFn func(m MetaContext, tx pgx.Tx) error,
 ) error {
 	db, err := m.Db(DbTypeServerConfig)
@@ -115,7 +123,7 @@ func RetryTxServerConfigDB(
 func RetryTx(
 	m MetaContext,
 	db *pgxpool.Conn,
-	nm string,
+	nm TxName,
 	tryFn func(m MetaContext, tx pgx.Tx) error,
 ) error {
 	return RetryTx2(
@@ -134,51 +142,80 @@ func RetryTx(
 // data committed (e.g., the commit succeeds but its acknowledgment is lost),
 // so use it only for effects that tolerate not running -- caches, memos, and
 // other optimization-only state; never for correctness-critical writes.
+//
+// Telemetry (see docs/observability.md): a db.tx span from the first BEGIN
+// through the final COMMIT or failure, one db.tx.attempt child per try, and
+// the success hook as a separate db.tx.post_commit span. That one is a sibling
+// of db.tx, so foks.db.tx.duration measures only time in the transaction.
+// nm becomes the db.tx.name label.
 func RetryTx2(
 	m MetaContext,
 	db *pgxpool.Conn,
-	nm string,
+	nm TxName,
 	tryFn func(m MetaContext, tx pgx.Tx) (func(MetaContext), error),
 ) error {
-	nTries := 5
+	const nTries = 5
 	backoff := 1 * time.Millisecond
 	m = m.WithLogTag("dbtx")
+	m, tel := m.G().Telemetry().StartTx(m, nm)
 
-	tryOnce := func(i int) (ret bool, err error) {
-		tx, err := db.Begin(m.Ctx())
+	// The successful attempt's hook; run only once the tx is closed out.
+	var hook func(MetaContext)
+
+	tryOnce := func(i int) (retry bool, err error) {
+		am, attemptDone := tel.Attempt(m, i)
+		// Registered first so it runs last, after TxRollback below has
+		// settled err.
+		defer func() { attemptDone(retry, err) }()
+
+		tx, err := db.Begin(am.Ctx())
 		if err != nil {
 			return false, err
 		}
 		defer func() {
-			err = TxRollback(m.Ctx(), tx, err)
+			err = TxRollback(am.Ctx(), tx, err)
 		}()
-		var succ func(MetaContext)
-		succ, err = tryFn(m, tx)
+		succ, err := tryFn(am, tx)
 		if err != nil {
 			return false, err
 		}
-		err = tx.Commit(m.Ctx())
+		err = tx.Commit(am.Ctx())
 		if err == nil {
-			if succ != nil {
-				succ(m)
-			}
+			hook = succ
 			return false, nil
 		}
 		if !pgconn.SafeToRetry(err) {
 			return false, err
 		}
-		m.Warnw("retryTx", "query", nm, "i", i, "err", err)
+		am.Warnw("retryTx", "query", nm, "i", i, "err", err)
 		time.Sleep(backoff)
 		backoff *= 2
 		return true, nil
 	}
 
-	for i := range nTries {
-		if retry, err := tryOnce(i); !retry {
-			return err
+	var err error
+	retries := 0
+	for {
+		retry, aerr := tryOnce(retries)
+		if !retry {
+			err = aerr
+			break
+		}
+		retries++
+		if retries == nTries {
+			err = core.TxRetryError{}
+			break
 		}
 	}
-	return core.TxRetryError{}
+
+	tel.End(retries, err)
+
+	if err == nil && hook != nil {
+		hm, hookDone := tel.PostCommit(m)
+		hook(hm)
+		hookDone()
+	}
+	return err
 }
 
 func IsDuplicateKeyError(e error, k string) bool {

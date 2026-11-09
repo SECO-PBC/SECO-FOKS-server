@@ -76,6 +76,9 @@ type GlobalContext struct {
 	// Wakes parked rtPollInbox long-pollers on committed inbox bumps.
 	rtInboxHub *RTInboxHub
 
+	// OTel providers + instruments; never nil (no-op until InitTelemetry).
+	telemetry telemetryHolder
+
 	// A lot of services might need to poll the Merkle Query service. Available here
 	merkleGCli *BackendClient
 
@@ -141,7 +144,7 @@ func NewGlobalContext(opts *GlobalContextOpts) *GlobalContext {
 	}
 
 	log := zap.Must(cfg.Build())
-	return &GlobalContext{
+	ret := &GlobalContext{
 		log:             log.Sugar(),
 		logCfg:          cfg,
 		cfg:             &EmptyConfig{},
@@ -157,6 +160,8 @@ func NewGlobalContext(opts *GlobalContextOpts) *GlobalContext {
 		ahtMgr:          NewAdHocTeamNamesManager(),
 		rtInboxHub:      NewRTInboxHub(),
 	}
+	ret.telemetry.p.Store(newNoopTelemetry())
+	return ret
 }
 
 func (g *GlobalContext) CertMgr() CertManager {
@@ -283,6 +288,9 @@ func (g *GlobalContext) Shutdown() {
 	if g == nil {
 		return
 	}
+	// Flush telemetry before taking the lock: the final collection runs
+	// observable callbacks that read DB pool state under g's RLock.
+	g.ShutdownTelemetry()
 	g.Lock()
 	defer g.Unlock()
 	if g.didShutdown {

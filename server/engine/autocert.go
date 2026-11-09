@@ -80,7 +80,7 @@ func (q *AutocertServer) Setup(m shared.MetaContext) error {
 func (q *AutocertServer) IsInternal() bool { return true }
 
 func (c *AutocertClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
-	return srv.RegisterV2(infra.AutocertProtocol(c))
+	return srv.RegisterV2(shared.InstrumentProtocol(m.G(), infra.AutocertProtocol(c)))
 }
 
 func (s *AutocertServer) RunBackgroundLoops(m shared.MetaContext, shutdownCh chan<- error) error {

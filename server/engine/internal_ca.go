@@ -41,7 +41,7 @@ type InternalCAClientConn struct {
 }
 
 func (c *InternalCAClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
-	return srv.RegisterV2(infra.InternalCAProtocol(c))
+	return srv.RegisterV2(shared.InstrumentProtocol(m.G(), infra.InternalCAProtocol(c)))
 }
 
 func (c *InternalCAClientConn) ErrorWrapper() func(error) proto.Status {

@@ -49,7 +49,7 @@ type QueueClientConn struct {
 }
 
 func (c *QueueClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
-	return srv.RegisterV2(infra.QueueProtocol(c))
+	return srv.RegisterV2(shared.InstrumentProtocol(m.G(), infra.QueueProtocol(c)))
 }
 
 func (c *QueueClientConn) ErrorWrapper() func(error) proto.Status {

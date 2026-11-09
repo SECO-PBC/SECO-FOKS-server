@@ -101,7 +101,7 @@ type ClientConn struct {
 var _ shared.ClientConn = (*ClientConn)(nil)
 
 func (c *ClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
-	return srv.RegisterV2(rem.KVStoreProtocol(c))
+	return srv.RegisterV2(shared.InstrumentProtocol(m.G(), rem.KVStoreProtocol(c)))
 }
 
 func (c *ClientConn) ErrorWrapper() func(error) proto.Status {

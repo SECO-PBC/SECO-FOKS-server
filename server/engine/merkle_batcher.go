@@ -912,7 +912,7 @@ type MerkleBatcherClientConn struct {
 }
 
 func (c *MerkleBatcherClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
-	return srv.RegisterV2(proto.MerkleBatcherProtocol(c))
+	return srv.RegisterV2(shared.InstrumentProtocol(m.G(), proto.MerkleBatcherProtocol(c)))
 }
 
 func (c *MerkleBatcherClientConn) Poke(ctx context.Context) error {

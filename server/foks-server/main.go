@@ -75,6 +75,10 @@ var (
 
 func main() {
 	core.DebugStop()
+	shared.ServiceVersion = core.CurrentSoftwareVersion.String()
+	if LinkerVersion != "unknown" {
+		shared.ServiceVersion = LinkerVersion
+	}
 	shared.MainWrapperWithServer(newRootCmd(), newServerList(),
 		&cobra.Command{
 			Use:   "version",

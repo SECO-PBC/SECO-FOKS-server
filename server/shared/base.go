@@ -365,6 +365,10 @@ func runServer(
 	if err != nil {
 		return err
 	}
+	// Telemetry problems never keep a server from starting.
+	if terr := InitTelemetry(m, s.ServerType().ToString()); terr != nil {
+		m.Warnw("telemetry", "stage", "init", "err", terr)
+	}
 	err = s.InitHostID(m)
 	if err != nil {
 		return err
