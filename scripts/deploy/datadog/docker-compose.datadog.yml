@@ -50,6 +50,12 @@ services:
       - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
     # The staging host is small (2 vCPU / 2 GB); keep the agent from
     # competing with the server under benchmark load.
+    # Datadog's documented Docker setup. The agent's OTLP collector looks up
+    # its own PID in /host/proc, which fails in a private PID namespace
+    # ("failed to register process metrics: process does not exist"), and
+    # container metrics need the host cgroup namespace on cgroup v2.
+    pid: host
+    cgroup: host
     mem_limit: 512m
     cpus: 0.5
     # Not published on the host: only compose-network peers can send.
