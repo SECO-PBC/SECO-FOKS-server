@@ -178,6 +178,11 @@ func (c *RegClientConn) signupInviteCode(
 			m.ShortHostID().ExportToDB(),
 			uid.ExportToDB(),
 		)
+		// Not a bad code: the code was fine, and an operator chasing it
+		// would look in the wrong place.
+		if err != nil {
+			return err
+		}
 
 	case rem.InviteCodeType_Standard:
 		tags, err = tx.Exec(m.Ctx(),
