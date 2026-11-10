@@ -317,6 +317,7 @@ type KVConfig struct {
 	Recursive      bool
 	ActingAs       ConfigTeam
 	ChannelID      *lib.RTChannelID
+	SystemStore    bool
 }
 type KVConfigInternal__ struct {
 	_struct        struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -332,6 +333,7 @@ type KVConfigInternal__ struct {
 	Recursive      *bool
 	ActingAs       *ConfigTeamInternal__
 	ChannelID      *lib.RTChannelIDInternal__
+	SystemStore    *bool
 }
 
 func (k KVConfigInternal__) Import() KVConfig {
@@ -420,6 +422,12 @@ func (k KVConfigInternal__) Import() KVConfig {
 			})(x)
 			return &tmp
 		})(k.ChannelID),
+		SystemStore: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(k.SystemStore),
 	}
 }
 func (k KVConfig) Export() *KVConfigInternal__ {
@@ -450,6 +458,7 @@ func (k KVConfig) Export() *KVConfigInternal__ {
 			}
 			return (*x).Export()
 		})(k.ChannelID),
+		SystemStore: &k.SystemStore,
 	}
 }
 func (k *KVConfig) Encode(enc rpc.Encoder) error {

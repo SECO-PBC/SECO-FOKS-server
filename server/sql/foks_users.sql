@@ -530,6 +530,7 @@ CREATE TABLE multiuse_invite_codes (
     num_uses INT NOT NULL,
     valid BOOLEAN NOT NULL,
     last_use TIMESTAMP,
+    daemon_signup BOOLEAN NOT NULL DEFAULT FALSE, -- p12: signing up with this code lists the account in daemon_accounts
     PRIMARY KEY(short_host_id, code)
 );
 
@@ -539,6 +540,18 @@ CREATE TABLE multiuse_invite_code_users (
     code VARCHAR(255) NOT NULL,
     ctime TIMESTAMP,
     PRIMARY KEY(short_host_id, uid, code)
+);
+
+/*
+ * p12: the accounts the KV store treats as Sages (docs/kv-system-store.md).
+ * A signup with a daemon_signup code inserts here in its transaction, and the
+ * operator can add or remove a row by hand.
+ */
+CREATE TABLE daemon_accounts (
+    short_host_id SMALLINT NOT NULL,
+    uid BYTEA NOT NULL,
+    ctime TIMESTAMP NOT NULL,
+    PRIMARY KEY(short_host_id, uid)
 );
 
 /*
@@ -1082,3 +1095,4 @@ INSERT INTO schema_patches (id, ctime) VALUES (8, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (9, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (10, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (11, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (12, NOW());
