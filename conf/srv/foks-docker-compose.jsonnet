@@ -108,6 +108,8 @@ pre.final({
         enabled : false,
         otlp_endpoint : "datadog-agent:4317",
         trace_sample_ratio : 1.0,
+        // Per-RPC overrides, e.g. { "RealTime.rtPollInbox" : 0.01 }.
+        trace_sample_methods : {},
         db_statement : false,
     },
     cks : {},

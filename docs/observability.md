@@ -31,6 +31,7 @@ This is the `telemetry` block in the server jsonnet config. It is present but di
 | `secure` | `false` | TLS to the endpoint; the sidecar is on the private compose network |
 | `env` | — | becomes `deployment.environment.name` (Datadog `env`) |
 | `trace_sample_ratio` | `1.0` | fraction of root spans kept |
+| `trace_sample_methods` | `{}` | per-RPC overrides of `trace_sample_ratio`, keyed `"<Protocol>.<method>"` |
 | `metric_interval_ms` | `10000` | export period |
 | `db_statement` | `false` | record parameterized SQL text on DB spans |
 
@@ -62,6 +63,24 @@ The resource sets `service.name = foks-<server type>`, e.g. `foks-realtime` or `
 | Go runtime (`go.*`) | various | — | `contrib/instrumentation/runtime` |
 
 `rtPollInbox` is a long poll (up to 55s), so its `foks.rpc.server.duration` measures wait time, not work. Filter it out of RPC latency views, and use `foks.rt.poll.duration` by `outcome` instead.
+
+## Trace sampling
+
+Each host's sampling lives in its own config, so it is set per environment. Staging traces everything (`1.0`, no overrides), which is fine at its current traffic.
+
+Sampling is decided once per trace, at the root RPC span, and every child span follows that decision. `trace_sample_methods` overrides the default for individual RPCs. Unsampled traces cost almost nothing: their child and query spans are never created. Metrics are recorded for every call either way.
+
+**At high traffic, sample down.** With ~1000 parked long-polls and 10 sends/s, each send wakes ~1000 `rtPollInbox` calls, and each woken client then syncs. That's ~20k traces/s and roughly 80k spans/s, which fills the span queue (dropped spans are not logged), costs real server CPU, and is expensive to ingest. For prod or a heavy benchmark, something like:
+
+```jsonnet
+telemetry +: {
+    enabled : true, env : "prod",
+    trace_sample_ratio : 0.01,
+    trace_sample_methods : { "RealTime.rtSend" : 1.0, "RealTime.rtPollInbox" : 0 },
+}
+```
+
+Override names are checked only for shape (`Protocol.method`) and range. A misspelled method name matches nothing and silently falls back to the default, so confirm in the APM service list that the override took effect. When sampled, Datadog's APM hit counts and latency pages undercount; use the `foks.rpc.server.*` metrics for rates and percentiles.
 
 ## Traces
 

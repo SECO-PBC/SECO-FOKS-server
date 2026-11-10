@@ -439,3 +439,48 @@ func TestNoopTelemetryIsSafe(t *testing.T) {
 	g.ShutdownTelemetry()
 	require.False(t, g.Telemetry().Enabled())
 }
+
+func TestMethodSampler(t *testing.T) {
+	s, problems := newMethodSampler(0, map[string]float64{
+		"RealTime.rtSend":  1.0,
+		"RealTime.rtGone":  0,
+		"not-a-method":     1.0,
+		"RealTime.rtWrong": 2,
+	})
+	require.Len(t, problems, 2)
+	require.Contains(t, problems[0], "RealTime.rtWrong")
+	require.Contains(t, problems[1], "not-a-method")
+
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(rec),
+		sdktrace.WithSampler(sdktrace.ParentBased(s)),
+	)
+	tr := tp.Tracer("test")
+
+	// Overridden to 1.0: the root and its child are both recorded.
+	ctx, root := tr.Start(context.Background(), "RealTime.rtSend")
+	require.True(t, root.IsRecording())
+	_, child := tr.Start(ctx, "pg.SELECT")
+	require.True(t, child.IsRecording())
+	child.End()
+	root.End()
+
+	// Default 0, and an explicit 0 override: neither root is recorded, and a
+	// child follows its root even though "pg.SELECT" has no override.
+	for _, name := range []string{"RealTime.rtPollInbox", "RealTime.rtGone"} {
+		ctx, root := tr.Start(context.Background(), name)
+		require.False(t, root.IsRecording(), name)
+		_, child := tr.Start(ctx, "pg.SELECT")
+		require.False(t, child.IsRecording(), name)
+		child.End()
+		root.End()
+	}
+	require.Len(t, rec.Ended(), 2)
+
+	// No overrides: identical to the plain ratio sampler.
+	all, problems := newMethodSampler(1.0, nil)
+	require.Empty(t, problems)
+	_, sp := sdktrace.NewTracerProvider(sdktrace.WithSampler(all)).Tracer("t").Start(context.Background(), "User.anything")
+	require.True(t, sp.IsRecording())
+}

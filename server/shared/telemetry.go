@@ -56,6 +56,12 @@ type TelemetryConfigJSON struct {
 	// TraceSampleRatio is the fraction of root spans kept, in [0,1]. Nil
 	// means 1.0 (keep everything; fine at staging volumes).
 	TraceSampleRatio *float64 `json:"trace_sample_ratio"`
+	// TraceSampleMethods overrides TraceSampleRatio per RPC, keyed by
+	// "<Protocol>.<method>" (e.g. "RealTime.rtSend"), each a ratio in
+	// [0,1]. The whole trace follows its root RPC's decision. Use it to
+	// sample down hot methods when traffic is high; see
+	// docs/observability.md.
+	TraceSampleMethods map[string]float64 `json:"trace_sample_methods"`
 	// MetricIntervalMs is the metric export period; default 10s.
 	MetricIntervalMs int `json:"metric_interval_ms"`
 	// DbStatement records parameterized SQL text on DB spans. Off by
@@ -268,10 +274,14 @@ func InitTelemetry(m MetaContext, typ string) error {
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(mexp, sdkmetric.WithInterval(interval))),
 		sdkmetric.WithView(expView),
 	)
+	sampler, problems := newMethodSampler(ratio, cfg.TraceSampleMethods)
+	for _, p := range problems {
+		m.Warnw("telemetry", "stage", "trace_sample_methods", "skipped", p)
+	}
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
 		sdktrace.WithBatcher(texp),
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))),
+		sdktrace.WithSampler(sdktrace.ParentBased(sampler)),
 	)
 	otel.SetMeterProvider(mp)
 	otel.SetTracerProvider(tp)
@@ -295,7 +305,7 @@ func InitTelemetry(m MetaContext, typ string) error {
 	}
 
 	g.telemetry.p.Store(t)
-	m.Infow("telemetry", "stage", "enabled", "endpoint", endpoint, "env", cfg.Env, "sample_ratio", ratio)
+	m.Infow("telemetry", "stage", "enabled", "endpoint", endpoint, "env", cfg.Env, "sampler", sampler.Description())
 	return nil
 }
 
