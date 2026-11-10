@@ -13,6 +13,7 @@ import (
 	"os"
 	"sort"
 	"testing"
+	"time"
 
 	lcl "github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
@@ -344,4 +345,31 @@ func TestRpcIdleAfterReset(t *testing.T) {
 	clock.Advance(opts.PollInterval * 2)
 	<-idleDisconnectCh
 	require.Nil(t, gcli.cm.xp)
+}
+
+// TestRpcConnectGiveUpIsTransportError pins what connectLoop returns once it
+// runs out of attempts. It must classify as transport both as it comes out of
+// the client and after crossing the agent RPC as a Status: the daemon reads
+// the second, and treats anything not transport as a refusal.
+func TestRpcConnectGiveUpIsTransportError(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	require.NoError(t, l.Close())
+
+	m := newRpcLogMetaContext()
+	opts := NewRpcClientOpts()
+	opts.NumConnectAttempts = 1
+	opts.MinConnectWait = time.Millisecond
+	opts.MaxConnectWait = time.Millisecond
+	gcli := NewRpcClient(m, proto.TCPAddr(addr), nil, nil, opts)
+	defer gcli.Shutdown()
+	cli := lcl.TestLibsClient{Cli: gcli, ErrorUnwrapper: StatusToError}
+
+	_, err = cli.Fast(context.Background(), 1)
+	require.Error(t, err)
+	require.True(t, IsTransportError(err), "out of the client: %T %v", err, err)
+
+	viaAgent := StatusToError(ErrorToStatus(err))
+	require.True(t, IsTransportError(viaAgent), "across the agent RPC: %T %v", viaAgent, viaAgent)
 }
