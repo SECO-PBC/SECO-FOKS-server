@@ -31,11 +31,24 @@ func (t *Telemetry) RTPhase(m MetaContext, phase string) (MetaContext, func()) {
 	}
 }
 
-// RTFanout records how many members' inboxes one write bumped and woke.
-func (t *Telemetry) RTFanout(ctx context.Context, members int) {
-	t.inst.rtFanoutMembers.Record(ctx, int64(members))
-	if span := trace.SpanFromContext(ctx); span.IsRecording() {
-		span.SetAttributes(attribute.Int("rt.fanout.members", members))
+// RTWake times one wake of parked inbox pollers as the "wake" phase, and
+// records how many members it woke. op names the operation that caused it
+// (e.g. "send", "read_mark"), so a 1000-member send and a 1-member read mark
+// land in separate series instead of one mixed distribution. op must come
+// from a small closed set. Call the returned func when the wake ends.
+func (t *Telemetry) RTWake(m MetaContext, op string, members int) (MetaContext, func()) {
+	if !t.Enabled() {
+		return m, func() {}
+	}
+	start := time.Now()
+	opAttr := attribute.String("op", op)
+	ctx, span := t.childSpan(m.Ctx(), "rt.wake",
+		trace.WithAttributes(opAttr, attribute.Int("rt.fanout.members", members)))
+	t.inst.rtFanoutMembers.Record(ctx, int64(members), metric.WithAttributes(opAttr))
+	opt := metric.WithAttributes(attribute.String("phase", "wake"), opAttr)
+	return m.WithContext(ctx), func() {
+		t.inst.rtPhase.Record(ctx, ms(time.Since(start)), opt)
+		span.End()
 	}
 }
 

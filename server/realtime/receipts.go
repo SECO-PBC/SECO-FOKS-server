@@ -357,7 +357,7 @@ func SetReadReceipts(m shared.MetaContext, arg rem.RtSetReadReceiptsArg) error {
 				return nil, nil
 			}
 			return func(m shared.MetaContext) {
-				wakeInboxPollers(m, arg.AppID, s.woken)
+				wakeInboxPollers(m, wakeReceipts, arg.AppID, s.woken)
 			}, nil
 		},
 	)

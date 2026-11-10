@@ -140,7 +140,7 @@ func reconcileUserChannels(m shared.MetaContext, app proto.RTAppID) error {
 			return func(m shared.MetaContext) {
 				hub.SetReconciledThrough(key, markerVers)
 				if fanned {
-					wakeInboxPollers(m, app, []proto.UID{uid})
+					wakeInboxPollers(m, wakeReconcile, app, []proto.UID{uid})
 				}
 			}, nil
 		},

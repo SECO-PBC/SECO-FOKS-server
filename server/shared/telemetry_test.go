@@ -40,6 +40,7 @@ var allowedTelemetryKeys = map[attribute.Key]bool{
 	"db.tx.retries":           true,
 	"db.tx.attempt":           true,
 	"phase":                   true,
+	"op":                      true,
 	"status":                  true,
 	"result":                  true,
 	"rt.fanout.members":       true,
@@ -319,8 +320,8 @@ func TestTxTelemetryAndRTHelpers(t *testing.T) {
 	bgTx.End(0, nil)
 	_, bgHook := bgTx.PostCommit(bm)
 	bgHook()
-	_, bgPhase := h.t.RTPhase(bg, "wake")
-	bgPhase()
+	_, bgWake := h.t.RTWake(bg, "send", 5)
+	bgWake()
 	require.Empty(t, h.spans.Ended())
 
 	// Under an RPC-style parent, replay what RetryTx2 does for a send whose
@@ -343,8 +344,7 @@ func TestTxTelemetryAndRTHelpers(t *testing.T) {
 	tx.End(1, nil)
 
 	hm, hookDone := tx.PostCommit(tm)
-	wm, wake := h.t.RTPhase(hm, "wake")
-	h.t.RTFanout(wm.Ctx(), 42)
+	_, wake := h.t.RTWake(hm, "send", 42)
 	wake()
 	hookDone()
 
@@ -381,6 +381,8 @@ func TestTxTelemetryAndRTHelpers(t *testing.T) {
 	require.NotNil(t, sendTx)
 	post := spanByName(t, ended, "db.tx.post_commit")
 	wakeSpan := spanByName(t, ended, "rt.wake")
+	require.Equal(t, "send", spanAttr(wakeSpan, "op").AsString())
+	require.EqualValues(t, 42, spanAttr(wakeSpan, "rt.fanout.members").AsInt64())
 
 	// db.tx and db.tx.post_commit are siblings under the RPC; the wake is
 	// under post_commit, not inside the transaction.
@@ -423,9 +425,10 @@ func TestNoopTelemetryIsSafe(t *testing.T) {
 	tx.End(0, nil)
 	_, hookDone := tx.PostCommit(tm)
 	hookDone()
-	_, pdone := tel.RTPhase(m, "wake")
+	_, pdone := tel.RTPhase(m, "lock")
 	pdone()
-	tel.RTFanout(m.Ctx(), 3)
+	_, wdone := tel.RTWake(m, "send", 3)
+	wdone()
 	tel.RTPollDone(m.Ctx(), time.Millisecond, "bumped")
 	tel.RTReconcile(m.Ctx(), "full")
 	tel.RPCConnOpened(m.Ctx())

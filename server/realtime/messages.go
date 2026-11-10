@@ -588,7 +588,7 @@ func SendMessage(
 			// Once the fanout's bumps commit, wake the members' parked
 			// long-pollers.
 			return func(m shared.MetaContext) {
-				wakeInboxPollers(m, s.appID, s.wakeUIDs)
+				wakeInboxPollers(m, wakeSend, s.appID, s.wakeUIDs)
 			}, nil
 		},
 	)
@@ -665,14 +665,26 @@ func loadReplay(
 	}, nil
 }
 
+// wakeOp names what caused a wake. It is the "op" label on the wake phase
+// and fan-out metrics, so keep it a small closed set.
+type wakeOp string
+
+const (
+	wakeSend      wakeOp = "send"
+	wakeReadMark  wakeOp = "read_mark"
+	wakeReceipts  wakeOp = "receipts"
+	wakeMute      wakeOp = "mute"
+	wakeACL       wakeOp = "acl"
+	wakeChannel   wakeOp = "channel"
+	wakeReconcile wakeOp = "reconcile"
+)
+
 // wakeInboxPollers wakes the given users' parked rtPollInbox calls. Call only
 // after the transaction that bumped their inbox versions has committed; see
 // shared.RTInboxHub.
-func wakeInboxPollers(m shared.MetaContext, app proto.RTAppID, uids []proto.UID) {
-	tel := m.G().Telemetry()
-	m, done := tel.RTPhase(m, "wake")
+func wakeInboxPollers(m shared.MetaContext, op wakeOp, app proto.RTAppID, uids []proto.UID) {
+	m, done := m.G().Telemetry().RTWake(m, string(op), len(uids))
 	defer done()
-	tel.RTFanout(m.Ctx(), len(uids))
 	hub := m.G().RTInboxHub()
 	for _, uid := range uids {
 		hub.Wake(shared.RTInboxHubKey{
@@ -919,7 +931,7 @@ func MarkReadThrough(
 				woken = append(woken, *r.peerBumped)
 			}
 			return func(m shared.MetaContext) {
-				wakeInboxPollers(m, r.app, woken)
+				wakeInboxPollers(m, wakeReadMark, r.app, woken)
 			}, nil
 		},
 	)

@@ -12,7 +12,7 @@ SECO promises end-to-end encryption, and the team has ruled out client-style tel
 
 | Allowed | Never allowed |
 |---|---|
-| server type (`service.name`), RPC method name, proto status code name, DB type, SQL operation keyword, static transaction names (`shared.TxName`), phase/outcome/result enums, counts | UIDs, usernames, FQNs, team / channel / device IDs, user host names, remote IPs, message metadata, SQL parameters, raw error strings |
+| server type (`service.name`), RPC method name, proto status code name, DB type, SQL operation keyword, static transaction names (`shared.TxName`), phase/op/outcome/result enums, counts | UIDs, usernames, FQNs, team / channel / device IDs, user host names, remote IPs, message metadata, SQL parameters, raw error strings |
 
 How the code enforces this:
 - **RPC spans** record the proto status code name, never `err.Error()`.
@@ -52,8 +52,8 @@ The resource sets `service.name = foks-<server type>`, e.g. `foks-realtime` or `
 | `foks.db.tx.duration` | histogram, ms | `db.tx.name`, `outcome` | `RetryTx`/`RetryTx2`, from the first BEGIN to the final COMMIT, including retries but **not** the success hook |
 | `foks.db.tx.post_commit.duration` | histogram, ms | `db.tx.name` | the `RetryTx2` success hook, run after COMMIT (for sends, the wake) |
 | `foks.db.tx.retries` | counter | `db.tx.name` | |
-| `foks.rt.phase.duration` | histogram, ms | `phase` | realtime: `lock`, `prune`, `insert`, `fanout`, `wake`, `reconcile` |
-| `foks.rt.fanout.members` | histogram | — | inboxes bumped and woken per write |
+| `foks.rt.phase.duration` | histogram, ms | `phase` (+ `op` on `wake`) | realtime: `lock`, `prune`, `insert`, `fanout`, `wake`, `reconcile` |
+| `foks.rt.fanout.members` | histogram | `op` | members woken per wake. `op`: `send`, `read_mark`, `receipts`, `mute`, `acl`, `channel`, `reconcile` |
 | `foks.rt.poll.duration` | histogram, ms | `outcome` | `rtPollInbox`: `bumped_immediate`, `bumped`, `timeout`, `cancelled`, `error` |
 | `foks.rt.reconcile` | counter | `result` | late-join fan-in: `memory`, `cursor` or `full` (slow path) |
 | `foks.rt.pollers.parked` | gauge | — | parked long-polls (realtime only) |
@@ -81,7 +81,8 @@ The resource sets `service.name = foks-<server type>`, e.g. `foks-realtime` or `
 For one `RealTime.rtSend`, read the following together:
 
 1. **`foks.rt.phase.duration` by `phase`.** `lock` is time waiting on the channel row's `FOR UPDATE`, so all sends to one channel run one at a time. `fanout` is the set-based `user_inbox`/`user_channels`/`push_outbox` writes. `wake` is post-commit hub wakes, which take one global lock per member.
-2. **`foks.rt.fanout.members`** to see how fan-out cost scales with channel size.
+   **Filter `wake` on `op:send`.** Every read mark, mute, ACL change and late-join reconcile also wakes pollers (usually 1–2 members). They far outnumber sends, so an unfiltered `wake` p95 describes them, not sends.
+2. **`foks.rt.fanout.members{op:send}`** to see how fan-out cost scales with channel size. The other `op` values show wake load from non-send traffic, which contends for the same hub lock.
 3. **`foks.db.pool.acquire.duration` and `foks.db.pool.empty_acquires`** for pool starvation.
 4. **`foks.db.tx.retries{db.tx.name=realtime.SendMessage}`** for serialization retries, and `foks.db.tx.post_commit.duration` for the wake cost outside the transaction.
 5. **Datadog DBM → Query Metrics** for the `INSERT INTO user_inbox ... SELECT` fan-out statement: lock waits, rows and I/O.

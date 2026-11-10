@@ -971,7 +971,7 @@ func MakeChannel(
 			// Once the fan-in bumps commit, wake the members' parked
 			// long-pollers so the channel surfaces immediately.
 			return func(m shared.MetaContext) {
-				wakeInboxPollers(m, md.AppID, mk.wakeUIDs)
+				wakeInboxPollers(m, wakeChannel, md.AppID, mk.wakeUIDs)
 			}, nil
 		},
 	)
@@ -1401,7 +1401,7 @@ func UpdateChannel(m shared.MetaContext, arg rem.RtUpdateChannelArg) error {
 			}
 			app, uids := mu.ca.appID, mu.wakeUIDs
 			return func(m shared.MetaContext) {
-				wakeInboxPollers(m, app, uids)
+				wakeInboxPollers(m, wakeChannel, app, uids)
 			}, nil
 		},
 	)
@@ -1486,7 +1486,7 @@ func SetChannelArchived(m shared.MetaContext, arg rem.RtSetChannelArchivedArg) e
 			}
 			app, uids := mu.ca.appID, mu.wakeUIDs
 			return func(m shared.MetaContext) {
-				wakeInboxPollers(m, app, uids)
+				wakeInboxPollers(m, wakeChannel, app, uids)
 			}, nil
 		},
 	)
