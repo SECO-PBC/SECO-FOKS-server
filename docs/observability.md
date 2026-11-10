@@ -52,7 +52,7 @@ The resource sets `service.name = foks-<server type>`, e.g. `foks-realtime` or `
 | `foks.db.pool.empty_acquires`, `foks.db.pool.acquire_wait` | counter | `db.type` | acquires that had to wait, and for how long |
 | `foks.db.tx.duration` | histogram, ms | `db.tx.name`, `outcome` | `RetryTx`/`RetryTx2`, from the first BEGIN to the final COMMIT, including retries but **not** the success hook |
 | `foks.db.tx.post_commit.duration` | histogram, ms | `db.tx.name` | the `RetryTx2` success hook, run after COMMIT (for sends, the wake) |
-| `foks.db.tx.retries` | counter | `db.tx.name` | |
+| `foks.db.tx.retries` | counter | `db.tx.name` | retries after a COMMIT that never reached the server (connection-level; rare). Deadlocks and serialization failures are **not** retried |
 | `foks.rt.phase.duration` | histogram, ms | `phase` (+ `op` on `wake`) | realtime: `lock`, `prune`, `insert`, `fanout`, `wake`, `reconcile` |
 | `foks.rt.fanout.members` | histogram | `op` | members woken per wake. `op`: `send`, `read_mark`, `receipts`, `mute`, `acl`, `channel`, `reconcile` |
 | `foks.rt.poll.duration` | histogram, ms | `outcome` | `rtPollInbox`: `bumped_immediate`, `bumped`, `timeout`, `cancelled`, `error` |
@@ -104,5 +104,6 @@ For one `RealTime.rtSend`, read the following together:
    **Filter `wake` on `op:send`.** Every read mark, mute, ACL change and late-join reconcile also wakes pollers (usually 1–2 members). They far outnumber sends, so an unfiltered `wake` p95 describes them, not sends.
 2. **`foks.rt.fanout.members{op:send}`** to see how fan-out cost scales with channel size. The other `op` values show wake load from non-send traffic, which contends for the same hub lock.
 3. **`foks.db.pool.acquire.duration` and `foks.db.pool.empty_acquires`** for pool starvation.
-4. **`foks.db.tx.retries{db.tx.name=realtime.SendMessage}`** for serialization retries, and `foks.db.tx.post_commit.duration` for the wake cost outside the transaction.
-5. **Datadog DBM → Query Metrics** for the `INSERT INTO user_inbox ... SELECT` fan-out statement: lock waits, rows and I/O.
+4. **Deadlocks and failed sends:** `foks.db.query.errors{db.response.status_code:40P01}` and `foks.db.tx.duration{db.tx.name:realtime.SendMessage, outcome:error}`. `RetryTx2` deliberately doesn't retry deadlocks or other server errors; it retries only a COMMIT that never reached the server, so `foks.db.tx.retries` should stay near zero. Contention between sends shows up as `lock` time instead.
+5. **`foks.db.tx.post_commit.duration{db.tx.name:realtime.SendMessage}`** for the wake cost outside the transaction.
+6. **Datadog DBM → Query Metrics** for the `INSERT INTO user_inbox ... SELECT` fan-out statement: lock waits, rows and I/O.

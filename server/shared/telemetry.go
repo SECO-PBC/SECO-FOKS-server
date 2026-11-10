@@ -135,7 +135,7 @@ func newInstruments(mt metric.Meter) (*instruments, error) {
 		dbQueryErrors:     ctr("foks.db.query.errors", "Postgres query errors, by SQLSTATE"),
 		dbAcquireDuration: f64h("foks.db.pool.acquire.duration", "ms", "Time waiting to acquire a pooled connection"),
 		dbTxDuration:      f64h("foks.db.tx.duration", "ms", "RetryTx transaction latency, first BEGIN to final COMMIT, incl. retries"),
-		dbTxRetries:       ctr("foks.db.tx.retries", "RetryTx serialization/safe-to-retry retries"),
+		dbTxRetries:       ctr("foks.db.tx.retries", "RetryTx retries of a COMMIT that never reached the server"),
 		dbTxPostCommit:    f64h("foks.db.tx.post_commit.duration", "ms", "RetryTx2 success hook, run after COMMIT"),
 
 		rtPhase:         f64h("foks.rt.phase.duration", "ms", "Realtime write/poll path, per phase"),

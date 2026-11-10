@@ -148,9 +148,34 @@ func RetryTx(
 // the success hook as a separate db.tx.post_commit span. That one is a sibling
 // of db.tx, so foks.db.tx.duration measures only time in the transaction.
 // nm becomes the db.tx.name label.
+//
+// Only errors pgx marks SafeToRetry are retried: failures where the COMMIT
+// never reached the server (a busy or closed connection, a context already
+// done). Errors from tryFn, and server errors at COMMIT, are not -- including
+// deadlocks (40P01) and serialization failures (40001). That's deliberate:
+// a deadlock means two transactions take locks in conflicting orders, and
+// retrying would hide it. It surfaces as an error to fix at the source.
 func RetryTx2(
 	m MetaContext,
 	db *pgxpool.Conn,
+	nm TxName,
+	tryFn func(m MetaContext, tx pgx.Tx) (func(MetaContext), error),
+) error {
+	return retryTx2(m, db, nm, tryFn)
+}
+
+// txBeginner is the one method RetryTx2 needs from its connection;
+// *pgxpool.Conn satisfies it, and tests substitute a fake.
+type txBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// retryTxSleep is the backoff between attempts; tests replace it.
+var retryTxSleep = time.Sleep
+
+func retryTx2(
+	m MetaContext,
+	db txBeginner,
 	nm TxName,
 	tryFn func(m MetaContext, tx pgx.Tx) (func(MetaContext), error),
 ) error {
@@ -206,7 +231,7 @@ func RetryTx2(
 		// Back off between attempts, outside any attempt's span, and not
 		// after the last one.
 		retries++
-		time.Sleep(backoff)
+		retryTxSleep(backoff)
 		backoff *= 2
 	}
 

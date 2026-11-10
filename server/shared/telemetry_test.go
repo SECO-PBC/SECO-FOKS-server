@@ -324,8 +324,9 @@ func TestTxTelemetryAndRTHelpers(t *testing.T) {
 	bgWake()
 	require.Empty(t, h.spans.Ended())
 
-	// Under an RPC-style parent, replay what RetryTx2 does for a send whose
-	// first attempt hits a serialization failure.
+	// Under an RPC-style parent, replay the spans RetryTx2 makes for a send
+	// whose first COMMIT fails retryably (never reached the server). The
+	// real loop is tested in db_retry_test.go.
 	pctx, parent := h.t.tracer.Start(context.Background(), "RealTime.rtSend")
 	m := NewMetaContext(pctx, h.g)
 
