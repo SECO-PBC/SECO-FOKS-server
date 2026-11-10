@@ -5,6 +5,7 @@ package shared
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -574,4 +575,39 @@ func TestDisabledTxTelemetryAllocatesNothing(t *testing.T) {
 		hookDone()
 	})
 	require.Zero(t, allocs)
+}
+
+func TestOtelErrorHandlerRateLimits(t *testing.T) {
+	type entry struct {
+		level      string
+		suppressed int
+	}
+	var log []entry
+	now := time.Unix(1000, 0)
+	h := &otelErrorHandler{
+		warn: func(_ string, kv ...interface{}) {
+			log = append(log, entry{"warn", kv[3].(int)})
+		},
+		debug: func(string, ...interface{}) { log = append(log, entry{"debug", 0}) },
+		now:   func() time.Time { return now },
+		every: time.Minute,
+	}
+	boom := errors.New("export failed")
+
+	h.Handle(boom) // first: Warn immediately
+	for range 3 {
+		now = now.Add(10 * time.Second)
+		h.Handle(boom) // within the minute: Debug
+	}
+	now = now.Add(31 * time.Second) // 61s after the first Warn
+	h.Handle(boom)                  // Warn again, reporting 3 suppressed
+	now = now.Add(time.Second)
+	h.Handle(boom)
+
+	require.Equal(t, []entry{
+		{"warn", 0},
+		{"debug", 0}, {"debug", 0}, {"debug", 0},
+		{"warn", 3},
+		{"debug", 0},
+	}, log)
 }

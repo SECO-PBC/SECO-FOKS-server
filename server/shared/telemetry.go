@@ -289,9 +289,7 @@ func InitTelemetry(m MetaContext, typ string) error {
 	)
 	otel.SetMeterProvider(mp)
 	otel.SetTracerProvider(tp)
-	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-		g.Log().Warnw("otel", "err", err)
-	}))
+	otel.SetErrorHandler(newOtelErrorHandler(g))
 
 	t, err := newTelemetry(mp, tp, cfg.DbStatement)
 	t.shutdowns = []func(context.Context) error{tp.Shutdown, mp.Shutdown}
