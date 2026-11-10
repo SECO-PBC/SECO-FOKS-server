@@ -249,9 +249,11 @@ func (t *TestEnv) Setup(opts SetupOpts) error {
 	// No-op when telemetry is off.
 	serverShutdown := t.ShutdownFn
 	t.ShutdownFn = func() error {
-		err := serverShutdown()
+		// Flush telemetry first, as G.Shutdown does: the final collection
+		// runs observable callbacks (e.g. the push_outbox probe) that need
+		// the databases still up.
 		t.G.ShutdownTelemetry()
-		return err
+		return serverShutdown()
 	}
 	t.x509m = smr.X509M
 	t.config = smr.Config

@@ -91,7 +91,9 @@ func registerObservables(g *GlobalContext, t *Telemetry, typ string) error {
 		return err
 	}
 
-	if typ == "realtime" {
+	// The integration-test harness ("itest") runs every server type, realtime
+	// included, in one process.
+	if typ == "realtime" || typ == "itest" {
 		return registerRealtimeObservables(g, t)
 	}
 	return nil
@@ -140,6 +142,7 @@ type pushBacklogProbe struct {
 	counts map[string]int64
 	age    float64
 	ok     bool
+	warned bool // the first failure logs at Warn, later ones at Debug
 }
 
 func (p *pushBacklogProbe) read(ctx context.Context) (map[string]int64, float64, bool) {
@@ -149,9 +152,16 @@ func (p *pushBacklogProbe) read(ctx context.Context) (map[string]int64, float64,
 		return p.counts, p.age, p.ok
 	}
 	p.last = time.Now()
-	counts, age, err := p.query(ctx)
+	counts, age, err := PushOutboxBacklog(ctx, p.g)
 	if err != nil {
-		p.g.Log().Debugw("telemetry", "stage", "push_outbox backlog", "err", err)
+		// A broken probe otherwise just looks like a missing gauge, so say
+		// so once, without logging every 30s.
+		log := p.g.Log().Debugw
+		if !p.warned {
+			log = p.g.Log().Warnw
+			p.warned = true
+		}
+		log("telemetry", "stage", "push_outbox backlog", "err", err)
 		p.ok = false
 		return nil, 0, false
 	}
@@ -159,10 +169,14 @@ func (p *pushBacklogProbe) read(ctx context.Context) (map[string]int64, float64,
 	return counts, age, true
 }
 
-func (p *pushBacklogProbe) query(ctx context.Context) (map[string]int64, float64, error) {
+// PushOutboxBacklog counts queued and sending push_outbox rows across all
+// hosts, and returns the age in seconds of the oldest of them (0 if none).
+// It backs the foks.rt.push_outbox.* gauges; exported for the integration
+// test that runs it against a real database.
+func PushOutboxBacklog(ctx context.Context, g *GlobalContext) (map[string]int64, float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	db, err := p.g.Db(ctx, DbTypeRealTime)
+	db, err := g.Db(ctx, DbTypeRealTime)
 	if err != nil {
 		return nil, 0, err
 	}

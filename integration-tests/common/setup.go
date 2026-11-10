@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/foks-proj/go-foks/lib/core"
@@ -675,6 +676,9 @@ func SetupServers(
 		if err != nil {
 			return nil, err
 		}
+		telemetryEnvs.Lock()
+		telemetryEnvs.gs = append(telemetryEnvs.gs, m.G())
+		telemetryEnvs.Unlock()
 	}
 
 	if newDb {
@@ -1007,4 +1011,23 @@ func ServerMain(
 		Stripe: fs,
 	}
 	return retFn, &ret, nil
+}
+
+// telemetryEnvs lists every test GlobalContext with telemetry on.
+var telemetryEnvs struct {
+	sync.Mutex
+	gs []*shared.GlobalContext
+}
+
+// FlushTelemetry flushes and stops telemetry in every test environment. Call
+// it before tearing any environment down: the environments share one
+// Postgres, and the final metric collection runs DB-backed observables (e.g.
+// the push_outbox probe). Safe to call more than once.
+func FlushTelemetry() {
+	telemetryEnvs.Lock()
+	defer telemetryEnvs.Unlock()
+	for _, g := range telemetryEnvs.gs {
+		g.ShutdownTelemetry()
+	}
+	telemetryEnvs.gs = nil
 }
