@@ -112,7 +112,7 @@ func (k *Minder) GetFile(
 	m, done := k.instrumentScope(m, "KVMinder.GetFile")
 	defer done()
 
-	kvp, err := k.initReq(m, cfg)
+	kvp, err := k.initReqAnyStore(m, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +130,7 @@ func (k *Minder) GetFile(
 		kvRetryOptions{skipCacheCheck: cfg.SkipCacheCheck},
 		func(m MetaContext) error {
 
-			dp, err := k.walkFromRoot(m, kvp, pap, walkOpts{endAtFile: true})
+			dp, err := k.walkFromRoot(m, kvp, pap, walkOpts{endAtFile: true, systemStore: cfg.SystemStore})
 			if err != nil {
 				return err
 			}

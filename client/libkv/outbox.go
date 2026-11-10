@@ -494,8 +494,18 @@ func (k *Minder) maybeQueueWrite(
 	rg proto.RoleAndGen,
 	payload *lcl.KVOutboxPayload,
 	channelID *proto.RTChannelID,
+	systemStore bool,
 ) error {
 	if !core.IsTransportError(sendErr) {
+		return nil
+	}
+	if systemStore {
+		// A counter write replayed later would overwrite newer counts, and
+		// the caller needs to know the save did not land
+		// (docs/kv-system-store.md). Declining returns the transport error.
+		m.Infow("kvOutbox", "stage", "declined",
+			"why", "system store writes are not queued",
+			"party", kvp.Id(), "op", payload.Op)
 		return nil
 	}
 	if channelID != nil {
