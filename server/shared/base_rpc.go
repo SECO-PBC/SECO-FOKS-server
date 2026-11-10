@@ -139,6 +139,10 @@ func serveConnection(m MetaContext, s RPCServer, conn net.Conn, doneCh chan<- st
 
 	m = m.WithLogTag("conn")
 
+	tel := m.G().Telemetry()
+	tel.RPCConnOpened(m.Ctx())
+	defer tel.RPCConnClosed(m.Ctx())
+
 	if m.G().LogRemoteIP(m.Ctx()) || s.IsInternal() {
 		m.Debugw("serveConnection",
 			"stage", "new connection",
@@ -173,7 +177,7 @@ func serveConnection(m MetaContext, s RPCServer, conn net.Conn, doneCh chan<- st
 	srv := rpc.NewServer(xp, wef)
 	cliCon := s.NewClientConn(xp, uhc)
 
-	rerr := cliCon.RegisterProtocols(m, srv)
+	rerr := cliCon.RegisterProtocols(m, instrumentingRegistrar{g: m.G(), srv: srv})
 
 	if rerr != nil {
 		m.Warnw("serveConnection",

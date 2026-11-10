@@ -139,7 +139,7 @@ func SetChannelMuted(m shared.MetaContext, arg rem.RtSetChannelMutedArg) error {
 			}
 			// Wake the caller's own parked pollers (their other devices).
 			return func(m shared.MetaContext) {
-				wakeInboxPollers(m, c.app, []proto.UID{c.uid})
+				wakeInboxPollers(m, wakeMute, c.app, []proto.UID{c.uid})
 			}, nil
 		},
 	)

@@ -323,8 +323,8 @@ func PollInbox(
 	m shared.MetaContext,
 	arg rem.RTPollInboxArg,
 ) (
-	*proto.RTInboxPollRes,
-	error,
+	ret *proto.RTInboxPollRes,
+	err error,
 ) {
 	hub := m.G().RTInboxHub()
 	key := shared.RTInboxHubKey{
@@ -335,10 +335,20 @@ func PollInbox(
 	// Late-join fan-in (issue #301), best-effort: if it backfills anything,
 	// the caller's version bumps, so the first read below returns Bumped
 	// immediately and the client runs the sync that discovers the channels.
-	err := reconcileUserChannels(m, arg.AppID)
+	tel := m.G().Telemetry()
+	rm, done := tel.RTPhase(m, "reconcile")
+	err = reconcileUserChannels(rm, arg.AppID)
+	done()
 	if err != nil {
 		m.Warnw("PollInbox", "stage", "reconcile", "err", err)
 	}
+
+	// Poll outcome telemetry: total wait, and whether we ever parked.
+	start := time.Now()
+	parked := false
+	defer func() {
+		tel.RTPollDone(m.Ctx(), time.Since(start), pollOutcome(m, parked, ret, err))
+	}()
 
 	deadline := time.Now().Add(cappedPollTimeout(arg.Timeout))
 
@@ -363,6 +373,7 @@ func PollInbox(
 		}
 		timer := time.NewTimer(remain)
 		defer timer.Stop()
+		parked = true
 		select {
 		case <-ch:
 			// Woken; the next round re-reads.
@@ -375,10 +386,26 @@ func PollInbox(
 	}
 
 	for {
-		res, err := oneRound()
-		if res != nil || err != nil {
-			return res, err
+		ret, err = oneRound()
+		if ret != nil || err != nil {
+			return ret, err
 		}
+	}
+}
+
+// pollOutcome classifies a finished PollInbox for telemetry.
+func pollOutcome(m shared.MetaContext, parked bool, res *proto.RTInboxPollRes, err error) string {
+	switch {
+	case err != nil && m.Ctx().Err() != nil:
+		return "cancelled"
+	case err != nil:
+		return "error"
+	case res != nil && res.Bumped && !parked:
+		return "bumped_immediate"
+	case res != nil && res.Bumped:
+		return "bumped"
+	default:
+		return "timeout"
 	}
 }
 

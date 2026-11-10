@@ -114,6 +114,19 @@ func (h *RTInboxHub) Wake(k RTInboxHubKey) {
 	delete(h.waiters, k)
 }
 
+// NumParked reports how many pollers are subscribed across all keys. Wake
+// retires channels without Unsubscribe, so this is counted from the map
+// rather than tracked incrementally. For the parked-pollers gauge.
+func (h *RTInboxHub) NumParked() int {
+	h.RLock()
+	defer h.RUnlock()
+	n := 0
+	for _, set := range h.waiters {
+		n += len(set)
+	}
+	return n
+}
+
 // NumWaiters reports how many pollers are currently subscribed on k. For
 // metrics and tests (e.g., deterministically waiting for a poller to park
 // before triggering the bump that should wake it).

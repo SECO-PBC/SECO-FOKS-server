@@ -101,5 +101,16 @@ pre.final({
         },
         realtime : {}
     },
+    // OpenTelemetry metrics + traces over OTLP/gRPC (see docs/observability.md).
+    // Off by default. Turn on per host in local.pre.libsonnet's final(), e.g.
+    //   telemetry +: { enabled : true, env : "staging" },
+    telemetry : {
+        enabled : false,
+        otlp_endpoint : "datadog-agent:4317",
+        trace_sample_ratio : 1.0,
+        // Per-RPC overrides, e.g. { "RealTime.rtPollInbox" : 0.01 }.
+        trace_sample_methods : {},
+        db_statement : false,
+    },
     cks : {},
 })

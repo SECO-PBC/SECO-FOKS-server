@@ -323,6 +323,8 @@ type JSonnetTemplateNoLog struct {
 	VHosts *VHostsConfigJSON `json:"vhosts"`
 	Client *ClientConfigJSON `json:"client"`
 	Team   *TeamConfigJSON   `json:"team"`
+
+	Telemetry *TelemetryConfigJSON `json:"telemetry"`
 }
 
 type JSonnetTemplate struct {
@@ -586,6 +588,12 @@ func (u *UserServerConfigJSON) BadLoginRateLimit() RateLimit {
 		Num:        10,
 		WindowSecs: 60,
 	}
+}
+
+func (c *ConfigJSonnet) TelemetryConfig(ctx context.Context) *TelemetryConfigJSON {
+	c.RLock()
+	defer c.RUnlock()
+	return c.Data.Telemetry
 }
 
 func (c *ConfigJSonnet) RealTimeConfig(ctx context.Context) (RealTimeConfigger, error) {

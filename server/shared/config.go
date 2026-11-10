@@ -259,6 +259,9 @@ type Config interface {
 	KVStoreServerConfig(ctx context.Context) (KVServerConfigger, error)
 	RealTimeConfig(ctx context.Context) (RealTimeConfigger, error)
 
+	// OpenTelemetry export settings; nil means telemetry is off.
+	TelemetryConfig(ctx context.Context) *TelemetryConfigJSON
+
 	// Used for both the builder and the batcher for now, since they have very similar
 	// configurations.
 	MerkleBuilderServerConfig(ctx context.Context) (MerkleBuilderServerConfigger, error)
@@ -617,8 +620,9 @@ func (e *EmptyConfig) DbConfig(ctx context.Context, which DbType) (*pgxpool.Conf
 func (e *EmptyConfig) KVShardsConfig(ctx context.Context) (KVShardsConfig, error) {
 	return nil, NewEmptyConfigError()
 }
-func (e *EmptyConfig) LogConfig(ctx context.Context) *zap.Config     { return nil }
-func (e *EmptyConfig) LogRemoteIP(ctx context.Context) (bool, error) { return false, nil }
+func (e *EmptyConfig) LogConfig(ctx context.Context) *zap.Config                { return nil }
+func (e *EmptyConfig) TelemetryConfig(ctx context.Context) *TelemetryConfigJSON { return nil }
+func (e *EmptyConfig) LogRemoteIP(ctx context.Context) (bool, error)            { return false, nil }
 
 func (c *EmptyConfig) RPCLogOptions(ctx context.Context) (rpc.LogOptions, error) {
 	return nil, nil

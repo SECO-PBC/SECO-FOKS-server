@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/foks-proj/go-foks/lib/core"
@@ -646,6 +647,18 @@ func SetupServers(
 	// a cold-start problem otherwise.
 	m.G().SetShortHostID(1)
 
+	// Opt-in telemetry, for checking OTLP export end to end against a local
+	// collector (docs/observability.md). Off unless the env var is set.
+	if ep := os.Getenv("FOKS_TEST_OTLP_ENDPOINT"); ep != "" {
+		config.Telemetry = &shared.TelemetryConfigJSON{
+			Enabled:          true,
+			OTLPEndpoint:     ep,
+			Env:              "itest",
+			MetricIntervalMs: 2000,
+			DbStatement:      true,
+		}
+	}
+
 	err = cookConfig(m, dir, *config, &opts)
 	if err != nil {
 		return nil, err
@@ -654,6 +667,18 @@ func SetupServers(
 	err = m.Configure(opts)
 	if err != nil {
 		return nil, err
+	}
+
+	// Test servers share one GlobalContext and skip runServer, so enable
+	// telemetry here; "itest" stands in for the server type.
+	if config.Telemetry != nil && !m.G().Telemetry().Enabled() {
+		err = shared.InitTelemetry(m, "itest")
+		if err != nil {
+			return nil, err
+		}
+		telemetryEnvs.Lock()
+		telemetryEnvs.gs = append(telemetryEnvs.gs, m.G())
+		telemetryEnvs.Unlock()
 	}
 
 	if newDb {
@@ -986,4 +1011,23 @@ func ServerMain(
 		Stripe: fs,
 	}
 	return retFn, &ret, nil
+}
+
+// telemetryEnvs lists every test GlobalContext with telemetry on.
+var telemetryEnvs struct {
+	sync.Mutex
+	gs []*shared.GlobalContext
+}
+
+// FlushTelemetry flushes and stops telemetry in every test environment. Call
+// it before tearing any environment down: the environments share one
+// Postgres, and the final metric collection runs DB-backed observables (e.g.
+// the push_outbox probe). Safe to call more than once.
+func FlushTelemetry() {
+	telemetryEnvs.Lock()
+	defer telemetryEnvs.Unlock()
+	for _, g := range telemetryEnvs.gs {
+		g.ShutdownTelemetry()
+	}
+	telemetryEnvs.gs = nil
 }

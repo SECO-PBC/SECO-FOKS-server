@@ -46,6 +46,7 @@ func pushShutdownHook(fn func() error) {
 func shutdown() {
 	// In general, don't panic on shutdown problems. Just ignore these
 	// errors.
+	common.FlushTelemetry()
 	_ = globalTestEnv.ShutdownFn()
 	for _, fn := range shutdownHooks {
 		_ = fn()

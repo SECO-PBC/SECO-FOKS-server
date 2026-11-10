@@ -1,0 +1,74 @@
+# Datadog Agent sidecar for FOKS server telemetry.
+#
+# Receives OTLP metrics + traces from the foks-server containers (their
+# config's telemetry.otlp_endpoint = "datadog-agent:4317") and adds host,
+# container and Postgres (Database Monitoring) metrics.
+#
+# Loaded alongside docker-compose.yml and docker-compose.override.yml via
+# COMPOSE_FILE in the workdir's .env; see scripts/deploy/README.md,
+# "Telemetry (Datadog)". Needs in .env: DD_API_KEY, DD_SITE, DD_PG_PASSWORD.
+#
+# Privacy: container LOG collection is deliberately OFF. foks-server logs can
+# carry UIDs, usernames and remote IPs, which must not leave the host
+# (docs/observability.md). Don't enable DD_LOGS_ENABLED without scrubbing.
+
+services:
+  datadog-agent:
+    # Pinned: the agent runs with the Docker socket (root-equivalent, see
+    # below), so upgrades should be deliberate, not whatever 7.x was pushed
+    # last. To upgrade, bump this and redeploy.
+    image: gcr.io/datadoghq/agent:7.85.3
+    restart: unless-stopped
+    environment:
+      DD_API_KEY: ${DD_API_KEY:?set DD_API_KEY in .env}
+      DD_SITE: ${DD_SITE:-datadoghq.com}
+      # Must match telemetry.env in the servers' local.pre.libsonnet, which
+      # tags the foks.* OTLP data; otherwise Datadog splits host/DB metrics
+      # and app metrics under different env values.
+      DD_ENV: ${DD_ENV:-staging}
+      DD_HOSTNAME: ${DD_HOSTNAME:-foks-staging}
+      # OTLP intake from the foks-server containers on the compose network.
+      DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT: "0.0.0.0:4317"
+      DD_OTLP_CONFIG_LOGS_ENABLED: "false"
+      DD_APM_ENABLED: "true"
+      DD_APM_NON_LOCAL_TRAFFIC: "true"
+      # Off: see privacy note above.
+      DD_LOGS_ENABLED: "false"
+      # Off to save CPU/RAM on a small host; container metrics stay on.
+      DD_PROCESS_CONFIG_PROCESS_COLLECTION_ENABLED: "false"
+      # Read by the Postgres check below via %%env_DD_PG_PASSWORD%%.
+      DD_PG_PASSWORD: ${DD_PG_PASSWORD:?set DD_PG_PASSWORD in .env}
+    volumes:
+      # SECURITY: root-equivalent. ":ro" only protects the socket file; the
+      # agent can still use the whole Docker API (e.g. start a privileged
+      # container). Accepted for the staging canary, for label-based
+      # autodiscovery and per-container metrics. Before prod, revisit: a
+      # GET-only docker-socket-proxy (still exposes container env vars, i.e.
+      # secrets) or no socket with a static postgres.d/conf.yaml.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc/:/host/proc/:ro
+      - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+    # The staging host is small (2 vCPU / 2 GB); keep the agent from
+    # competing with the server under benchmark load.
+    mem_limit: 512m
+    cpus: 0.5
+    # Not published on the host: only compose-network peers can send.
+    expose:
+      - "4317"
+
+  postgresql:
+    labels:
+      # Datadog autodiscovery: Postgres integration + Database Monitoring
+      # across every foks_* database. Query samples are obfuscated by the
+      # agent; parameters are never collected (all server SQL uses $n).
+      com.datadoghq.ad.checks: >-
+        {"postgres": {"init_config": {}, "instances": [{
+          "dbm": true,
+          "host": "%%host%%", "port": 5432,
+          "username": "datadog", "password": "%%env_DD_PG_PASSWORD%%",
+          "dbname": "postgres",
+          "database_autodiscovery": {"enabled": true, "include": ["^foks_"]},
+          "relations": [{"relation_regex": ".*", "schemas": ["public"]}],
+          "collect_settings": {"enabled": true},
+          "collect_schemas": {"enabled": false}
+        }]}}

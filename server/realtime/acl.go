@@ -762,7 +762,7 @@ func GrantChannelMember(
 			app := ca.appID
 			uid := arg.Uid
 			return func(m shared.MetaContext) {
-				wakeInboxPollers(m, app, []proto.UID{uid})
+				wakeInboxPollers(m, wakeACL, app, []proto.UID{uid})
 			}, nil
 		},
 	)
@@ -858,7 +858,7 @@ func RevokeChannelMember(
 			app := ca.appID
 			uid := arg.Uid
 			return func(m shared.MetaContext) {
-				wakeInboxPollers(m, app, []proto.UID{uid})
+				wakeInboxPollers(m, wakeACL, app, []proto.UID{uid})
 			}, nil
 		},
 	)

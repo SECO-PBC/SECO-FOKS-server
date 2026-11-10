@@ -103,6 +103,20 @@ split it against `upstream/main` rather than off that branch. Its `Status` arm
 `KV_WRITE_QUEUED` moved from `@23` to `@24` in the 2026-10-06 sync, where
 upstream's `RT_MSG_QUEUED` (#359) took `@23`. Local only, so no wire break.
 
+**Server OpenTelemetry (metrics + traces).** Branch `feat/otel-telemetry`
+(2026-11-09). Built to diagnose realtime fan-out on SECO staging, exported to
+a Datadog Agent sidecar. Local for now. The Datadog deploy files
+(`scripts/deploy/datadog/`) and the realtime phase metrics are SECO-specific.
+The generic parts are `shared.InstrumentProtocol` (per-RPC histograms, wrapped
+at `RegisterV2`, because snowpack's server-side hooks see an empty V2 method
+name), the pgx query/acquire tracer, and the `telemetry` config block. The
+only upstream-shaped change outside `server/shared` is the parameter type of
+the 14 `RegisterProtocols` methods: `*rpc.Server` became
+`shared.ProtocolRegistrar`, whose implementation instruments every protocol.
+Their bodies are upstream's. Once
+they have run on staging, decide whether to offer them upstream as one
+vendor-neutral OTLP PR, sliced off `upstream/main`.
+
 ## Declined — considered, rejected, stays rejected
 
 ### RpcStats scope reporter

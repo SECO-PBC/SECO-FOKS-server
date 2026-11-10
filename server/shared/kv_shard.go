@@ -200,6 +200,7 @@ func (s *KVShardMgr) getDbPool(m MetaContext, id proto.KVShardID) (*pgxpool.Pool
 	if err != nil {
 		return nil, err
 	}
+	m.G().Telemetry().InstallPgTracer(dbcfg, DbTypeKVStore.ToString())
 	pool, err := pgxpool.NewWithConfig(m.Ctx(), dbcfg)
 	if err != nil {
 		return nil, err

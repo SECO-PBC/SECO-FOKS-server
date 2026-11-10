@@ -244,6 +244,17 @@ func (t *TestEnv) Setup(opts SetupOpts) error {
 		return err
 	}
 	t.G = smr.G
+	// Flush opt-in telemetry (FOKS_TEST_OTLP_ENDPOINT) on teardown; suites
+	// don't call G.Shutdown, so short runs would otherwise export nothing.
+	// No-op when telemetry is off.
+	serverShutdown := t.ShutdownFn
+	t.ShutdownFn = func() error {
+		// Flush telemetry first, as G.Shutdown does: the final collection
+		// runs observable callbacks (e.g. the push_outbox probe) that need
+		// the databases still up.
+		t.G.ShutdownTelemetry()
+		return serverShutdown()
+	}
 	t.x509m = smr.X509M
 	t.config = smr.Config
 	t.dir = smr.Dir

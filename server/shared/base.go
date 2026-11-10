@@ -21,8 +21,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// ProtocolRegistrar is what a ClientConn registers its protocols into.
+// serveConnection passes one that instruments every protocol for telemetry
+// (see InstrumentProtocol), so no server type can register around it.
+type ProtocolRegistrar interface {
+	RegisterV2(p rpc.ProtocolV2) error
+}
+
 type ClientConn interface {
-	RegisterProtocols(m MetaContext, srv *rpc.Server) error
+	RegisterProtocols(m MetaContext, srv ProtocolRegistrar) error
 	UserHost() UserHostContext
 	G() *GlobalContext
 	SetHostID(h *core.HostID)
@@ -364,6 +371,10 @@ func runServer(
 	err = runShared(m, rc, s)
 	if err != nil {
 		return err
+	}
+	// Telemetry problems never keep a server from starting.
+	if terr := InitTelemetry(m, s.ServerType().ToString()); terr != nil {
+		m.Warnw("telemetry", "stage", "init", "err", terr)
 	}
 	err = s.InitHostID(m)
 	if err != nil {

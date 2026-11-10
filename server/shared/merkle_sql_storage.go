@@ -65,7 +65,9 @@ func (s *SQLStorage) RunRetryTx(
 		return err
 	}
 	defer db.Release()
-	return RetryTx(m, db, which, func(m MetaContext, tx pgx.Tx) error {
+	// lib/merkle's storage interface takes a plain string; every caller
+	// passes a literal ("merkle.Insert", "StoreRoot", ...).
+	return RetryTx(m, db, TxName(which), func(m MetaContext, tx pgx.Tx) error {
 		return f(m, &Tx{tx: tx, hostID: s.hostID})
 	})
 }

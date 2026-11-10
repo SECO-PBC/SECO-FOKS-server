@@ -49,7 +49,9 @@ func reconcileUserChannels(m shared.MetaContext, app proto.RTAppID) error {
 	if err != nil {
 		return err
 	}
+	tel := m.G().Telemetry()
 	if seen, ok := hub.ReconciledThrough(key); ok && seen >= markerVers {
+		tel.RTReconcile(m.Ctx(), "memory")
 		return nil
 	}
 
@@ -63,8 +65,10 @@ func reconcileUserChannels(m shared.MetaContext, app proto.RTAppID) error {
 	}
 	if sqlVers >= markerVers {
 		hub.SetReconciledThrough(key, sqlVers)
+		tel.RTReconcile(m.Ctx(), "cursor")
 		return nil
 	}
+	tel.RTReconcile(m.Ctx(), "full")
 
 	// The user's current teams, with their role in each -- one users-DB query.
 	// A user can hold memberships at multiple source roles; keep the highest
@@ -136,7 +140,7 @@ func reconcileUserChannels(m shared.MetaContext, app proto.RTAppID) error {
 			return func(m shared.MetaContext) {
 				hub.SetReconciledThrough(key, markerVers)
 				if fanned {
-					wakeInboxPollers(m, app, []proto.UID{uid})
+					wakeInboxPollers(m, wakeReconcile, app, []proto.UID{uid})
 				}
 			}, nil
 		},
