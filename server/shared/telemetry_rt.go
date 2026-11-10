@@ -26,7 +26,7 @@ func (t *Telemetry) RTPhase(m MetaContext, phase string) (MetaContext, func()) {
 	ctx, span := t.childSpan(m.Ctx(), "rt."+phase)
 	opt := metric.WithAttributes(attribute.String("phase", phase))
 	return m.WithContext(ctx), func() {
-		t.inst.rtPhase.Record(ctx, float64(time.Since(start))/float64(time.Millisecond), opt)
+		t.inst.rtPhase.Record(ctx, ms(time.Since(start)), opt)
 		span.End()
 	}
 }
@@ -56,7 +56,7 @@ func (t *Telemetry) RTWake(m MetaContext, op string, members int) (MetaContext, 
 // "bumped_immediate" (never parked), "bumped", "timeout", "cancelled",
 // or "error".
 func (t *Telemetry) RTPollDone(ctx context.Context, d time.Duration, outcome string) {
-	t.inst.rtPollDuration.Record(ctx, float64(d)/float64(time.Millisecond),
+	t.inst.rtPollDuration.Record(ctx, ms(d),
 		metric.WithAttributes(attribute.String("outcome", outcome)))
 }
 

@@ -120,7 +120,7 @@ func (p *pgTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.Trac
 	if !ok {
 		return
 	}
-	ms := float64(time.Since(st.start)) / float64(time.Millisecond)
+	elapsed := ms(time.Since(st.start))
 	opAttr := attribute.String("db.operation.name", st.op)
 	outcome := "ok"
 	if data.Err != nil {
@@ -132,7 +132,7 @@ func (p *pgTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.Trac
 			st.span.SetStatus(codes.Error, code)
 		}
 	}
-	p.t.inst.dbQueryDuration.Record(ctx, ms, metric.WithAttributes(p.dbType, opAttr, attribute.String("outcome", outcome)))
+	p.t.inst.dbQueryDuration.Record(ctx, elapsed, metric.WithAttributes(p.dbType, opAttr, attribute.String("outcome", outcome)))
 	if st.span != nil {
 		st.span.End()
 	}
@@ -165,7 +165,7 @@ func (p *pgTracer) TraceAcquireEnd(ctx context.Context, _ *pgxpool.Pool, _ pgxpo
 	if !ok {
 		return
 	}
-	p.t.inst.dbAcquireDuration.Record(ctx, float64(time.Since(start))/float64(time.Millisecond), p.accOpt)
+	p.t.inst.dbAcquireDuration.Record(ctx, ms(time.Since(start)), p.accOpt)
 }
 
 // childSpan starts a span only under a recording parent (an RPC span or one
@@ -179,8 +179,6 @@ func (t *Telemetry) childSpan(ctx context.Context, name string, opts ...trace.Sp
 	}
 	return t.tracer.Start(ctx, name, opts...)
 }
-
-func ms(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 
 // txTelemetry instruments one RetryTx2 call. All methods are safe, and do
 // nothing, when telemetry is disabled.

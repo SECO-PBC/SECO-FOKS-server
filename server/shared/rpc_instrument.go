@@ -76,15 +76,15 @@ func (t *Telemetry) wrapRPC(
 		// Deferred so a panicking handler still ends its span and
 		// decrements the in-flight gauge.
 		defer func() {
-			ms := float64(time.Since(start)) / float64(time.Millisecond)
+			elapsed := ms(time.Since(start))
 			inst.rpcActive.Add(ctx, -1, methodOpt)
 			if err == nil {
-				inst.rpcDuration.Record(ctx, ms, okOpt)
+				inst.rpcDuration.Record(ctx, elapsed, okOpt)
 				span.End()
 				return
 			}
 			code := statusCodeName(err)
-			inst.rpcDuration.Record(ctx, ms, metric.WithAttributes(methodAttr, errOutcome))
+			inst.rpcDuration.Record(ctx, elapsed, metric.WithAttributes(methodAttr, errOutcome))
 			inst.rpcErrors.Add(ctx, 1, metric.WithAttributes(methodAttr, attribute.String("error.code", code)))
 			// Only the status code: raw error strings can echo user data.
 			span.SetAttributes(attribute.String("error.code", code))

@@ -72,6 +72,10 @@ type TelemetryConfigJSON struct {
 
 const defaultOTLPEndpoint = "datadog-agent:4317"
 
+// ms converts a duration to float milliseconds, the unit of every foks.*
+// duration histogram.
+func ms(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+
 // Telemetry holds the process's providers and the pre-built instruments that
 // call sites use. A disabled Telemetry is backed by no-op providers, so call
 // sites never need nil or enabled checks.
