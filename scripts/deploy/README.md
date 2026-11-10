@@ -126,7 +126,7 @@ One-time setup on the server, in `/opt/foks/workdir`:
              "-c", "shared_preload_libraries=pg_stat_statements",
              "-c", "pg_stat_statements.track=all", "-c", "track_io_timing=on"]
    ```
-4. **Create the monitoring role.** Run `DD_PG_PASSWORD=<same value> ./pg-setup.sh` (from `scripts/deploy/datadog/`). It is idempotent.
+4. **Create the monitoring role.** From `scripts/deploy/datadog/`, run `(set -a; . /opt/foks/workdir/.env; set +a; ./pg-setup.sh)`. This loads `DD_PG_PASSWORD` from `.env`, so the password never appears in your shell history or on a command line. The script is idempotent. It restricts the `SECURITY DEFINER` explain helper to the `datadog` role, so if you ran an earlier version of the script, run this one again.
 5. **Point the servers at the agent.** Add `telemetry +: { enabled : true, env : "staging" },` to `final()` in `conf-guest/local.pre.libsonnet`.
 6. **Start the agent and restart the servers.** Run `docker compose up -d` to start `datadog-agent`; this also recreates `postgresql` with its new labels. Then restart the FOKS servers so they re-read their config: `docker compose restart $(docker compose config --services | grep -vxE 'postgresql|datadog-agent')`. A plain `up -d` doesn't do this, because editing `local.pre.libsonnet` changes no compose definition. If you finish these steps *before* deploying a tag, the deploy recreates the servers anyway. Later CI deploys run `docker compose up -d`, which picks up `COMPOSE_FILE` and keeps the agent running.
 

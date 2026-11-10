@@ -21,7 +21,11 @@ CONTAINER="${1:-workdir-postgresql-1}"
 psql_in() {
     local db="$1"
     shift
-    docker exec -i "$CONTAINER" psql -v ON_ERROR_STOP=1 -U postgres -d "$db" "$@"
+    # -e with no value copies DD_PG_PASSWORD from this environment into
+    # psql's, so the password never appears in a process's argv (ps, or the
+    # Datadog agent's view of the host /proc).
+    DD_PG_PASSWORD="$DD_PG_PASSWORD" docker exec -i -e DD_PG_PASSWORD "$CONTAINER" \
+        psql -v ON_ERROR_STOP=1 -U postgres -d "$db" "$@"
 }
 
 preload="$(psql_in postgres -tAc 'SHOW shared_preload_libraries')"
@@ -34,9 +38,11 @@ case ",${preload// /}," in
         ;;
 esac
 
-# Role: create or reset the password. Passed as a psql variable so it is
-# quoted by psql, not interpolated into SQL by the shell.
-psql_in postgres -v pw="$DD_PG_PASSWORD" <<'SQL'
+# Role: create or reset the password. psql reads it from its environment
+# (\getenv, psql 15+) and quotes it itself; the shell never interpolates it
+# into SQL or a command line.
+psql_in postgres <<'SQL'
+\getenv pw DD_PG_PASSWORD
 SELECT format('CREATE ROLE datadog WITH LOGIN PASSWORD %L', :'pw')
  WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'datadog') \gexec
 SELECT format('ALTER ROLE datadog WITH LOGIN PASSWORD %L', :'pw') \gexec
@@ -72,6 +78,14 @@ $$
 LANGUAGE 'plpgsql'
 RETURNS NULL ON NULL INPUT
 SECURITY DEFINER;
+
+-- The function runs as its owner (postgres, a superuser), and the planner
+-- constant-folds IMMUTABLE functions, so any role able to call it could run
+-- its own code as superuser. New functions are executable by PUBLIC, which
+-- includes the app's role; restrict it to datadog. CREATE OR REPLACE keeps
+-- these grants, so re-runs stay correct.
+REVOKE EXECUTE ON FUNCTION datadog.explain_statement(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION datadog.explain_statement(TEXT) TO datadog;
 SQL
 done
 
