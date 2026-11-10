@@ -193,8 +193,16 @@ type txTelemetry struct {
 	start     time.Time
 }
 
+// disabledTx is what StartTx returns when telemetry is off: every txTelemetry
+// method returns early on !Enabled(), so one shared value serves all
+// transactions and the disabled path allocates nothing.
+var disabledTx = &txTelemetry{t: &Telemetry{}}
+
 // StartTx opens the db.tx span. name is the caller's static TxName.
 func (t *Telemetry) StartTx(m MetaContext, name TxName) (MetaContext, *txTelemetry) {
+	if !t.Enabled() {
+		return m, disabledTx
+	}
 	x := &txTelemetry{
 		t:         t,
 		name:      attribute.String("db.tx.name", string(name)),
@@ -202,9 +210,6 @@ func (t *Telemetry) StartTx(m MetaContext, name TxName) (MetaContext, *txTelemet
 		ctx:       m.Ctx(),
 		span:      trace.SpanFromContext(m.Ctx()),
 		start:     time.Now(),
-	}
-	if !t.Enabled() {
-		return m, x
 	}
 	x.ctx, x.span = t.childSpan(m.Ctx(), "db.tx",
 		trace.WithAttributes(x.name, attribute.String("resource.name", string(name))),

@@ -557,3 +557,21 @@ func TestInstrumentingRegistrar(t *testing.T) {
 	require.Len(t, h.spans.Ended(), 1)
 	require.Equal(t, "TestProto.good", h.spans.Ended()[0].Name())
 }
+
+// With telemetry off (the default), per-transaction instrumentation must not
+// allocate: RetryTx2 calls it on every transaction.
+func TestDisabledTxTelemetryAllocatesNothing(t *testing.T) {
+	g := NewGlobalContext(&GlobalContextOpts{Testing: true})
+	tel := g.Telemetry()
+	require.False(t, tel.Enabled())
+	m := NewMetaContext(context.Background(), g)
+	allocs := testing.AllocsPerRun(100, func() {
+		tm, tx := tel.StartTx(m, "test.tx")
+		am, done := tx.Attempt(tm, 0, false)
+		done(false, nil)
+		tx.End(0, nil)
+		_, hookDone := tx.PostCommit(am)
+		hookDone()
+	})
+	require.Zero(t, allocs)
+}
