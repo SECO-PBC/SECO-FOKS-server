@@ -29,7 +29,7 @@ This is the `telemetry` block in the server jsonnet config. It is present but di
 | `enabled` | `false` | |
 | `otlp_endpoint` | `datadog-agent:4317` | OTLP/gRPC `host:port` |
 | `secure` | `false` | TLS to the endpoint; the sidecar is on the private compose network |
-| `env` | — | becomes `deployment.environment.name` (Datadog `env`) |
+| `env` | — | becomes `deployment.environment.name` (Datadog `env`). Must match the agent's `DD_ENV`; a warning is logged if empty |
 | `trace_sample_ratio` | `1.0` | fraction of root spans kept |
 | `trace_sample_methods` | `{}` | per-RPC overrides of `trace_sample_ratio`, keyed `"<Protocol>.<method>"` |
 | `metric_interval_ms` | `10000` | export period |

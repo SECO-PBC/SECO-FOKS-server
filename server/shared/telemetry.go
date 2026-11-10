@@ -240,7 +240,12 @@ func InitTelemetry(m MetaContext, typ string) error {
 		semconv.ServiceName("foks-" + typ),
 		semconv.ServiceVersion(ServiceVersion),
 	}
-	if cfg.Env != "" {
+	if cfg.Env == "" {
+		// The agent's DD_ENV covers its own host/container/DB metrics but
+		// not ours, so an empty env splits them apart in Datadog.
+		m.Warnw("telemetry", "stage", "config",
+			"msg", "env not set; foks.* metrics will carry no env tag. Set telemetry.env to match the agent's DD_ENV")
+	} else {
 		attrs = append(attrs, semconv.DeploymentEnvironmentName(cfg.Env))
 	}
 	res, err := resource.Merge(resource.Default(), resource.NewSchemaless(attrs...))

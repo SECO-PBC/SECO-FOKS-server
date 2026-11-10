@@ -22,6 +22,9 @@ services:
     environment:
       DD_API_KEY: ${DD_API_KEY:?set DD_API_KEY in .env}
       DD_SITE: ${DD_SITE:-datadoghq.com}
+      # Must match telemetry.env in the servers' local.pre.libsonnet, which
+      # tags the foks.* OTLP data; otherwise Datadog splits host/DB metrics
+      # and app metrics under different env values.
       DD_ENV: ${DD_ENV:-staging}
       DD_HOSTNAME: ${DD_HOSTNAME:-foks-staging}
       # OTLP intake from the foks-server containers on the compose network.
