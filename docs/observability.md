@@ -59,7 +59,7 @@ The resource sets `service.name = foks-<server type>`, e.g. `foks-realtime` or `
 | `foks.rt.reconcile` | counter | `result` | late-join fan-in: `memory`, `cursor` or `full` (slow path) |
 | `foks.rt.pollers.parked` | gauge | — | parked long-polls (realtime only) |
 | `foks.rt.push_outbox.backlog` | gauge | `status` | `queued`/`sending` rows, sampled every 30s (realtime only) |
-| `foks.rt.push_outbox.oldest_age` | gauge, s | — | |
+| `foks.rt.push_outbox.oldest_age` | gauge, s | — | age of the oldest `queued`/`sending` row; 0 when there are none (use `backlog` to tell an empty queue from a just-queued row). Alert on it exceeding a few minutes. A gap in either gauge means the probe skipped that sample (realtime pool saturated) or failed (logged at Warn once) |
 | Go runtime (`go.*`) | various | — | `contrib/instrumentation/runtime` |
 
 `rtPollInbox` is a long poll (up to 55s), so its `foks.rpc.server.duration` measures wait time, not work. Filter it out of RPC latency views, and use `foks.rt.poll.duration` by `outcome` instead.

@@ -112,7 +112,7 @@ func registerRealtimeObservables(g *GlobalContext, t *Telemetry) error {
 		return err
 	}
 	oldest, err := mt.Float64ObservableGauge("foks.rt.push_outbox.oldest_age",
-		metric.WithUnit("s"), metric.WithDescription("Age of the oldest queued/sending push_outbox row"))
+		metric.WithUnit("s"), metric.WithDescription("Age of the oldest queued/sending push_outbox row; 0 when there are none (see backlog). A gap means the probe skipped or failed that sample"))
 	if err != nil {
 		return err
 	}
