@@ -143,6 +143,70 @@ var rpcAccessClass = map[string]rpcClassification{
 		nodeWrite,
 		"TestKvChannelMkRootAuthorization; gated by authorizeKVNodeManage",
 	},
+	"kvGetSystemRoot": {
+		nodeData,
+		"read-role checked in getSystemRoot; a locked directory is never channel " +
+			"storage, so the channel ACL has nothing to check (docs/kv-system-store.md)",
+	},
+	"kvPutSystemRoot": {
+		nodeWrite,
+		"TestKvSystemRootSubmission; writes system_root, which holds no channel tag",
+	},
+}
+
+// lockClass says how a write RPC treats a locked directory.
+type lockClass string
+
+const (
+	// lockGated: changes a locked directory only past authorizeLockedWrite.
+	lockGated lockClass = "gated"
+	// lockRefused: can never take a locked directory, Sages included.
+	lockRefused lockClass = "refused"
+	// lockUnrelated: makes a node that no directory names, or writes a node
+	// that is not a directory. Reaching a locked directory takes a kvPut.
+	lockUnrelated lockClass = "unrelated"
+)
+
+type rpcLockClassification struct {
+	class lockClass
+	why   string
+}
+
+// rpcLockClass states how every nodeWrite RPC treats the daemon lock. The
+// server enforces the lock per write path, not per table, so a new write RPC
+// has to say which of these it is -- that is the point of failing here
+// (docs/kv-system-store.md).
+var rpcLockClass = map[string]rpcLockClassification{
+	"kvMkdir":                 {lockGated, "putDir: a locked directory needs authorizeLockedWrite, and refuses a channel tag"},
+	"kvPut":                   {lockGated, "direntUpdater.checkDaemonLock: gates on the parent, by ID, for every dirent in the batch"},
+	"kvPutRoot":               {lockRefused, "putRoot refuses a locked directory for everyone"},
+	"kvPutSystemRoot":         {lockGated, "putSystemRoot: needs authorizeLockedWrite, insert-only"},
+	"kvLockAcquire":           {lockGated, "lockCheckPerms: authorizeLockedWrite when the parent is locked"},
+	"kvLockRelease":           {lockGated, "same as kvLockAcquire: lockCheckPerms"},
+	"kvChannelMkRoot":         {lockRefused, "needs the directory to carry the channel's tag, and a locked directory never has one"},
+	"kvFileUploadInit":        {lockUnrelated, "creates a file no directory names; linking it is a kvPut"},
+	"kvFileUploadChunk":       {lockUnrelated, "appends to a file no directory gates; the client keeps large files out of the system store"},
+	"kvPutSmallFileOrSymlink": {lockUnrelated, "creates a node no directory names; linking it is a kvPut"},
+}
+
+// TestKvStoreLockInventory fails when a write RPC states no lock handling.
+func TestKvStoreLockInventory(t *testing.T) {
+	for nm, cls := range rpcAccessClass {
+		lck, ok := rpcLockClass[nm]
+		if cls.class != nodeWrite {
+			require.False(t, ok, "%q is not a nodeWrite RPC, so it needs no lock classification", nm)
+			continue
+		}
+		require.True(t, ok,
+			"nodeWrite RPC %q has no lock classification in rpcLockClass. Say whether it "+
+				"passes authorizeLockedWrite, can never take a locked directory, or cannot "+
+				"reach one. See docs/kv-system-store.md.", nm)
+		require.NotEmpty(t, lck.why, "RPC %q is classified but says nothing about why", nm)
+	}
+	for nm := range rpcLockClass {
+		_, ok := rpcAccessClass[nm]
+		require.True(t, ok, "rpcLockClass classifies %q, which is not an RPC in rpcAccessClass", nm)
+	}
 }
 
 // protectedTables hold node data, file bytes, or the channel tag itself. The
@@ -159,6 +223,8 @@ var protectedTables = []string{
 	"channel_kv_root",
 	"channel_acl",
 	"channels",
+	"system_root",
+	"daemon_accounts",
 }
 
 // allowedQueries is one signed-off function: how many references to protected
@@ -215,6 +281,12 @@ var queryAllowlist = map[string]allowedQueries{
 	"fileRef":                       {1, "refcount bookkeeping on link/unlink; reached from updateRefcounts, after containment, and returns nothing to a caller"},
 	"smallFileRef":                  {1, "refcount bookkeeping; same as fileRef"},
 	"ClientConn.KvChannelMkRoot":    {1, "reads the candidate dir's tag to confirm a member created it; runs after authorizeKVNodeManage"},
+
+	// --- the system store (docs/kv-system-store.md) ---
+	"authorizeLockedWrite": {1, "the chokepoint itself: is the verified actor on the Sage list"},
+	"loadDirDaemonLocked":  {1, "reads one directory's lock bit for the write checks; returns no node contents"},
+	"getSystemRoot":        {1, "the team's root, behind a read-role check; a locked directory is never channel storage"},
+	"putSystemRoot":        {2, "insert-only write and its replay comparison, both after authorizeLockedWrite"},
 }
 
 // rpcLine matches a method declaration in a snowp protocol block.
