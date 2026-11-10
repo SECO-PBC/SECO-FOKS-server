@@ -40,6 +40,17 @@ func InstrumentProtocol(g *GlobalContext, p rpc.ProtocolV2) rpc.ProtocolV2 {
 	return p
 }
 
+// instrumentingRegistrar is the ProtocolRegistrar serveConnection hands to
+// each server type: every protocol registered through it is instrumented.
+type instrumentingRegistrar struct {
+	g   *GlobalContext
+	srv interface{ RegisterV2(rpc.ProtocolV2) error }
+}
+
+func (r instrumentingRegistrar) RegisterV2(p rpc.ProtocolV2) error {
+	return r.srv.RegisterV2(InstrumentProtocol(r.g, p))
+}
+
 func (t *Telemetry) wrapRPC(
 	method string,
 	h func(ctx context.Context, arg interface{}) (interface{}, error),

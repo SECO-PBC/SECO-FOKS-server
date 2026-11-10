@@ -73,7 +73,7 @@ type RegClientConn struct {
 
 var _ shared.ClientConn = (*RegClientConn)(nil)
 
-func (c *RegClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
+func (c *RegClientConn) RegisterProtocols(m shared.MetaContext, srv shared.ProtocolRegistrar) error {
 
 	prots := []rpc.ProtocolV2{
 		rem.RegProtocol(c),
@@ -85,7 +85,7 @@ func (c *RegClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server)
 		rem.SocialInviteGuestProtocol(c),
 	}
 	for _, p := range prots {
-		if err := srv.RegisterV2(shared.InstrumentProtocol(m.G(), p)); err != nil {
+		if err := srv.RegisterV2(p); err != nil {
 			return err
 		}
 	}

@@ -82,7 +82,7 @@ type UserClientConn struct {
 
 var _ shared.ClientConn = (*UserClientConn)(nil)
 
-func (c *UserClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
+func (c *UserClientConn) RegisterProtocols(m shared.MetaContext, srv shared.ProtocolRegistrar) error {
 	prots := []rpc.ProtocolV2{
 		rem.UserProtocol(c),
 		infra.TestServicesProtocol(c),
@@ -93,7 +93,7 @@ func (c *UserClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server
 		rem.SocialInviteProtocol(c),
 	}
 	for _, p := range prots {
-		err := srv.RegisterV2(shared.InstrumentProtocol(m.G(), p))
+		err := srv.RegisterV2(p)
 		if err != nil {
 			return err
 		}

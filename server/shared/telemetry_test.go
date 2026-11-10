@@ -529,3 +529,31 @@ func TestPgTracerSkipsMarkedContext(t *testing.T) {
 	require.Nil(t, findMetric(rm, "foks.db.pool.acquire.duration"))
 	require.Len(t, h.spans.Ended(), 1, "only the parent span")
 }
+
+type capturingServer struct{ got []rpc.ProtocolV2 }
+
+func (c *capturingServer) RegisterV2(p rpc.ProtocolV2) error {
+	c.got = append(c.got, p)
+	return nil
+}
+
+// serveConnection registers protocols through instrumentingRegistrar, so a
+// server type's plain srv.RegisterV2(XProtocol(c)) is instrumented without
+// opting in.
+func TestInstrumentingRegistrar(t *testing.T) {
+	h := newTelemetryHarness(t, false)
+	okH := func(ctx context.Context, arg interface{}) (interface{}, error) { return "ok", nil }
+	srv := &capturingServer{}
+	var reg ProtocolRegistrar = instrumentingRegistrar{g: h.g, srv: srv}
+
+	require.NoError(t, reg.RegisterV2(testProtocol(okH, okH)))
+	require.Len(t, srv.got, 1)
+	ret, err := srv.got[0].Methods[0].Handler(context.Background(), nil)
+	require.NoError(t, err)
+	require.Equal(t, "ok", ret)
+
+	rm := h.collect(t)
+	require.NotNil(t, findMetric(rm, "foks.rpc.server.duration"))
+	require.Len(t, h.spans.Ended(), 1)
+	require.Equal(t, "TestProto.good", h.spans.Ended()[0].Name())
+}

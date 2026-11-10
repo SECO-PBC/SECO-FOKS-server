@@ -92,8 +92,8 @@ func (q *QuotaServer) Setup(m shared.MetaContext) error {
 
 func (q *QuotaServer) IsInternal() bool { return true }
 
-func (c *QuotaClientConn) RegisterProtocols(m shared.MetaContext, srv *rpc.Server) error {
-	return srv.RegisterV2(shared.InstrumentProtocol(m.G(), infra.QuotaProtocol(c)))
+func (c *QuotaClientConn) RegisterProtocols(m shared.MetaContext, srv shared.ProtocolRegistrar) error {
+	return srv.RegisterV2(infra.QuotaProtocol(c))
 }
 
 func (s *QuotaServer) RunBackgroundLoops(m shared.MetaContext, shutdownCh chan<- error) error {

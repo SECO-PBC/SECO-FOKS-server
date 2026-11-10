@@ -41,7 +41,7 @@ The resource sets `service.name = foks-<server type>`, e.g. `foks-realtime` or `
 
 | Metric | Type | Attributes | Where |
 |---|---|---|---|
-| `foks.rpc.server.duration` | histogram, ms | `rpc.method`, `outcome` | every RPC (`shared.InstrumentProtocol`) |
+| `foks.rpc.server.duration` | histogram, ms | `rpc.method`, `outcome` | every RPC (`shared.InstrumentProtocol`, applied by the `ProtocolRegistrar` that `serveConnection` passes to `RegisterProtocols`) |
 | `foks.rpc.server.errors` | counter | `rpc.method`, `error.code` | |
 | `foks.rpc.server.active` | up-down | `rpc.method` | in-flight handlers |
 | `foks.rpc.server.connections` | up-down | — | open client connections |

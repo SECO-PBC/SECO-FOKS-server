@@ -109,7 +109,11 @@ a Datadog Agent sidecar. Local for now. The Datadog deploy files
 (`scripts/deploy/datadog/`) and the realtime phase metrics are SECO-specific.
 The generic parts are `shared.InstrumentProtocol` (per-RPC histograms, wrapped
 at `RegisterV2`, because snowpack's server-side hooks see an empty V2 method
-name), the pgx query/acquire tracer, and the `telemetry` config block. Once
+name), the pgx query/acquire tracer, and the `telemetry` config block. The
+only upstream-shaped change outside `server/shared` is the parameter type of
+the 14 `RegisterProtocols` methods: `*rpc.Server` became
+`shared.ProtocolRegistrar`, whose implementation instruments every protocol.
+Their bodies are upstream's. Once
 they have run on staging, decide whether to offer them upstream as one
 vendor-neutral OTLP PR, sliced off `upstream/main`.
 
