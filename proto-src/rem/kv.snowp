@@ -205,4 +205,22 @@ protocol KVStore
         channelID @1 : lib.RTChannelID,
         dirID @2 : lib.DirID
     );
+
+    // The team's system store (docs/kv-system-store.md). Its root hangs from
+    // no dirent, so the team's ordinary tree cannot name it.
+
+    // kvGetSystemRoot returns the root of the team's system store, or
+    // KVNoentError if the team has none yet. Readable at the root's read role.
+    kvGetSystemRoot @201 (
+        auth @0 : KVAuth
+    ) -> lib.KVRoot;
+
+    // kvPutSystemRoot records a team's system store root once. The caller
+    // must be a Sage account holding admin, and the directory must exist and
+    // be locked. Insert-only: an identical replay succeeds and a different
+    // directory is a KVRaceError.
+    kvPutSystemRoot @202 (
+        auth @0 : KVAuth,
+        root @1 : lib.KVRoot
+    );
 }

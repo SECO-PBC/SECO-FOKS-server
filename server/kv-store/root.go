@@ -76,6 +76,17 @@ func putRoot(
 	if arg.Root.BindingMac.IsZero() {
 		return core.BadArgsError("binding mac must not be zero")
 	}
+	// Refused for everyone, Sages included: only a locked parent or the
+	// system root may refer to a locked directory. Otherwise a Leader could
+	// point the ordinary root at the store and redirect Sage's next ordinary
+	// write into it (docs/kv-system-store.md).
+	locked, err := loadDirDaemonLocked(m, tx, pid, arg.Root.Root)
+	if err != nil {
+		return err
+	}
+	if locked {
+		return kvLockDenied()
+	}
 	var dir []byte
 	var nv int
 	err = tx.QueryRow(m.Ctx(),

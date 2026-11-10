@@ -41,6 +41,11 @@ type walkOpts struct {
 	// parent, so a tag that applied only to the leaf would fail the walk it
 	// was meant to serve.
 	channelID *proto.RTChannelID
+
+	// systemStore starts the walk at the team's system root rather than its
+	// ordinary root (docs/kv-system-store.md). Set only by get file and put
+	// file; every other operation refuses the selection in initReq.
+	systemStore bool
 }
 
 // mkdirQueueCtx is what an interrupted dir-create leaves behind for the
@@ -152,6 +157,15 @@ func (k *Minder) walkFromRoot(
 	*walkRes,
 	error,
 ) {
+	if wo.systemStore {
+		sys, err := k.systemRootDir(m, kvp, wo.writePermsRoot)
+		if err != nil {
+			return nil, err
+		}
+		sys.IsRoot = true
+		return k.walk(m, kvp, walkStackFrame{dir: sys}, pap.Components, wo)
+	}
+
 	root, err := k.getRoot(m, kvp)
 	if err != nil {
 		return nil, err
@@ -385,7 +399,7 @@ func (k *Minder) walkOne(
 	// complete intent for Mkdir to queue (docs/kv_offline.md D3). The
 	// fill-on-failure below records the dirent version *before* the bump:
 	// that is the CAS predicate a drain asserts (0 = expect absent).
-	kvd, seed, _, err := k.sealEmptyDir(m, kvp, *opts.writePerms)
+	kvd, seed, _, err := k.sealEmptyDir(m, kvp, *opts.writePerms, false)
 	if err != nil {
 		return nil, err
 	}

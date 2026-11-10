@@ -25,8 +25,10 @@ func loadDir(
 	var seedBox []byte
 	var status string
 	var chid *int64
+	var locked bool
 	q := `SELECT version, ptk_gen, read_role_type, read_role_viz_level, 
-	          write_role_type, write_role_viz_level, seed_box, status, channel_id
+	          write_role_type, write_role_viz_level, seed_box, status, channel_id,
+	          daemon_locked
 		  FROM dir
 	      WHERE short_host_id=$1 AND short_party_id=$2 AND dir_id=$3`
 	args := []any{int(m.ShortHostID()), pid.Shorten().ExportToDB(), dirid.ExportToDB()}
@@ -40,7 +42,7 @@ func loadDir(
 	err := rq.QueryRow(
 		m.Ctx(),
 		q, args...,
-	).Scan(&dv, &ptkgen, &rrt, &rvl, &wrt, &wvl, &seedBox, &status, &chid)
+	).Scan(&dv, &ptkgen, &rrt, &rvl, &wrt, &wvl, &seedBox, &status, &chid, &locked)
 	if err != nil && err == pgx.ErrNoRows {
 		return nil, nil, core.NotFoundError("dir")
 	}
@@ -78,10 +80,11 @@ func loadDir(
 		return nil, nil, err
 	}
 	ret := proto.KVDir{
-		Id:        dirid,
-		Version:   proto.KVVersion(dv),
-		Box:       box,
-		WriteRole: writeRole,
+		Id:         dirid,
+		Version:    proto.KVVersion(dv),
+		Box:        box,
+		WriteRole:  writeRole,
+		DaemonLock: locked,
 	}
 	err = ret.Status.ImportFromDB(status)
 	if err != nil {
@@ -125,6 +128,18 @@ func putDir(
 	if dir.Version != proto.KVVersion(1) {
 		return false, core.BadArgsError("dir version must be 1 for mkdir")
 	}
+	// A locked directory is the Sage's to make, and it never doubles as
+	// channel storage: the two carry different guarantees, and nothing needs
+	// both (docs/kv-system-store.md).
+	if dir.DaemonLock {
+		if chid != nil {
+			return false, core.BadArgsError("a locked directory cannot be channel storage")
+		}
+		err = authorizeLockedWrite(m, pid)
+		if err != nil {
+			return false, err
+		}
+	}
 	spid := pid.Shorten()
 
 	tag, err := tx.Exec(m.Ctx(),
@@ -132,8 +147,8 @@ func putDir(
 			short_host_id, short_party_id, dir_id, version, ptk_gen,
 			read_role_type, read_role_viz_level,
 			write_role_type, write_role_viz_level,
-			seed_box, status, channel_id, ctime, mtime
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW())
+			seed_box, status, channel_id, daemon_locked, ctime, mtime
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())
 		 ON CONFLICT DO NOTHING`,
 		int(m.HostID().Short),
 		spid.ExportToDB(),
@@ -145,6 +160,7 @@ func putDir(
 		box,
 		string(proto.KVDirStatusStringActive),
 		chid,
+		dir.DaemonLock,
 	)
 	if err != nil {
 		return false, err
@@ -175,10 +191,12 @@ func putDir(
 		var gen, rt, rl, wt, wl int
 		var status string
 		var storedChid *int64
+		var storedLocked bool
 		err = tx.QueryRow(m.Ctx(),
 			`SELECT seed_box, ptk_gen,
 			        read_role_type, read_role_viz_level,
-			        write_role_type, write_role_viz_level, status, channel_id
+			        write_role_type, write_role_viz_level, status, channel_id,
+			        daemon_locked
 			 FROM dir
 			 WHERE short_host_id=$1 AND short_party_id=$2 AND dir_id=$3 AND version=$4
 			 FOR UPDATE`,
@@ -186,7 +204,7 @@ func putDir(
 			spid.ExportToDB(),
 			dir.Id.ExportToDB(),
 			int(dir.Version),
-		).Scan(&seed, &gen, &rt, &rl, &wt, &wl, &status, &storedChid)
+		).Scan(&seed, &gen, &rt, &rl, &wt, &wl, &status, &storedChid, &storedLocked)
 		if err != nil {
 			return false, err
 		}
@@ -200,7 +218,8 @@ func putDir(
 			gen == int(dir.Box.Rg.Gen) &&
 			rt == rtyp && rl == rlev &&
 			wt == wtyp && wl == wlev &&
-			eqChannelTag(storedChid, chid) {
+			eqChannelTag(storedChid, chid) &&
+			storedLocked == dir.DaemonLock {
 			// An identical replay; the refcount row is already there too.
 			return true, nil
 		}

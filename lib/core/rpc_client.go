@@ -304,7 +304,7 @@ func (c *connectionMgr) connectLoop(m RpcClientMetaContexter) (*tls.Conn, error)
 		m.Warnw("connect", "err", err, "try", i, "wait", wait, "errtype", fmt.Sprintf("%T", err))
 		select {
 		case <-c.eofCh:
-			return nil, io.EOF
+			return nil, NewConnectError("connection closed while dialing", io.EOF)
 		case <-c.opts.Clock.After(wait):
 		}
 		wait *= 2
@@ -312,7 +312,10 @@ func (c *connectionMgr) connectLoop(m RpcClientMetaContexter) (*tls.Conn, error)
 			wait = lim
 		}
 	}
-	return nil, io.EOF
+	// A ConnectError, not io.EOF: this comes back from Connect, before Call2's
+	// EOF mapping, and a bare EOF crosses the agent RPC as a plain error. Every
+	// caller classifying failures by IsTransportError saw it as a refusal.
+	return nil, NewConnectError("giving up dialing", io.EOF)
 }
 
 type RpcClient struct {

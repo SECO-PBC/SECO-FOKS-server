@@ -1808,19 +1808,21 @@ func (s *SeedBoxExternalNonce) Decode(dec rpc.Decoder) error {
 func (s *SeedBoxExternalNonce) Bytes() []byte { return nil }
 
 type KVDir struct {
-	Id        DirID
-	Version   KVVersion
-	Box       SeedBoxExternalNonce
-	WriteRole Role
-	Status    KVDirStatus
+	Id         DirID
+	Version    KVVersion
+	Box        SeedBoxExternalNonce
+	WriteRole  Role
+	Status     KVDirStatus
+	DaemonLock bool
 }
 type KVDirInternal__ struct {
-	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Id        *DirIDInternal__
-	Version   *KVVersionInternal__
-	Box       *SeedBoxExternalNonceInternal__
-	WriteRole *RoleInternal__
-	Status    *KVDirStatusInternal__
+	_struct    struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Id         *DirIDInternal__
+	Version    *KVVersionInternal__
+	Box        *SeedBoxExternalNonceInternal__
+	WriteRole  *RoleInternal__
+	Status     *KVDirStatusInternal__
+	DaemonLock *bool
 }
 
 func (k KVDirInternal__) Import() KVDir {
@@ -1855,15 +1857,22 @@ func (k KVDirInternal__) Import() KVDir {
 			}
 			return x.Import()
 		})(k.Status),
+		DaemonLock: (func(x *bool) (ret bool) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(k.DaemonLock),
 	}
 }
 func (k KVDir) Export() *KVDirInternal__ {
 	return &KVDirInternal__{
-		Id:        k.Id.Export(),
-		Version:   k.Version.Export(),
-		Box:       k.Box.Export(),
-		WriteRole: k.WriteRole.Export(),
-		Status:    k.Status.Export(),
+		Id:         k.Id.Export(),
+		Version:    k.Version.Export(),
+		Box:        k.Box.Export(),
+		WriteRole:  k.WriteRole.Export(),
+		Status:     k.Status.Export(),
+		DaemonLock: &k.DaemonLock,
 	}
 }
 func (k *KVDir) Encode(enc rpc.Encoder) error {

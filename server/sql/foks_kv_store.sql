@@ -30,6 +30,7 @@ CREATE TABLE dir (
     mtime TIMESTAMP NOT NULL,
     status dir_status NOT NULL,
     channel_id BIGINT, -- p1: realtime private-channel tag; NULL = not channel storage
+    daemon_locked BOOLEAN NOT NULL DEFAULT FALSE, -- p2: system-store directory; only a Sage account may change it
     PRIMARY KEY(short_host_id, short_party_id, dir_id, version)
 );
 
@@ -212,8 +213,26 @@ CREATE TABLE channel_kv_root (
     PRIMARY KEY(short_host_id, short_party_id, channel_id)
 );
 
+/*
+ * p2: one system-store root per team. Insert-only, and separate from root so
+ * that no upstream query of that table has to learn about it.
+ */
+CREATE TABLE system_root (
+    short_host_id SMALLINT NOT NULL,
+    party_id BYTEA NOT NULL,
+    dir_id BYTEA NOT NULL, -- a locked directory
+    version INT NOT NULL,
+    ptk_gen INT NOT NULL,
+    read_role_type SMALLINT NOT NULL,
+    read_role_viz_level SMALLINT NOT NULL,
+    binding_mac BYTEA NOT NULL,
+    ctime TIMESTAMP NOT NULL,
+    PRIMARY KEY(short_host_id, party_id)
+);
+
 CREATE TABLE schema_patches (
     id INTEGER NOT NULL PRIMARY KEY,
     ctime TIMESTAMP NOT NULL
 );
 INSERT INTO schema_patches (id, ctime) VALUES (1, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (2, NOW());

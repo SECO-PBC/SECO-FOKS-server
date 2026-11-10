@@ -143,14 +143,16 @@ func (c *RegClientConn) signupInviteCode(
 		}
 		return nil
 	case rem.InviteCodeType_MultiUse:
-		tags, err = tx.Exec(m.Ctx(),
+		var daemonSignup bool
+		err = tx.QueryRow(m.Ctx(),
 			`UPDATE multiuse_invite_codes 
 			 SET num_uses=num_uses+1, last_use=NOW()
-			 WHERE short_host_id=$1 AND code=$2 AND valid=TRUE`,
+			 WHERE short_host_id=$1 AND code=$2 AND valid=TRUE
+			 RETURNING daemon_signup`,
 			m.ShortHostID().ExportToDB(),
 			code.Multiuse(),
-		)
-		if err != nil || tags.RowsAffected() != 1 {
+		).Scan(&daemonSignup)
+		if err != nil {
 			return core.BadInviteCodeError{}
 		}
 		tags, err = tx.Exec(
@@ -161,6 +163,26 @@ func (c *RegClientConn) signupInviteCode(
 			uid.ExportToDB(),
 			code.Multiuse(),
 		)
+		if err != nil || tags.RowsAffected() != 1 {
+			return core.BadInviteCodeError{}
+		}
+		if !daemonSignup {
+			return nil
+		}
+		// Fork-only (docs/kv-system-store.md): in this transaction, so an
+		// account can never exist half-minted as a Sage.
+		tags, err = tx.Exec(
+			m.Ctx(),
+			`INSERT INTO daemon_accounts(short_host_id, uid, ctime)
+			 VALUES ($1, $2, NOW())`,
+			m.ShortHostID().ExportToDB(),
+			uid.ExportToDB(),
+		)
+		// Not a bad code: the code was fine, and an operator chasing it
+		// would look in the wrong place.
+		if err != nil {
+			return err
+		}
 
 	case rem.InviteCodeType_Standard:
 		tags, err = tx.Exec(m.Ctx(),

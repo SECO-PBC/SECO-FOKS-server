@@ -236,6 +236,19 @@ func (p *direntUpdater) checkContainment(m shared.MetaContext) error {
 	return checkChannelContainment(m, p.tx, p.pid, p.dirChid, p.de.Value)
 }
 
+// checkDaemonLock is where the system store's write lock meets kvPut. The
+// parent directory decides, by ID, so a forged version, a new dirent ID and a
+// symlink are all the same refused write. See system_store.go.
+func (p *direntUpdater) checkDaemonLock(m shared.MetaContext) error {
+	if p.dir.DaemonLock {
+		err := authorizeLockedWrite(m, p.pid)
+		if err != nil {
+			return err
+		}
+	}
+	return checkLockContainment(m, p.tx, p.pid, p.dir.DaemonLock, p.de.Value)
+}
+
 func (p *direntUpdater) loadExistingDirent(m shared.MetaContext, role proto.Role) error {
 	if p.de.Version.IsFirst() {
 		return nil
@@ -377,6 +390,10 @@ func (p *direntUpdater) run(m shared.MetaContext) error {
 		return err
 	}
 	err = p.checkPermissions(m)
+	if err != nil {
+		return err
+	}
+	err = p.checkDaemonLock(m)
 	if err != nil {
 		return err
 	}

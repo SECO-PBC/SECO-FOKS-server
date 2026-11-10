@@ -1957,6 +1957,93 @@ func (k *KvChannelMkRootArg) Decode(dec rpc.Decoder) error {
 
 func (k *KvChannelMkRootArg) Bytes() []byte { return nil }
 
+type KvGetSystemRootArg struct {
+	Auth KVAuth
+}
+type KvGetSystemRootArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Auth    *KVAuthInternal__
+}
+
+func (k KvGetSystemRootArgInternal__) Import() KvGetSystemRootArg {
+	return KvGetSystemRootArg{
+		Auth: (func(x *KVAuthInternal__) (ret KVAuth) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Auth),
+	}
+}
+func (k KvGetSystemRootArg) Export() *KvGetSystemRootArgInternal__ {
+	return &KvGetSystemRootArgInternal__{
+		Auth: k.Auth.Export(),
+	}
+}
+func (k *KvGetSystemRootArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(k.Export())
+}
+
+func (k *KvGetSystemRootArg) Decode(dec rpc.Decoder) error {
+	var tmp KvGetSystemRootArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*k = tmp.Import()
+	return nil
+}
+
+func (k *KvGetSystemRootArg) Bytes() []byte { return nil }
+
+type KvPutSystemRootArg struct {
+	Auth KVAuth
+	Root lib.KVRoot
+}
+type KvPutSystemRootArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Auth    *KVAuthInternal__
+	Root    *lib.KVRootInternal__
+}
+
+func (k KvPutSystemRootArgInternal__) Import() KvPutSystemRootArg {
+	return KvPutSystemRootArg{
+		Auth: (func(x *KVAuthInternal__) (ret KVAuth) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Auth),
+		Root: (func(x *lib.KVRootInternal__) (ret lib.KVRoot) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(k.Root),
+	}
+}
+func (k KvPutSystemRootArg) Export() *KvPutSystemRootArgInternal__ {
+	return &KvPutSystemRootArgInternal__{
+		Auth: k.Auth.Export(),
+		Root: k.Root.Export(),
+	}
+}
+func (k *KvPutSystemRootArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(k.Export())
+}
+
+func (k *KvPutSystemRootArg) Decode(dec rpc.Decoder) error {
+	var tmp KvPutSystemRootArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*k = tmp.Import()
+	return nil
+}
+
+func (k *KvPutSystemRootArg) Bytes() []byte { return nil }
+
 type KVStoreInterface interface {
 	KvMkdir(context.Context, KvMkdirArg) (KVMkdirRes, error)
 	KvPut(context.Context, KvPutArg) error
@@ -1976,6 +2063,8 @@ type KVStoreInterface interface {
 	KvUsage(context.Context, KVAuth) (lib.KVUsage, error)
 	SelectVHost(context.Context, lib.HostID) error
 	KvChannelMkRoot(context.Context, KvChannelMkRootArg) error
+	KvGetSystemRoot(context.Context, KVAuth) (lib.KVRoot, error)
+	KvPutSystemRoot(context.Context, KvPutSystemRootArg) error
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h lib.Header) error
 	MakeResHeader() lib.Header
@@ -2391,6 +2480,50 @@ func (c KVStoreClient) KvChannelMkRoot(ctx context.Context, arg KvChannelMkRootA
 	}
 	var tmp rpc.DataWrap[lib.Header, interface{}]
 	err = c.Cli.Call2(ctx, rpc.NewMethodV2(KVStoreProtocolID, 200, "KVStore.kvChannelMkRoot"), warg, &tmp, 0*time.Millisecond, kVStoreErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+func (c KVStoreClient) KvGetSystemRoot(ctx context.Context, auth KVAuth) (res lib.KVRoot, err error) {
+	arg := KvGetSystemRootArg{
+		Auth: auth,
+	}
+	warg := &rpc.DataWrap[lib.Header, *KvGetSystemRootArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, lib.KVRootInternal__]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(KVStoreProtocolID, 201, "KVStore.kvGetSystemRoot"), warg, &tmp, 0*time.Millisecond, kVStoreErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	res = tmp.Data.Import()
+	return
+}
+func (c KVStoreClient) KvPutSystemRoot(ctx context.Context, arg KvPutSystemRootArg) (err error) {
+	warg := &rpc.DataWrap[lib.Header, *KvPutSystemRootArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, interface{}]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(KVStoreProtocolID, 202, "KVStore.kvPutSystemRoot"), warg, &tmp, 0*time.Millisecond, kVStoreErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
 	if err != nil {
 		return
 	}
@@ -2919,6 +3052,63 @@ func KVStoreProtocol(i KVStoreInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "kvChannelMkRoot",
+			},
+			201: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *KvGetSystemRootArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *KvGetSystemRootArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *KvGetSystemRootArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						tmp, err := i.KvGetSystemRoot(ctx, (typedArg.Import()).Auth)
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[lib.Header, *lib.KVRootInternal__]{
+							Data:   tmp.Export(),
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "kvGetSystemRoot",
+			},
+			202: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *KvPutSystemRootArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *KvPutSystemRootArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *KvPutSystemRootArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						err := i.KvPutSystemRoot(ctx, (typedArg.Import()))
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[lib.Header, interface{}]{
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "kvPutSystemRoot",
 			},
 		},
 		WrapError: KVStoreMakeGenericErrorWrapper(i.ErrorWrapper()),

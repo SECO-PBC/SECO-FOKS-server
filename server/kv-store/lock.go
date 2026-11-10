@@ -31,6 +31,9 @@ func lockCheckPerms(
 	if bad {
 		return core.KVPermssionError{}
 	}
+	if dir.DaemonLock {
+		return authorizeLockedWrite(m, pid)
+	}
 	return nil
 }
 

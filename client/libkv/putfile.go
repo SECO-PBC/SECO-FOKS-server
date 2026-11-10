@@ -179,7 +179,11 @@ func (k *Minder) putFile(
 	error,
 ) {
 
-	kvp, rp, err := k.initReqWrite(m, cfg)
+	if cfg.SystemStore && (cfg.MkdirP || cfg.ChannelID != nil) {
+		return nil, core.BadArgsError("the system store takes neither mkdirP nor a channel")
+	}
+
+	kvp, rp, err := k.initReqWriteAnyStore(m, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -207,6 +211,7 @@ func (k *Minder) putFile(
 			writePerms:     writePerms,
 			writePermsRoot: kvp.DefaultRootPerms(),
 			channelID:      cfg.ChannelID,
+			systemStore:    cfg.SystemStore,
 		}
 		dp, err := k.walkFromRoot(m, kvp, parentDir, wos)
 		if err != nil {
@@ -247,7 +252,7 @@ func (k *Minder) putFile(
 					WriteRole:   rp.Write,
 					DirentVers:  newDirent.Version - 1,
 					OverwriteOk: cfg.OverwriteOk,
-				}, cfg.ChannelID)
+				}, cfg.ChannelID, cfg.SystemStore)
 		}
 		if !sn.uploaded {
 			err = k.uploadNode(m, kvp, sn.nid, sn.sfb, cfg.ChannelID)
@@ -366,6 +371,13 @@ func (k *Minder) PutFileFirst(
 		return k.putSmallFile(m, cfg, path, lcl.SmallFileData(data))
 	}
 
+	// A large file links its dirent after the first chunk and keeps uploading,
+	// and a chunk is not gated by the directory it ends up in. Nothing in the
+	// system store needs one.
+	if cfg.SystemStore {
+		return nil, core.BadArgsError("the system store holds small files only")
+	}
+
 	f := func(kvp *KVParty, rp *proto.RolePair) (*sealedNode, error) {
 
 		auth, cli, err := k.client(m, kvp)
@@ -477,7 +489,7 @@ func (k *Minder) PutFileChunk(
 ) error {
 	kvp, _, err := k.initReqWrite(m, cfg)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	us := kvp.caches.upload[id]

@@ -168,17 +168,21 @@ func checkVersionVector(
 		}
 	}
 
-	v, err := getCurrentRootVersion(m, rq, pid, role)
-	if err != nil {
-		return err
+	// vv.Root = 0 implies we didn't hit the cache, since we'l only cache a version >= 1.
+	// That is also how a walk from the system root looks, and a team using only
+	// its system store has no ordinary root for this query to find.
+	var v proto.KVVersion
+	if vv.Root != 0 {
+		v, err = getCurrentRootVersion(m, rq, pid, role)
+		if err != nil {
+			return err
+		}
+		if v < vv.Root {
+			return core.BadArgsError("root version too big")
+		}
 	}
 
-	if v < vv.Root {
-		return core.BadArgsError("root version too big")
-	}
-
-	// vv.Root = 0 implies we didn't hit the cache, since we'l only cache a version >= 1
-	if (vv.Root == 0 || v == vv.Root) && len(ret.Path) == 0 {
+	if v == vv.Root && len(ret.Path) == 0 {
 		return nil
 	}
 

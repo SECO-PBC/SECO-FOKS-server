@@ -24,6 +24,13 @@ type KVParty struct {
 	root   *proto.KVRoot
 	cs     libclient.CacheSettings
 	plcn   *libclient.PLCNode
+
+	// sysRoot is the team's system store root (docs/kv-system-store.md). It
+	// is immutable, so it needs no cache invalidation and never touches the
+	// on-disk root cache or VisitRoot: the request's version vector describes
+	// the ordinary root, and reporting this one there would read as a stale
+	// cache on every retry.
+	sysRoot *proto.KVRoot
 }
 
 func (k *KVParty) SetPLCNode(n *libclient.PLCNode) {
@@ -281,6 +288,20 @@ func (k *KVParty) putRoot(
 	return k.caches.root.Put(m, root)
 }
 
+func (k *KVParty) getSystemRoot() *proto.KVRoot {
+	k.RLock()
+	defer k.RUnlock()
+	return k.sysRoot
+}
+
+func (k *KVParty) putSystemRoot(root proto.KVRoot) {
+	k.Lock()
+	defer k.Unlock()
+	if k.cs.UseMem {
+		k.sysRoot = &root
+	}
+}
+
 func (k *Minder) client(
 	m MetaContext,
 	kvp *KVParty,
@@ -330,7 +351,28 @@ func (k *Minder) clientWithCacheCheck(
 	return &hdr, cli, nil
 }
 
+// errSystemStoreUnsupported answers any KV operation other than get file and
+// put file when the caller selected the system store. Refusing here, rather
+// than teaching each caller about the flag, means a new operation cannot
+// silently ignore it and read a Leader's ordinary file of the same name.
+var errSystemStoreUnsupported = core.BadArgsError(
+	"the system store is reachable only through get file and put file")
+
 func (k *Minder) initReq(
+	m MetaContext,
+	cfg lcl.KVConfig,
+) (
+	*KVParty,
+	error,
+) {
+	if cfg.SystemStore {
+		return nil, errSystemStoreUnsupported
+	}
+	return k.initReqAnyStore(m, cfg)
+}
+
+// initReqAnyStore is initReq for the two operations that honour SystemStore.
+func (k *Minder) initReqAnyStore(
 	m MetaContext,
 	cfg lcl.KVConfig,
 ) (
@@ -368,7 +410,23 @@ func (k *Minder) initReqWrite(
 	*proto.RolePair,
 	error,
 ) {
-	kvp, err := k.initReq(m, cfg)
+	if cfg.SystemStore {
+		return nil, nil, errSystemStoreUnsupported
+	}
+	return k.initReqWriteAnyStore(m, cfg)
+}
+
+// initReqWriteAnyStore is initReqWrite for putFile, the one write that
+// honours SystemStore.
+func (k *Minder) initReqWriteAnyStore(
+	m MetaContext,
+	cfg lcl.KVConfig,
+) (
+	*KVParty,
+	*proto.RolePair,
+	error,
+) {
+	kvp, err := k.initReqAnyStore(m, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -679,18 +737,9 @@ func (k *Minder) getRoot(
 		return nil, err
 	}
 
-	kb, err := kvp.kvStoreKeyAtRoleGen(m, root.Rg.Role, root.Rg.Gen)
+	err = kvp.verifyRootBinding(m, &root)
 	if err != nil {
 		return nil, err
-	}
-
-	binding, err := kb.Hmac(root.ToBindingPayload(kvp.Id()))
-	if err != nil {
-		return nil, err
-	}
-
-	if !binding.Eq(root.BindingMac) {
-		return nil, core.VerifyError("binding mac")
 	}
 
 	err = kvp.putRoot(m, root)
@@ -701,6 +750,152 @@ func (k *Minder) getRoot(
 	return &root, nil
 }
 
+func (kvp *KVParty) verifyRootBinding(m MetaContext, root *proto.KVRoot) error {
+	kb, err := kvp.kvStoreKeyAtRoleGen(m, root.Rg.Role, root.Rg.Gen)
+	if err != nil {
+		return err
+	}
+	binding, err := kb.Hmac(root.ToBindingPayload(kvp.Id()))
+	if err != nil {
+		return err
+	}
+	if !binding.Eq(root.BindingMac) {
+		return core.VerifyError("binding mac")
+	}
+	return nil
+}
+
+// getSystemRoot returns the team's system root, or nil if it has none yet.
+func (k *Minder) getSystemRoot(
+	m MetaContext,
+	kvp *KVParty,
+) (
+	*proto.KVRoot,
+	error,
+) {
+	if root := kvp.getSystemRoot(); root != nil {
+		return root, nil
+	}
+	auth, cli, err := k.client(m, kvp)
+	if err != nil {
+		return nil, err
+	}
+	root, err := cli.KvGetSystemRoot(m.Ctx(), *auth)
+	if core.IsKVNoentError(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	err = kvp.verifyRootBinding(m, &root)
+	if err != nil {
+		return nil, err
+	}
+	kvp.putSystemRoot(root)
+	return &root, nil
+}
+
+// systemRootDir opens the system store's root directory. rp, when set, is
+// a write creating the store on first use; a read finds nothing and reports
+// the path as absent, the way an ordinary team with no root does.
+func (k *Minder) systemRootDir(
+	m MetaContext,
+	kvp *KVParty,
+	rp *proto.RolePair,
+) (
+	*DirPair,
+	error,
+) {
+	root, err := k.getSystemRoot(m, kvp)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case root != nil:
+		return k.loadDirWithDirID(m, kvp, root.Root)
+	case rp != nil:
+		return k.mkSystemRoot(m, kvp, *rp)
+	default:
+		return nil, core.KVNoentError{Path: "/"}
+	}
+}
+
+// mkSystemRoot creates a team's system store: a locked directory, then its
+// registration. A rival Sage can win the registration; then its store is the
+// store, this directory stays unreferenced, and the write carries on in the
+// winner's.
+func (k *Minder) mkSystemRoot(
+	m MetaContext,
+	kvp *KVParty,
+	rp proto.RolePair,
+) (
+	*DirPair,
+	error,
+) {
+	ret, kb, err := k.makeEmptyDir(m, kvp, rp, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	auth, cli, err := k.client(m, kvp)
+	if err != nil {
+		return nil, err
+	}
+	root, err := bindNewRoot(kvp, ret, kb)
+	if err != nil {
+		return nil, err
+	}
+	err = cli.KvPutSystemRoot(m.Ctx(), rem.KvPutSystemRootArg{
+		Auth: *auth,
+		Root: *root,
+	})
+	var raced core.KVRaceError
+	if errors.As(err, &raced) {
+		won, err := k.getSystemRoot(m, kvp)
+		if err != nil {
+			return nil, err
+		}
+		if won == nil {
+			return nil, core.InternalError("system root lost a race but is absent")
+		}
+		return k.loadDirWithDirID(m, kvp, won.Root)
+	}
+	if err != nil {
+		return nil, err
+	}
+	kvp.putSystemRoot(*root)
+	m.Infow("created system store", "id", ret.Id(), "fqp", kvp.Id())
+	return ret, nil
+}
+
+// bindNewRoot builds the root record for a freshly created directory, with the
+// binding MAC every reader checks.
+func bindNewRoot(
+	kvp *KVParty,
+	dir *DirPair,
+	kb *keyBundle,
+) (
+	*proto.KVRoot,
+	error,
+) {
+	vers := proto.KVVersion(1)
+	bpl := proto.KVRootBindingPayload{
+		Party: kvp.Id(),
+		Rg:    kb.rg,
+		Root:  dir.Id(),
+		Vers:  vers,
+	}
+	bm, err := kb.Hmac(&bpl)
+	if err != nil {
+		return nil, err
+	}
+	return &proto.KVRoot{
+		Root:       dir.Id(),
+		Vers:       vers,
+		Rg:         kb.rg,
+		BindingMac: *bm,
+	}, nil
+}
+
 // sealEmptyDir builds a new directory entirely locally: fresh seed, fresh
 // id, seed boxed for the party key. No network; the first RPC of a mkdir
 // comes after, so a transport failure leaves a complete intent to queue
@@ -709,6 +904,7 @@ func (k *Minder) sealEmptyDir(
 	m MetaContext,
 	kvp *KVParty,
 	rp proto.RolePair,
+	daemonLock bool,
 ) (
 	*proto.KVDir,
 	*proto.DirKeySeed,
@@ -733,11 +929,12 @@ func (k *Minder) sealEmptyDir(
 	}
 
 	kvd := proto.KVDir{
-		Id:        dirid,
-		Version:   proto.KVVersion(1),
-		Box:       *box,
-		WriteRole: rp.Write,
-		Status:    proto.KVDirStatus_Active,
+		Id:         dirid,
+		Version:    proto.KVVersion(1),
+		Box:        *box,
+		WriteRole:  rp.Write,
+		Status:     proto.KVDirStatus_Active,
+		DaemonLock: daemonLock,
 	}
 	return &kvd, &seed, kb, nil
 }
@@ -775,12 +972,13 @@ func (k *Minder) makeEmptyDir(
 	kvp *KVParty,
 	rp proto.RolePair,
 	channelID *proto.RTChannelID,
+	daemonLock bool,
 ) (
 	*DirPair,
 	*keyBundle,
 	error,
 ) {
-	kvd, seed, kb, err := k.sealEmptyDir(m, kvp, rp)
+	kvd, seed, kb, err := k.sealEmptyDir(m, kvp, rp, daemonLock)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -806,7 +1004,7 @@ func (k *Minder) mkRoot(
 ) {
 	// The party root is never channel storage: it is the community's own
 	// tree, and a channel's subtree hangs beneath it (§7 H3).
-	ret, kb, err := k.makeEmptyDir(m, kvp, rp, nil)
+	ret, kb, err := k.makeEmptyDir(m, kvp, rp, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -817,33 +1015,19 @@ func (k *Minder) mkRoot(
 	if err != nil {
 		return nil, err
 	}
-	vers := proto.KVVersion(1)
-
-	bpl := proto.KVRootBindingPayload{
-		Party: kvp.Id(),
-		Rg:    kb.rg,
-		Root:  ret.Id(),
-		Vers:  vers,
-	}
-	bm, err := kb.Hmac(&bpl)
+	root, err := bindNewRoot(kvp, ret, kb)
 	if err != nil {
 		return nil, err
-	}
-	root := proto.KVRoot{
-		Root:       ret.Id(),
-		Vers:       vers,
-		Rg:         kb.rg,
-		BindingMac: *bm,
 	}
 
 	err = cli.KvPutRoot(m.Ctx(), rem.KvPutRootArg{
 		Auth: *auth,
-		Root: root,
+		Root: *root,
 	})
 	if err != nil {
 		return nil, err
 	}
-	err = kvp.putRoot(m, root)
+	err = kvp.putRoot(m, *root)
 	if err != nil {
 		return nil, err
 	}
@@ -1482,7 +1666,7 @@ func (k *Minder) Mkdir(
 					WriteRole:  rp.Write,
 					DirentVers: qctx.direntVers,
 					Dir:        qctx.dir,
-				}, cfg.ChannelID); qerr != nil {
+				}, cfg.ChannelID, false); qerr != nil {
 				return nil, qerr
 			}
 		}
@@ -1510,6 +1694,9 @@ func (k *Minder) Symlink(
 	*PutFileRes,
 	error,
 ) {
+	if cfg.SystemStore {
+		return nil, errSystemStoreUnsupported
+	}
 	return k.putSymlink(m, cfg, path, target)
 }
 
@@ -1665,7 +1852,7 @@ func (k *Minder) unlinkInner(
 				DirentVers: tmp.Version - 1,
 				// An unlink creates nothing, so it carries no tag and queues
 				// like any other write, whatever it is unlinking.
-			}, nil); qerr != nil {
+			}, nil, false); qerr != nil {
 			return qerr
 		}
 		return err
@@ -2212,7 +2399,7 @@ func (k *Minder) ChannelMkRoot(
 	// just made, and report the whole operation as failed. Sealing once makes
 	// every step below a replay instead: putDir recognises a byte-identical
 	// row, and registering the same root twice is a no-op.
-	kvd, seed, _, err := k.sealEmptyDir(m, kvp, *rp)
+	kvd, seed, _, err := k.sealEmptyDir(m, kvp, *rp, false)
 	if err != nil {
 		return nil, err
 	}

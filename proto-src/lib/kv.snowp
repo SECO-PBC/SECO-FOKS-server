@@ -142,6 +142,11 @@ struct KVDir {
     box @2 : SeedBoxExternalNonce; // Nonce is DirID (to link seedBox to dirID)
     writeRole @3 : Role;
     status @4 : KVDirStatus;
+    // Fork-only (docs/kv-system-store.md): this directory belongs to a team's
+    // system store, so only a verified Sage account may change it. Immutable,
+    // and carried by the directory itself, so a replay compares it like every
+    // other field. Old peers skip this trailing field and read it as false.
+    daemonLock @5 : Bool;
 }
 
 struct KVRoot {

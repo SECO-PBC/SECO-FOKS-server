@@ -182,6 +182,7 @@ func (c *ClientConn) auth(
 		if tmp.Req.Member.Host.Eq(m.HostID().Id) {
 			if mu, uerr := tmp.Req.Member.Party.UID(); uerr == nil {
 				m = withActor(m, &mu)
+				m = withSageList(m, db)
 			}
 		}
 	default:
@@ -484,6 +485,29 @@ func (c *ClientConn) KvChannelMkRoot(ctx context.Context, arg rem.KvChannelMkRoo
 				return core.BadArgsError("directory does not carry this channel's tag")
 			}
 			return registerChannelRoot(m, db, pid, chid, arg.DirID)
+		})
+}
+
+func (c *ClientConn) KvGetSystemRoot(ctx context.Context, auth rem.KVAuth) (proto.KVRoot, error) {
+	var ret proto.KVRoot
+	err := c.auth(ctx, auth, func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, role proto.Role) error {
+		tmp, err := getSystemRoot(m, db, pid, role)
+		if err != nil {
+			return err
+		}
+		ret = *tmp
+		return nil
+	})
+	return ret, err
+}
+
+func (c *ClientConn) KvPutSystemRoot(ctx context.Context, arg rem.KvPutSystemRootArg) error {
+	return c.auth(ctx, arg.Auth,
+		func(m shared.MetaContext, db *pgxpool.Conn, pid proto.PartyID, role proto.Role) error {
+			return shared.RetryTx(m, db, "kvPutSystemRoot",
+				func(m shared.MetaContext, tx pgx.Tx) error {
+					return putSystemRoot(m, tx, pid, role, arg)
+				})
 		})
 }
 

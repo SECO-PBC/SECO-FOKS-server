@@ -42,6 +42,11 @@ struct KVConfig {
     // caller to hold a channel_acl row, and the tag is immutable afterward.
     // None is ordinary party storage, which is upstream's only behaviour.
     channelID @11 : Option(lib.RTChannelID);
+    // Fork-only (docs/kv-system-store.md): selects the team's system store
+    // instead of its ordinary tree. Honoured by get file and put file only;
+    // every other KV operation refuses it, so nothing can quietly fall back
+    // to the ordinary tree.
+    systemStore @12 : Bool;
 }
 
 struct GetFileChunkRes {
