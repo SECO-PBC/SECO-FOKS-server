@@ -137,6 +137,8 @@ One-time setup on the server, in `/opt/foks/workdir`:
 
 **Turn it off:** set `enabled : false` (or remove the line), then restart the servers with the same `docker compose restart ...` command. To also remove the agent, take `docker-compose.datadog.yml` out of `COMPOSE_FILE`.
 
+**Security:** the agent mounts the Docker socket, which gives it root-equivalent access to the host. `:ro` doesn't limit the API. We accept this for staging, for container metrics and label-based Postgres autodiscovery. The image is pinned to an exact version (`agent:7.85.3`), so upgrades happen only when that line changes. Revisit before running the agent in prod; `docker-compose.datadog.yml` lists the alternatives.
+
 **Capacity:** the staging host has 2 vCPU and 2 GB RAM. The agent is capped at 512 MB and 0.5 CPU, but it still shares the box with the server, so compare benchmark runs with telemetry on and off.
 
 ## What lives where

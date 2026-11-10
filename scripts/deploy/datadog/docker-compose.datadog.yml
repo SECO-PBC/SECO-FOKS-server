@@ -14,7 +14,10 @@
 
 services:
   datadog-agent:
-    image: gcr.io/datadoghq/agent:7
+    # Pinned: the agent runs with the Docker socket (root-equivalent, see
+    # below), so upgrades should be deliberate, not whatever 7.x was pushed
+    # last. To upgrade, bump this and redeploy.
+    image: gcr.io/datadoghq/agent:7.85.3
     restart: unless-stopped
     environment:
       DD_API_KEY: ${DD_API_KEY:?set DD_API_KEY in .env}
@@ -33,6 +36,12 @@ services:
       # Read by the Postgres check below via %%env_DD_PG_PASSWORD%%.
       DD_PG_PASSWORD: ${DD_PG_PASSWORD:?set DD_PG_PASSWORD in .env}
     volumes:
+      # SECURITY: root-equivalent. ":ro" only protects the socket file; the
+      # agent can still use the whole Docker API (e.g. start a privileged
+      # container). Accepted for the staging canary, for label-based
+      # autodiscovery and per-container metrics. Before prod, revisit: a
+      # GET-only docker-socket-proxy (still exposes container env vars, i.e.
+      # secrets) or no socket with a static postgres.d/conf.yaml.
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /proc/:/host/proc/:ro
       - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
