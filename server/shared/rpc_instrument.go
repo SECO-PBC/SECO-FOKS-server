@@ -73,8 +73,10 @@ func (t *Telemetry) wrapRPC(
 				attribute.String("resource.name", method),
 			),
 		)
-		// Deferred so a panicking handler still ends its span and
-		// decrements the in-flight gauge.
+		// Deferred so every return path records the call. Handler panics
+		// aren't recovered (here, in serveConnection, or by snowpack-rpc):
+		// they crash the process before anything is exported, so panics
+		// show up as container restarts, not as RPC errors.
 		defer func() {
 			elapsed := ms(time.Since(start))
 			inst.rpcActive.Add(ctx, -1, methodOpt)
