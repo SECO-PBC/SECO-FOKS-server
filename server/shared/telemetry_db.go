@@ -43,6 +43,19 @@ func (t *Telemetry) InstallPgTracer(cfg *pgxpool.Config, dbType string) {
 
 type pgQueryKey struct{}
 type pgAcquireKey struct{}
+type pgNoTelemetryKey struct{}
+
+// withoutPgTelemetry marks ctx so pgTracer records nothing for its queries
+// and acquires. It's for telemetry's own queries (the push_outbox probe), so
+// they don't show up in the DB metrics they sit beside.
+func withoutPgTelemetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, pgNoTelemetryKey{}, true)
+}
+
+func pgTelemetryOff(ctx context.Context) bool {
+	off, _ := ctx.Value(pgNoTelemetryKey{}).(bool)
+	return off
+}
 
 type pgQueryState struct {
 	start time.Time
@@ -74,6 +87,9 @@ func sqlOp(sql string) string {
 }
 
 func (p *pgTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	if pgTelemetryOff(ctx) {
+		return ctx
+	}
 	st := &pgQueryState{start: time.Now(), op: sqlOp(data.SQL)}
 	// Only make DB spans under a sampled parent (an RPC or tx span), so
 	// background loops don't produce orphan root spans per query.
@@ -138,6 +154,9 @@ func pgErrClass(err error) string {
 }
 
 func (p *pgTracer) TraceAcquireStart(ctx context.Context, _ *pgxpool.Pool, _ pgxpool.TraceAcquireStartData) context.Context {
+	if pgTelemetryOff(ctx) {
+		return ctx
+	}
 	return context.WithValue(ctx, pgAcquireKey{}, time.Now())
 }
 

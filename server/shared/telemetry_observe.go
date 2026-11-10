@@ -151,8 +151,14 @@ func (p *pushBacklogProbe) read(ctx context.Context) (map[string]int64, float64,
 	if time.Since(p.last) < p.every {
 		return p.counts, p.age, p.ok
 	}
-	p.last = time.Now()
 	counts, age, err := PushOutboxBacklog(ctx, p.g)
+	if errors.Is(err, errProbePoolBusy) {
+		// Skip this sample (the gauge shows a gap) and retry at the next
+		// collection; foks.db.pool.* already shows the pool is starved.
+		p.ok = false
+		return nil, 0, false
+	}
+	p.last = time.Now()
 	if err != nil {
 		// A broken probe otherwise just looks like a missing gauge, so say
 		// so once, without logging every 30s.
@@ -169,14 +175,32 @@ func (p *pushBacklogProbe) read(ctx context.Context) (map[string]int64, float64,
 	return counts, age, true
 }
 
+// errProbePoolBusy means the realtime pool had no free connection, so the
+// push_outbox probe skipped its sample.
+var errProbePoolBusy = errors.New("realtime pool busy; push_outbox sample skipped")
+
 // PushOutboxBacklog counts queued and sending push_outbox rows across all
 // hosts, and returns the age in seconds of the oldest of them (0 if none).
 // It backs the foks.rt.push_outbox.* gauges; exported for the integration
 // test that runs it against a real database.
+//
+// It runs inside metric collection, so it must not wait for, or compete
+// for, a pooled connection: if the pool is saturated it returns
+// errProbePoolBusy rather than queueing. Its query and acquire are not
+// recorded in the DB metrics.
 func PushOutboxBacklog(ctx context.Context, g *GlobalContext) (map[string]int64, float64, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(withoutPgTelemetry(ctx), 250*time.Millisecond)
 	defer cancel()
-	db, err := g.Db(ctx, DbTypeRealTime)
+	pool, err := g.dbPool(ctx, DbTypeRealTime)
+	if err != nil {
+		return nil, 0, err
+	}
+	if st := pool.Stat(); st.IdleConns() == 0 && st.TotalConns() >= st.MaxConns() {
+		return nil, 0, errProbePoolBusy
+	}
+	// The pool can still fill between the check and here; the short
+	// timeout bounds that wait.
+	db, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, 0, err
 	}

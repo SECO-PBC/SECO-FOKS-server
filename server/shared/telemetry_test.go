@@ -484,3 +484,28 @@ func TestMethodSampler(t *testing.T) {
 	_, sp := sdktrace.NewTracerProvider(sdktrace.WithSampler(all)).Tracer("t").Start(context.Background(), "User.anything")
 	require.True(t, sp.IsRecording())
 }
+
+// Telemetry's own queries (the push_outbox probe) are marked so the pgx
+// tracer records nothing for them: no metrics and no spans, even under a
+// recording parent.
+func TestPgTracerSkipsMarkedContext(t *testing.T) {
+	h := newTelemetryHarness(t, false)
+	cfg := &pgxpool.Config{ConnConfig: &pgx.ConnConfig{}}
+	h.t.InstallPgTracer(cfg, DbTypeRealTime.ToString())
+	tr := cfg.ConnConfig.Tracer.(*pgTracer)
+
+	pctx, parent := h.t.tracer.Start(context.Background(), "parent")
+	ctx := withoutPgTelemetry(pctx)
+
+	q := tr.TraceQueryStart(ctx, nil, pgx.TraceQueryStartData{SQL: "SELECT 1"})
+	require.Equal(t, ctx, q)
+	tr.TraceQueryEnd(q, nil, pgx.TraceQueryEndData{})
+	a := tr.TraceAcquireStart(ctx, nil, pgxpool.TraceAcquireStartData{})
+	tr.TraceAcquireEnd(a, nil, pgxpool.TraceAcquireEndData{})
+	parent.End()
+
+	rm := h.collect(t)
+	require.Nil(t, findMetric(rm, "foks.db.query.duration"))
+	require.Nil(t, findMetric(rm, "foks.db.pool.acquire.duration"))
+	require.Len(t, h.spans.Ended(), 1, "only the parent span")
+}
