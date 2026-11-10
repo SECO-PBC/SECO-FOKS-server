@@ -92,6 +92,7 @@ Override names are checked only for shape (`Protocol.method`) and range. A missp
     db.tx.attempt  #1  result=committed
   db.tx.post_commit  <name>          success hook, a sibling of db.tx
   ```
+  An attempt's `result` is `committed`, `retry`, `error`, or `exhausted` (a retryable failure on the last of 5 tries). Attempt spans cover only BEGIN through COMMIT; the backoff between attempts counts toward `db.tx` but not toward any attempt. `foks.db.tx.retries` counts retries actually performed (at most 4).
   `TxName` values become the `db.tx.name` label, so they must be fixed strings.
 - **Query spans only exist under a sampled parent.** Background loops record query metrics but produce no orphan spans.
 

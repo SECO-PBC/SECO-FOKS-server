@@ -212,9 +212,10 @@ func (t *Telemetry) StartTx(m MetaContext, name TxName) (MetaContext, *txTelemet
 	return m.WithContext(x.ctx), x
 }
 
-// Attempt opens a db.tx.attempt child span for try number i. The returned
-// func ends it with result committed, retry or error.
-func (x *txTelemetry) Attempt(m MetaContext, i int) (MetaContext, func(retry bool, err error)) {
+// Attempt opens a db.tx.attempt child span for try number i; last says it's
+// the final try. The returned func ends it with result committed, retry,
+// exhausted (a retryable failure on the last try) or error.
+func (x *txTelemetry) Attempt(m MetaContext, i int, last bool) (MetaContext, func(retry bool, err error)) {
 	if !x.t.Enabled() {
 		return m, func(bool, error) {}
 	}
@@ -224,6 +225,9 @@ func (x *txTelemetry) Attempt(m MetaContext, i int) (MetaContext, func(retry boo
 	return m.WithContext(ctx), func(retry bool, err error) {
 		result := "committed"
 		switch {
+		case retry && last:
+			result = "exhausted"
+			span.SetStatus(codes.Error, "retries_exhausted")
 		case retry:
 			result = "retry"
 		case err != nil:

@@ -315,7 +315,7 @@ func TestTxTelemetryAndRTHelpers(t *testing.T) {
 	// Without a parent span: metrics only, no root spans.
 	bg := NewMetaContext(context.Background(), h.g)
 	bm, bgTx := h.t.StartTx(bg, "merkle.poll")
-	_, bgAttempt := bgTx.Attempt(bm, 0)
+	_, bgAttempt := bgTx.Attempt(bm, 0, false)
 	bgAttempt(false, nil)
 	bgTx.End(0, nil)
 	_, bgHook := bgTx.PostCommit(bm)
@@ -331,12 +331,12 @@ func TestTxTelemetryAndRTHelpers(t *testing.T) {
 
 	tm, tx := h.t.StartTx(m, "realtime.SendMessage")
 
-	am, attemptDone := tx.Attempt(tm, 0)
+	am, attemptDone := tx.Attempt(tm, 0, false)
 	_, ph := h.t.RTPhase(am, "fanout")
 	ph()
 	attemptDone(true, nil) // retried
 
-	am, attemptDone = tx.Attempt(tm, 1)
+	am, attemptDone = tx.Attempt(tm, 1, false)
 	_, ph = h.t.RTPhase(am, "fanout")
 	ph()
 	attemptDone(false, nil) // committed
@@ -350,10 +350,19 @@ func TestTxTelemetryAndRTHelpers(t *testing.T) {
 
 	// A failed transaction: the attempt's status carries only the SQLSTATE.
 	fm, ftx := h.t.StartTx(m, "realtime.MarkRead")
-	_, fDone := ftx.Attempt(fm, 0)
+	_, fDone := ftx.Attempt(fm, 0, true)
 	pgErr := &pgconn.PgError{Code: "23505", Message: "dup " + secretMarker}
 	fDone(false, pgErr)
 	ftx.End(0, pgErr)
+
+	// Retries exhausted: the last attempt's retryable failure ends as
+	// "exhausted", not "retry".
+	xm, xtx := h.t.StartTx(m, "realtime.Exhaust")
+	_, xa0 := xtx.Attempt(xm, 0, false)
+	xa0(true, nil)
+	_, xa1 := xtx.Attempt(xm, 1, true)
+	xa1(true, nil)
+	xtx.End(1, core.TxRetryError{})
 
 	h.t.RTPollDone(m.Ctx(), 5*time.Millisecond, "timeout")
 	h.t.RTReconcile(m.Ctx(), "memory")
@@ -411,6 +420,16 @@ func TestTxTelemetryAndRTHelpers(t *testing.T) {
 	require.NotNil(t, failed)
 	require.Equal(t, "23505", failed.Status().Description)
 
+	var exhausted sdktrace.ReadOnlySpan
+	for _, s := range ended {
+		if s.Name() == "db.tx.attempt" && spanAttr(s, "result").AsString() == "exhausted" {
+			exhausted = s
+		}
+	}
+	require.NotNil(t, exhausted)
+	require.EqualValues(t, 1, spanAttr(exhausted, "db.tx.attempt").AsInt64())
+	require.Equal(t, "retries_exhausted", exhausted.Status().Description)
+
 	h.assertPrivate(t)
 }
 
@@ -419,7 +438,7 @@ func TestNoopTelemetryIsSafe(t *testing.T) {
 	tel := g.Telemetry()
 	m := NewMetaContext(context.Background(), g)
 	tm, tx := tel.StartTx(m, "x")
-	am, attemptDone := tx.Attempt(tm, 0)
+	am, attemptDone := tx.Attempt(tm, 0, true)
 	require.Equal(t, m.Ctx(), am.Ctx())
 	attemptDone(false, nil)
 	tx.End(0, nil)

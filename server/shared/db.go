@@ -163,7 +163,7 @@ func RetryTx2(
 	var hook func(MetaContext)
 
 	tryOnce := func(i int) (retry bool, err error) {
-		am, attemptDone := tel.Attempt(m, i)
+		am, attemptDone := tel.Attempt(m, i, i == nTries-1)
 		// Registered first so it runs last, after TxRollback below has
 		// settled err.
 		defer func() { attemptDone(retry, err) }()
@@ -188,24 +188,26 @@ func RetryTx2(
 			return false, err
 		}
 		am.Warnw("retryTx", "query", nm, "i", i, "err", err)
-		time.Sleep(backoff)
-		backoff *= 2
 		return true, nil
 	}
 
 	var err error
 	retries := 0
-	for {
-		retry, aerr := tryOnce(retries)
+	for i := 0; ; i++ {
+		retry, aerr := tryOnce(i)
 		if !retry {
 			err = aerr
 			break
 		}
-		retries++
-		if retries == nTries {
+		if i == nTries-1 {
 			err = core.TxRetryError{}
 			break
 		}
+		// Back off between attempts, outside any attempt's span, and not
+		// after the last one.
+		retries++
+		time.Sleep(backoff)
+		backoff *= 2
 	}
 
 	tel.End(retries, err)
