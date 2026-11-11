@@ -1,0 +1,340 @@
+{
+  "title": "FOKS server overview",
+  "description": "High-level health of the FOKS chat server: RPC traffic, realtime send path, Postgres, and the host. Source: OTel metrics from the servers (foks.*), Datadog Agent container/host checks and Postgres DBM. See docs/observability.md in SECO-FOKS-server.",
+  "layout_type": "ordered",
+  "reflow_type": "auto",
+  "template_variables": [
+    { "name": "env", "prefix": "env", "available_values": [], "default": "staging" },
+    { "name": "service", "prefix": "service", "available_values": [], "default": "*" }
+  ],
+  "widgets": [
+    {
+      "definition": {
+        "type": "group",
+        "title": "Overview",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "RPCs / s",
+              "requests": [{ "q": "count:foks.rpc.server.duration{$env,$service}.as_rate()", "aggregator": "avg" }],
+              "precision": 1,
+              "autoscale": true
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "RPC errors / s",
+              "requests": [{ "q": "sum:foks.rpc.server.errors{$env,$service}.as_rate()", "aggregator": "avg" }],
+              "precision": 2,
+              "autoscale": true
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "Messages sent",
+              "requests": [{ "q": "count:foks.rt.phase.duration{$env,phase:insert}.as_count()", "aggregator": "sum" }],
+              "precision": 0,
+              "autoscale": true
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "Send latency (avg ms)",
+              "requests": [{ "q": "avg:foks.rpc.server.duration{$env,rpc.method:realtime.rtsend}", "aggregator": "avg" }],
+              "precision": 1,
+              "autoscale": true
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "Parked long-polls",
+              "requests": [{ "q": "sum:foks.rt.pollers.parked{$env}", "aggregator": "last" }],
+              "precision": 0,
+              "autoscale": true
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "Push outbox oldest (s)",
+              "requests": [{ "q": "max:foks.rt.push_outbox.oldest_age{$env}", "aggregator": "max" }],
+              "precision": 0,
+              "autoscale": true
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "RPC rate by service (calls/s)",
+              "show_legend": true,
+              "requests": [{ "q": "count:foks.rpc.server.duration{$env,$service} by {service}.as_rate()", "display_type": "area" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Open client connections by service",
+              "show_legend": true,
+              "requests": [{ "q": "sum:foks.rpc.server.connections{$env,$service} by {service}", "display_type": "line" }]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "RPCs",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Busiest RPCs (calls/s)",
+              "requests": [{ "q": "top(count:foks.rpc.server.duration{$env,$service} by {rpc.method}.as_rate(), 15, 'mean', 'desc')" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Slowest RPCs, avg ms (long poll excluded)",
+              "requests": [{ "q": "top(avg:foks.rpc.server.duration{$env,$service,!rpc.method:realtime.rtpollinbox} by {rpc.method}, 15, 'mean', 'desc')" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Worst-case latency by RPC, max ms (long poll excluded)",
+              "show_legend": true,
+              "requests": [{ "q": "top(max:foks.rpc.server.duration{$env,$service,!rpc.method:realtime.rtpollinbox} by {rpc.method}, 8, 'max', 'desc')", "display_type": "line" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "RPC errors by method and code (errors/s)",
+              "requests": [{ "q": "top(sum:foks.rpc.server.errors{$env,$service} by {rpc.method,error.code}.as_rate(), 15, 'mean', 'desc')" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "In-flight RPCs by method",
+              "show_legend": true,
+              "requests": [{ "q": "top(sum:foks.rpc.server.active{$env,$service,!rpc.method:realtime.rtpollinbox} by {rpc.method}, 8, 'max', 'desc')", "display_type": "line" }]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Realtime: send path and polling",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "type": "note",
+              "content": "A send is: **lock** (wait on the channel row's FOR UPDATE) → **prune** (private channels) → **insert** → **fanout** (user_inbox / user_channels / push_outbox writes), then after COMMIT **wake** (op:send). Read marks, mutes, ACL changes and reconciles also wake pollers, so filter wake on op.",
+              "background_color": "gray",
+              "font_size": "14",
+              "show_tick": false
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Send phases, avg ms",
+              "show_legend": true,
+              "requests": [{ "q": "avg:foks.rt.phase.duration{$env,!phase:wake,!phase:reconcile} by {phase}", "display_type": "bars" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Wake cost by cause, avg ms",
+              "show_legend": true,
+              "requests": [{ "q": "avg:foks.rt.phase.duration{$env,phase:wake} by {op}", "display_type": "line" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Members woken per wake, by cause (avg and max)",
+              "show_legend": true,
+              "requests": [
+                { "q": "avg:foks.rt.fanout.members{$env} by {op}", "display_type": "line" },
+                { "q": "max:foks.rt.fanout.members{$env} by {op}", "display_type": "line" }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Inbox long-polls by outcome (/s)",
+              "show_legend": true,
+              "requests": [{ "q": "count:foks.rt.poll.duration{$env} by {outcome}.as_rate()", "display_type": "bars" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Late-join reconcile by tier (/s)",
+              "show_legend": true,
+              "requests": [{ "q": "sum:foks.rt.reconcile{$env} by {result}.as_rate()", "display_type": "bars" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Push outbox backlog by status",
+              "show_legend": true,
+              "requests": [{ "q": "max:foks.rt.push_outbox.backlog{$env} by {status}", "display_type": "line" }]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Database",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Slowest transactions, avg ms (first BEGIN to COMMIT)",
+              "requests": [{ "q": "top(avg:foks.db.tx.duration{$env,$service} by {db.tx.name}, 15, 'mean', 'desc')" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Transaction latency, max ms",
+              "show_legend": true,
+              "requests": [{ "q": "top(max:foks.db.tx.duration{$env,$service} by {db.tx.name}, 8, 'max', 'desc')", "display_type": "line" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Query latency by service and statement type, avg ms",
+              "show_legend": true,
+              "requests": [{ "q": "top(avg:foks.db.query.duration{$env,$service} by {service,db.operation.name}, 10, 'mean', 'desc')", "display_type": "line" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Pool connections in use vs pool size",
+              "show_legend": true,
+              "requests": [
+                { "q": "max:foks.db.pool.acquired{$env,$service} by {service,db.type}", "display_type": "line" },
+                { "q": "max:foks.db.pool.max{$env,$service} by {service,db.type}", "display_type": "line" }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Pool waits: acquires that had to wait (/s)",
+              "show_legend": true,
+              "requests": [{ "q": "sum:foks.db.pool.empty_acquires{$env,$service} by {service,db.type}.as_rate()", "display_type": "bars" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Query errors by SQLSTATE (/s)",
+              "requests": [{ "q": "top(sum:foks.db.query.errors{$env,$service} by {service,db.response.status_code}.as_rate(), 10, 'mean', 'desc')" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Postgres: statements by total time (s/s, from DBM)",
+              "requests": [{ "q": "top(sum:postgresql.queries.time{$env} by {db,query}.as_rate() / 1000000000, 10, 'mean', 'desc')" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Postgres connections used (%)",
+              "show_legend": false,
+              "requests": [{ "q": "max:postgresql.percent_usage_connections{$env}*100", "display_type": "line" }]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Host and containers",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "CPU by container (cores)",
+              "show_legend": true,
+              "requests": [{ "q": "top(sum:container.cpu.usage{$env} by {container_name} / 1000000000, 8, 'mean', 'desc')", "display_type": "area" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Memory by container",
+              "show_legend": true,
+              "requests": [{ "q": "top(sum:container.memory.usage{$env} by {container_name}, 8, 'mean', 'desc')", "display_type": "area" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Host memory usable",
+              "show_legend": false,
+              "requests": [{ "q": "avg:system.mem.usable{$env}", "display_type": "line" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Host CPU (%)",
+              "show_legend": true,
+              "requests": [
+                { "q": "avg:system.cpu.user{$env}", "display_type": "area" },
+                { "q": "avg:system.cpu.system{$env}", "display_type": "area" },
+                { "q": "avg:system.cpu.iowait{$env}", "display_type": "area" }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Go heap in use by service",
+              "show_legend": true,
+              "requests": [{ "q": "avg:go.memory.used{$env,$service} by {service}", "display_type": "line" }]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "APM spans ingested (/s, drives cost)",
+              "show_legend": true,
+              "requests": [{ "q": "sum:datadog.estimated_usage.apm.ingested_spans{$env} by {service}.as_rate()", "display_type": "bars" }]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -107,3 +107,20 @@ For one `RealTime.rtSend`, read the following together:
 4. **Deadlocks and failed sends:** `foks.db.query.errors{db.response.status_code:40P01}` and `foks.db.tx.duration{db.tx.name:realtime.SendMessage, outcome:error}`. `RetryTx2` deliberately doesn't retry deadlocks or other server errors; it retries only a COMMIT that never reached the server, so `foks.db.tx.retries` should stay near zero. Contention between sends shows up as `lock` time instead.
 5. **`foks.db.tx.post_commit.duration{db.tx.name:realtime.SendMessage}`** for the wake cost outside the transaction.
 6. **Datadog DBM → Query Metrics** for the `INSERT INTO user_inbox ... SELECT` fan-out statement: lock waits, rows and I/O.
+
+## Dashboard
+
+`docs/ops/datadog-dashboard.json` is a "FOKS server overview" dashboard. It has template variables for `env` (default `staging`) and `service`, and five sections:
+
+- **Overview:** RPC rate and errors, messages sent, send latency, parked long-polls, oldest outbox push, and rate and connections per service.
+- **RPCs:** busiest and slowest methods, worst-case latency, errors by method and code, and in-flight calls.
+- **Realtime:** send phases, wake cost and members woken by `op`, poll outcomes, reconcile tiers, and the push outbox backlog.
+- **Database:** slowest transactions, query latency, pool usage and waits, query errors by SQLSTATE, and, from Database Monitoring, Postgres statements by total time and connection usage.
+- **Host and containers:** CPU and memory per container, host CPU and memory, Go heap per service, and ingested APM spans (the main cost driver).
+
+**To import it:** in Datadog, open **Dashboards → New Dashboard**, then the gear menu → **Import dashboard JSON**, and paste the file. Importing into an existing dashboard replaces its widgets.
+
+**Editing it:** the file is the source of truth. If you change the dashboard in the UI, export it (gear menu → **Export dashboard JSON**) and commit the result here. Keep the queries in step with the metric table above when metrics change. Two things trip up queries:
+
+- **Counting calls.** Duration metrics are distributions, so the call rate is `count:foks.rpc.server.duration{…}.as_rate()`. `sum:` gives the summed milliseconds, not the number of calls.
+- **Percentiles.** Latency widgets show avg and max, because percentile aggregations are off by default. To use p95/p99, enable percentiles in **Metrics → Summary** on `foks.rpc.server.duration`, `foks.db.tx.duration` and `foks.rt.phase.duration` (this adds custom-metric cost), then switch those widgets to `p95:`.
