@@ -616,17 +616,28 @@ func ReplySocialInvite(m MetaContext, arg rem.ReplyArg, invitee proto.UID) (*pro
 	return newTurnFor, nil
 }
 
-// inviteReplyPushMarker is an invitation-reply push row's data; the relay
-// sends it as "k" (seco-server/push-relay, invite-review-push).
-const inviteReplyPushMarker = "invite"
+// Invitation push markers (FORK-ONLY): a row's data, which the relay sends
+// as "k" (seco-server/push-relay). Each says only which event it is.
+const (
+	// InviteReplyPushMarker wakes an inviter whose invitation was answered
+	// (invite-review-push).
+	InviteReplyPushMarker = "invite"
+	// InviteAskPushMarker wakes an invitee asked for a different proof
+	// (invitee-acceptance-push).
+	InviteAskPushMarker = "invite-ask"
+	// InviteAcceptedPushMarker wakes an invitee the inviter accepted
+	// (invitee-acceptance-push).
+	InviteAcceptedPushMarker = "invite-accepted"
+)
 
-// QueueInviteReplyPush (FORK-ONLY, invite-review-push) queues one
-// content-free push to wake an inviter whose invitation was just answered.
-// The row is about no channel (channel_id 0; real ids are random 63-bit), so
-// no push hold or mute applies, and it names no invitation, team or person.
-// It runs after the reply committed: push_outbox lives in the realtime
-// database, which the users-DB transaction cannot span.
-func QueueInviteReplyPush(m MetaContext, inviter proto.UID) error {
+// QueueInvitationPush (FORK-ONLY, invite-review-push and
+// invitee-acceptance-push) queues one content-free push to wake a party to
+// an invitation. The row is about no channel (channel_id 0; real ids are
+// random 63-bit), so no push hold or mute applies, and it names no
+// invitation, team or person, only the event (marker). It runs after the
+// change committed: push_outbox lives in the realtime database, which the
+// users-DB transaction cannot span.
+func QueueInvitationPush(m MetaContext, uid proto.UID, marker string) error {
 	rtdb, err := m.Db(DbTypeRealTime)
 	if err != nil {
 		return err
@@ -635,30 +646,39 @@ func QueueInviteReplyPush(m MetaContext, inviter proto.UID) error {
 	_, err = rtdb.Exec(m.Ctx(),
 		`INSERT INTO push_outbox (short_host_id, uid, channel_id, kind, seq, data, status, ctime, mtime)
 		 VALUES ($1, $2, 0, 'system', NULL, $3, 'queued', NOW(), NOW())`,
-		m.ShortHostID().ExportToDB(), inviter.ExportToDB(), []byte(inviteReplyPushMarker),
+		m.ShortHostID().ExportToDB(), uid.ExportToDB(), []byte(marker),
 	)
 	return err
 }
 
 // AskAgainSocialInvite appends an inviter turn to a replied row. Rows the
 // caller doesn't own read as absent.
-func AskAgainSocialInvite(m MetaContext, arg rem.AskAgainArg, inviter proto.UID) error {
+//
+// FORK-ONLY (invitee-acceptance-push): it returns the invitee to wake (the
+// identity of the reply being questioned), so the caller can queue their
+// push (QueueInvitationPush). Only a replied row is asked again, so a retry
+// after a lost ack fails with the wrong-state error and wakes no one twice.
+func AskAgainSocialInvite(m MetaContext, arg rem.AskAgainArg, inviter proto.UID) (*proto.UID, error) {
 	msgBox, err := core.EncodeToBytes(&arg.Msg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	shid := m.ShortHostID().ExportToDB()
 
-	return RetryTxUserDB(m, "AskAgainSocialInvite", func(m MetaContext, tx pgx.Tx) error {
+	var wake *proto.UID
+	err = RetryTxUserDB(m, "AskAgainSocialInvite", func(m MetaContext, tx pgx.Tx) error {
+		// Set per attempt: a retried attempt must not inherit an earlier one's.
+		wake = nil
 		var stateRaw string
 		var lastSeq uint64
+		var inviteeRaw []byte
 		err := tx.QueryRow(m.Ctx(),
-			`SELECT state, last_seq FROM social_invites
+			`SELECT state, last_seq, invitee FROM social_invites
 			 WHERE short_host_id=$1 AND id=$2 AND inviter=$3
 			 AND etime > NOW() AND state != 'canceled'
 			 FOR UPDATE`,
 			shid, arg.Id[:], inviter.ExportToDB(),
-		).Scan(&stateRaw, &lastSeq)
+		).Scan(&stateRaw, &lastSeq, &inviteeRaw)
 		if err == pgx.ErrNoRows {
 			return core.SocialInviteNotFoundError{}
 		}
@@ -696,8 +716,29 @@ func AskAgainSocialInvite(m MetaContext, arg rem.AskAgainArg, inviter proto.UID)
 		if tags.RowsAffected() != 1 {
 			return core.UpdateError("social_invites")
 		}
+		wake = inviteeToWake(m, "AskAgainSocialInvite", inviteeRaw)
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return wake, nil
+}
+
+// inviteeToWake reads a replied row's invitee for its push. A replied row
+// always names one; a row that doesn't is logged and wakes no one, since the
+// decision itself is sound.
+func inviteeToWake(m MetaContext, op string, raw []byte) *proto.UID {
+	if raw == nil {
+		m.Warnw(op, "stage", "invitee to wake", "err", "replied row names no invitee")
+		return nil
+	}
+	uid, err := proto.ImportUIDFromBytes(raw)
+	if err != nil {
+		m.Warnw(op, "stage", "invitee to wake", "err", err)
+		return nil
+	}
+	return uid
 }
 
 // CloseSocialInvite moves a row to a terminal state. It is bookkeeping, not
@@ -706,26 +747,34 @@ func AskAgainSocialInvite(m MetaContext, arg rem.AskAgainArg, inviter proto.UID)
 // a still-unused attached code in the same transaction: the code was handed
 // out inside the opening message, and deleting it is the revocation. An
 // accepted close leaves the code alone; the consumed row is the audit trail.
-func CloseSocialInvite(m MetaContext, arg rem.CloseArg, inviter proto.UID) error {
+//
+// FORK-ONLY (invitee-acceptance-push): it returns the invitee to wake when
+// this close accepted a reply, so the caller can queue their push
+// (QueueInvitationPush); nil for a retried close, a decline or a cancel.
+func CloseSocialInvite(m MetaContext, arg rem.CloseArg, inviter proto.UID) (*proto.UID, error) {
 	switch arg.St {
 	case proto.SocialInviteState_Accepted,
 		proto.SocialInviteState_Declined,
 		proto.SocialInviteState_Canceled:
 	default:
-		return core.BadArgsError("close takes accepted, declined or canceled")
+		return nil, core.BadArgsError("close takes accepted, declined or canceled")
 	}
 	shid := m.ShortHostID().ExportToDB()
 
-	return RetryTxUserDB(m, "CloseSocialInvite", func(m MetaContext, tx pgx.Tx) error {
+	var wake *proto.UID
+	err := RetryTxUserDB(m, "CloseSocialInvite", func(m MetaContext, tx pgx.Tx) error {
+		// Set per attempt: a retried attempt must not inherit an earlier one's.
+		wake = nil
 		var stateRaw string
 		var code []byte
+		var inviteeRaw []byte
 		err := tx.QueryRow(m.Ctx(),
-			`SELECT state, invite_code FROM social_invites
+			`SELECT state, invite_code, invitee FROM social_invites
 			 WHERE short_host_id=$1 AND id=$2 AND inviter=$3
 			 AND etime > NOW()
 			 FOR UPDATE`,
 			shid, arg.Id[:], inviter.ExportToDB(),
-		).Scan(&stateRaw, &code)
+		).Scan(&stateRaw, &code, &inviteeRaw)
 		if err == pgx.ErrNoRows {
 			return core.SocialInviteNotFoundError{}
 		}
@@ -791,8 +840,15 @@ func CloseSocialInvite(m MetaContext, arg rem.CloseArg, inviter proto.UID) error
 		if tags.RowsAffected() != 1 {
 			return core.UpdateError("social_invites")
 		}
+		if arg.St == proto.SocialInviteState_Accepted {
+			wake = inviteeToWake(m, "CloseSocialInvite", inviteeRaw)
+		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return wake, nil
 }
 
 // SweepSocialInvites deletes expired and terminal rows once the grace period
