@@ -6,6 +6,7 @@ package engine
 import (
 	"context"
 
+	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-foks/proto/rem"
 	"github.com/foks-proj/go-foks/server/shared"
 )
@@ -30,25 +31,44 @@ func (c *UserClientConn) Reply(ctx context.Context, arg rem.ReplyArg) error {
 	if err != nil {
 		return err
 	}
-	// FORK-ONLY (invite-review-push): wake the inviter. Best-effort: the
-	// reply is stored, and failing it now would only make the invitee retry
-	// into a replacement, which queues nothing.
-	if inviter != nil {
-		if err := shared.QueueInviteReplyPush(m, *inviter); err != nil {
-			m.Warnw("SocialInvite.Reply", "stage", "queue inviter push", "err", err)
-		}
-	}
+	// FORK-ONLY (invite-review-push): wake the inviter.
+	queueInvitationPush(m, "SocialInvite.Reply", inviter, shared.InviteReplyPushMarker)
 	return nil
 }
 
+// AskAgain and Close (FORK-ONLY, invitee-acceptance-push) wake the invitee
+// when the inviter asked for a different proof or accepted them. A decline
+// or a cancel wakes no one.
 func (c *UserClientConn) AskAgain(ctx context.Context, arg rem.AskAgainArg) error {
 	m := shared.NewMetaContextConn(ctx, c)
-	return shared.AskAgainSocialInvite(m, arg, m.UID())
+	invitee, err := shared.AskAgainSocialInvite(m, arg, m.UID())
+	if err != nil {
+		return err
+	}
+	queueInvitationPush(m, "SocialInvite.AskAgain", invitee, shared.InviteAskPushMarker)
+	return nil
 }
 
 func (c *UserClientConn) Close(ctx context.Context, arg rem.CloseArg) error {
 	m := shared.NewMetaContextConn(ctx, c)
-	return shared.CloseSocialInvite(m, arg, m.UID())
+	invitee, err := shared.CloseSocialInvite(m, arg, m.UID())
+	if err != nil {
+		return err
+	}
+	queueInvitationPush(m, "SocialInvite.Close", invitee, shared.InviteAcceptedPushMarker)
+	return nil
+}
+
+// queueInvitationPush wakes uid, if any. Best-effort: the change is stored,
+// and failing the call now would only make the client retry into a no-op,
+// which queues nothing.
+func queueInvitationPush(m shared.MetaContext, op string, uid *proto.UID, marker string) {
+	if uid == nil {
+		return
+	}
+	if err := shared.QueueInvitationPush(m, *uid, marker); err != nil {
+		m.Warnw(op, "stage", "queue invitation push", "marker", marker, "err", err)
+	}
 }
 
 // NewInviteCode mints a standard single-use code against the caller's

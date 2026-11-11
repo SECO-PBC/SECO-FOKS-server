@@ -825,9 +825,10 @@ func TestSocialInviteAuthz(t *testing.T) {
 	require.Error(t, err)
 }
 
-// inviteReplyPushes counts the invitation-reply wakes queued for u
-// (FORK-ONLY, invite-review-push): rows about no channel carrying the marker.
-func inviteReplyPushes(t *testing.T, tew *TestEnvWrapper, u *TestUser) int {
+// invitationPushes counts the invitation wakes queued for u with marker
+// (FORK-ONLY, invite-review-push and invitee-acceptance-push): rows about no
+// channel carrying the marker.
+func invitationPushes(t *testing.T, tew *TestEnvWrapper, u *TestUser, marker string) int {
 	m := tew.MetaContext()
 	db, err := m.Db(shared.DbTypeRealTime)
 	require.NoError(t, err)
@@ -836,10 +837,15 @@ func inviteReplyPushes(t *testing.T, tew *TestEnvWrapper, u *TestUser) int {
 	require.NoError(t, db.QueryRow(m.Ctx(),
 		`SELECT count(*) FROM push_outbox
 		 WHERE short_host_id=$1 AND uid=$2 AND channel_id=0 AND kind='system'
-		   AND data='invite'::bytea AND status='queued'`,
-		m.ShortHostID().ExportToDB(), u.uid.ExportToDB(),
+		   AND data=$3 AND status='queued'`,
+		m.ShortHostID().ExportToDB(), u.uid.ExportToDB(), []byte(marker),
 	).Scan(&n))
 	return n
+}
+
+// inviteReplyPushes counts the invitation-reply wakes queued for u.
+func inviteReplyPushes(t *testing.T, tew *TestEnvWrapper, u *TestUser) int {
+	return invitationPushes(t, tew, u, shared.InviteReplyPushMarker)
 }
 
 // A reply that answers the inviter's turn wakes the inviter, once per turn: a
@@ -869,4 +875,63 @@ func TestSocialInviteReplyQueuesInviterPush(t *testing.T) {
 	}))
 	require.NoError(t, bcli.Reply(m.Ctx(), f.replyArg(t, bob, 3, "fine: proof")))
 	require.Equal(t, 2, inviteReplyPushes(t, f.tew, f.alice))
+}
+
+// The inviter's decision wakes the invitee (FORK-ONLY,
+// invitee-acceptance-push): an ask-again once per ask, an accept once, a
+// retried accept not again, and the inviter is never woken for their own
+// decision.
+func TestSocialInviteDecisionQueuesInviteePush(t *testing.T) {
+	f := newSocialInviteFixture(t)
+	m := f.tew.MetaContext()
+	f.create(t, nil)
+
+	bob := f.tew.NewTestUser(t)
+	f.tew.DirectDoubleMerklePokeInTest(t)
+	bcli, closeBob := bob.newSocialInviteClient(t, m.Ctx())
+	defer closeBob()
+
+	require.NoError(t, bcli.Reply(m.Ctx(), f.replyArg(t, bob, 1, "it's bob")))
+	require.Equal(t, 0, invitationPushes(t, f.tew, bob, shared.InviteAskPushMarker))
+
+	require.NoError(t, f.cli.AskAgain(m.Ctx(), rem.AskAgainArg{
+		Id:  f.kit.id,
+		Msg: f.kit.seal(t, &rem.SocialInviteMsgPayload{Text: "prove it"}),
+	}))
+	require.Equal(t, 1, invitationPushes(t, f.tew, bob, shared.InviteAskPushMarker))
+	require.Equal(t, 0, invitationPushes(t, f.tew, f.alice, shared.InviteAskPushMarker))
+
+	require.NoError(t, bcli.Reply(m.Ctx(), f.replyArg(t, bob, 3, "fine: proof")))
+	closeArg := rem.CloseArg{Id: f.kit.id, St: proto.SocialInviteState_Accepted}
+	require.NoError(t, f.cli.Close(m.Ctx(), closeArg))
+	require.Equal(t, 1, invitationPushes(t, f.tew, bob, shared.InviteAcceptedPushMarker))
+
+	// A retried accept (lost ack) is the same terminal state again: no push.
+	require.NoError(t, f.cli.Close(m.Ctx(), closeArg))
+	require.Equal(t, 1, invitationPushes(t, f.tew, bob, shared.InviteAcceptedPushMarker))
+	require.Equal(t, 0, invitationPushes(t, f.tew, f.alice, shared.InviteAcceptedPushMarker))
+	require.Equal(t, 1, invitationPushes(t, f.tew, bob, shared.InviteAskPushMarker))
+}
+
+// A decline and a cancel wake no one.
+func TestSocialInviteDeclineAndCancelQueueNoPush(t *testing.T) {
+	for _, st := range []proto.SocialInviteState{
+		proto.SocialInviteState_Declined,
+		proto.SocialInviteState_Canceled,
+	} {
+		f := newSocialInviteFixture(t)
+		m := f.tew.MetaContext()
+		f.create(t, nil)
+		bob := f.tew.NewTestUser(t)
+		f.tew.DirectDoubleMerklePokeInTest(t)
+		bcli, closeBob := bob.newSocialInviteClient(t, m.Ctx())
+		if st == proto.SocialInviteState_Declined {
+			require.NoError(t, bcli.Reply(m.Ctx(), f.replyArg(t, bob, 1, "it's bob")))
+		}
+		closeBob()
+		require.NoError(t, f.cli.Close(m.Ctx(), rem.CloseArg{Id: f.kit.id, St: st}))
+		for _, marker := range []string{shared.InviteAskPushMarker, shared.InviteAcceptedPushMarker} {
+			require.Equal(t, 0, invitationPushes(t, f.tew, bob, marker), "state %v", st)
+		}
+	}
 }
