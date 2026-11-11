@@ -133,7 +133,7 @@ func (m MetaContext) Errorf(format string, args ...interface{}) {
 }
 
 func (m MetaContext) addCtxLog(keysAndValues ...interface{}) []interface{} {
-	return core.AddCtxLog(m.ctx, keysAndValues...)
+	return addTraceLogFields(m.ctx, core.AddCtxLog(m.ctx, keysAndValues...))
 }
 
 func (m MetaContext) Warnw(msg string, keysAndValues ...interface{}) {
@@ -336,5 +336,5 @@ func (m MetaContext) HostConfig() (*proto.HostConfig, error) {
 }
 
 func (m MetaContext) WarnwWithContext(ctx context.Context, msg string, keysAndValues ...interface{}) {
-	m.logWithSkip().Warnw(msg, core.AddCtxLog(ctx, keysAndValues...)...)
+	m.logWithSkip().Warnw(msg, addTraceLogFields(ctx, core.AddCtxLog(ctx, keysAndValues...))...)
 }
