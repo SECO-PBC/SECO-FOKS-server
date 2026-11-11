@@ -88,6 +88,7 @@ CREATE INDEX dirent_dir_idx ON dirent(short_host_id, short_party_id, dir_id, dir
 CREATE INDEX dirent_ctime_gc_idx ON dirent(ctime) WHERE (active = false);
 CREATE INDEX dirent_name_idx ON dirent(short_host_id, short_party_id, dir_id, name_mac, version);
 CREATE INDEX dirent_list_idx ON dirent(short_host_id, short_party_id, dir_id, name_mac) WHERE (active = true);
+CREATE INDEX dirent_active_key_idx ON dirent(short_host_id, short_party_id, dir_id, dirent_id) WHERE (active = true);
 
 CREATE TYPE storage_type as ENUM('sql'); /* will eventually include s3 */
 CREATE TYPE large_file_status as ENUM('dead', 'active', 'uploading');
@@ -236,3 +237,4 @@ CREATE TABLE schema_patches (
 );
 INSERT INTO schema_patches (id, ctime) VALUES (1, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (2, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (3, NOW());

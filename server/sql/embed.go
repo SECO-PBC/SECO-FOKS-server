@@ -122,6 +122,9 @@ var kvStorePatch1 string
 //go:embed patches/foks_kv_store/p2.sql
 var kvStorePatch2 string
 
+//go:embed patches/foks_kv_store/p3.sql
+var kvStorePatch3 string
+
 var Patches = map[string]map[int]string{
 	"foks_users": {
 		1:  usersPatch1,
@@ -145,6 +148,7 @@ var Patches = map[string]map[int]string{
 	"foks_kv_store": {
 		1: kvStorePatch1,
 		2: kvStorePatch2,
+		3: kvStorePatch3,
 	},
 	"foks_realtime": {
 		1:  realtimePatch1,
