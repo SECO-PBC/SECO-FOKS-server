@@ -108,6 +108,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Send latency over time (ms)",
               "show_legend": true,
               "requests": [
@@ -193,6 +194,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Send phases, avg ms (stacked = most of rtSend)",
               "show_legend": true,
               "requests": [
@@ -206,6 +208,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "rtSend vs its transaction (avg ms)",
               "show_legend": true,
               "requests": [
@@ -223,6 +226,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Channel lock wait, avg and max ms (sends to one channel queue here)",
               "show_legend": true,
               "requests": [
@@ -240,6 +244,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Recipients per send (avg and max)",
               "show_legend": true,
               "requests": [
@@ -288,6 +293,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Realtime DB pool: wait to get a connection (avg ms)",
               "show_legend": true,
               "requests": [
@@ -373,6 +379,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Wake after commit, avg and max ms",
               "show_legend": true,
               "requests": [
@@ -390,6 +397,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Recipient fetch RPCs, p95 ms",
               "show_legend": true,
               "requests": [
@@ -411,6 +419,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Listening recipients (parked long-polls)",
               "show_legend": false,
               "requests": [
@@ -424,6 +433,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Offline recipients: oldest unsent push (s) and backlog",
               "show_legend": true,
               "requests": [

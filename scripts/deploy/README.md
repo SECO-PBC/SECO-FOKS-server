@@ -135,6 +135,8 @@ One-time setup on the server, in `/opt/foks/workdir`:
 - Each server logs `telemetry stage=enabled` at startup.
 - `foks.*` metrics appear in Datadog within a minute.
 
+**Deploy markers:** when `.env` has `DD_API_KEY`, `server-deploy.sh` posts a Datadog event when a deploy starts and another when it ends. The end event is `deploy_phase:end` (success) or `deploy_phase:failed` (error, including a health-check rollback). Each event is tagged `deploy`, `env:<DD_ENV>`, `service:foks-server` and `version:<tag>`, and the pair shares an `aggregation_key`. The timeseries widgets in `docs/ops/datadog-*.json` overlay `tags:deploy $env`. To overlay only the moment new code went live, use `tags:deploy deploy_phase:end $env`. If the event can't be sent, the deploy logs a warning and carries on.
+
 **Turn it off:** set `enabled : false` (or remove the line), then restart the servers with the same `docker compose restart ...` command. To also remove the agent, take `docker-compose.datadog.yml` out of `COMPOSE_FILE`.
 
 **Security:** the agent mounts the Docker socket, which gives it root-equivalent access to the host. `:ro` doesn't limit the API. We accept this for staging, for container metrics and label-based Postgres autodiscovery. The image is pinned to an exact version (`agent:7.85.3`), so upgrades happen only when that line changes. Revisit before running the agent in prod; `docker-compose.datadog.yml` lists the alternatives.

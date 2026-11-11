@@ -10,6 +10,11 @@
 #   3. Runs DB patches (idempotent).
 #   4. Switches .env to new tag and restarts compose.
 #   5. Health-checks the probe port. On failure, rolls back to previous tag.
+#
+# If DD_API_KEY is set in .env, it also posts Datadog events marking the
+# deploy's start and its end (success or failure), tagged `deploy`, for
+# dashboard overlays. These are best-effort: a Datadog error never fails a
+# deploy.
 
 set -euo pipefail
 
@@ -36,7 +41,8 @@ HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-90}"
 DBS=(server-config users beacon merkle-tree merkle-raft merkle-raft-archive queue-service realtime kv-store)
 
 log()  { printf '[deploy %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
-fail() { printf '[deploy] FATAL: %s\n' "$*" >&2; exit 1; }
+FAIL_REASON=""
+fail() { FAIL_REASON="$*"; printf '[deploy] FATAL: %s\n' "$*" >&2; exit 1; }
 
 [ -d "$WORKDIR" ]      || fail "workdir not found: $WORKDIR"
 [ -f "$COMPOSE_FILE" ] || fail "compose file not found: $COMPOSE_FILE"
@@ -66,6 +72,49 @@ fi
 PREV_IMAGE=$(grep '^FOKS_SERVER_IMAGE=' "$ENV_FILE" | tail -1 | cut -d= -f2-)
 log "prev image: $PREV_IMAGE"
 log "new  image: $SERVER_IMAGE"
+
+# ---------------------------------------------------------------------------
+# Datadog deploy markers. Start and end events share an aggregation_key so
+# Datadog groups them. Skipped when .env has no DD_API_KEY.
+# ---------------------------------------------------------------------------
+env_val() { grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "\"'"; }
+DD_API_KEY_VAL=$(env_val DD_API_KEY || true)
+DD_SITE_VAL=$(env_val DD_SITE || true); DD_SITE_VAL="${DD_SITE_VAL:-datadoghq.com}"
+DD_ENV_VAL=$(env_val DD_ENV || true);   DD_ENV_VAL="${DD_ENV_VAL:-staging}"
+DEPLOY_ID="${FOKS_TAG}-$(date -u +%Y%m%dT%H%M%SZ)"
+DEPLOY_DONE=0
+
+# json_str escapes a value for use inside a JSON string.
+json_str() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '; }
+
+# dd_event <phase> <alert_type> <title> <text>
+dd_event() {
+    [ -n "$DD_API_KEY_VAL" ] || return 0
+    local body
+    body=$(printf '{"title":"%s","text":"%s","alert_type":"%s","aggregation_key":"%s","source_type_name":"deploy","tags":["deploy","deploy_phase:%s","env:%s","service:foks-server","version:%s"]}' \
+        "$(json_str "$3")" "$(json_str "$4")" "$2" "$DEPLOY_ID" "$1" "$DD_ENV_VAL" "$FOKS_TAG")
+    # The key goes in through a file descriptor so it never appears in `ps`.
+    if curl -fsS --max-time 10 -X POST "https://api.${DD_SITE_VAL}/api/v1/events" \
+        -H @<(printf 'DD-API-KEY: %s\n' "$DD_API_KEY_VAL") -H "Content-Type: application/json" \
+        -d "$body" >/dev/null 2>&1; then
+        log "datadog event sent: deploy_phase:$1"
+    else
+        log "warning: could not send datadog event deploy_phase:$1 (deploy continues)"
+    fi
+}
+
+on_exit() {
+    local rc=$?
+    if [ "$DEPLOY_DONE" -ne 1 ]; then
+        dd_event failed error "Deploy failed: foks-server ${FOKS_TAG} (${DD_ENV_VAL})" \
+            "${FAIL_REASON:-deploy script exited with code $rc}. Previous image: ${PREV_IMAGE}"
+    fi
+    exit "$rc"
+}
+trap on_exit EXIT
+
+dd_event start info "Deploy started: foks-server ${FOKS_TAG} (${DD_ENV_VAL})" \
+    "${PREV_IMAGE} -> ${SERVER_IMAGE}"
 
 # ---------------------------------------------------------------------------
 # 2. Pull new images.
@@ -165,3 +214,6 @@ if [ "$ok" -ne 1 ]; then
 fi
 
 log "deploy ok: $SERVER_IMAGE"
+DEPLOY_DONE=1
+dd_event end success "Deploy finished: foks-server ${FOKS_TAG} (${DD_ENV_VAL})" \
+    "${PREV_IMAGE} -> ${SERVER_IMAGE}"
