@@ -29,7 +29,7 @@ In staging, the Datadog Agent tails container logs from disk. It collects only t
 | each foks-server container | `go` | `foks-<server type>`, the same as the OTel `service.name` (e.g. `foks-realtime`), so logs, APM and `foks.*` metrics line up |
 | `postgresql` | `postgresql` | `postgresql`. A `multi_line` rule joins `DETAIL`/`STATEMENT`/`HINT` lines to their event |
 
-Nothing else is collected, including the agent's own logs and any new container without a label. Volume is about 6 MB a day. Most of it is `foks-user` info lines from the chain loader.
+Nothing else is collected, including the agent's own logs and any new container without a label. Volume is about 430k events (~170 MB) a day, measured 2026-11-11. About 98% of it is one `foks-user` info line, `userLoader::uidMerkleKeys`, written on every team-chain load. A Datadog index exclusion filter on `service:foks-user "userLoader::uidMerkleKeys"` keeps those lines out of the index (which is what's billed per event) while still ingesting them, at a cost of cents.
 
 - **Searching:** for example, `env:staging service:foks-realtime status:warn`. zap writes JSON, so Datadog maps `level` to the status, `msg` to the message, and the other fields to attributes (`@remoteAddr`, `@caller`, ...).
 - **Timestamps:** zap's `ts` is epoch seconds, which Datadog doesn't remap by default, so events carry the time the agent read them (normally under a second later). If that matters, add a date remapper on `ts` in a Datadog log pipeline.
@@ -89,7 +89,7 @@ The resource sets `service.name = foks-<server type>`, e.g. `foks-realtime` or `
 
 ## Trace sampling
 
-Each host's sampling lives in its own config, so it is set per environment. Staging traces everything (`1.0`, no overrides), which is fine at its current traffic.
+Each host's sampling lives in its own config, so it is set per environment. Staging keeps 10% of traces (`trace_sample_ratio : 0.1`) and every `RealTime.rtSend` (`trace_sample_methods : { "RealTime.rtSend" : 1.0 }`). Keeping everything ingested ~1.1 TB of spans a month at ~73 RPC/s, mostly background `kvCacheCheck`/`kvGet`/team loads, against 150 GB included per APM host.
 
 Sampling is decided once per trace, at the root RPC span, and every child span follows that decision. `trace_sample_methods` overrides the default for individual RPCs. Unsampled traces cost almost nothing: their child and query spans are never created. Metrics are recorded for every call either way.
 
@@ -117,6 +117,7 @@ Override names are checked only for shape (`Protocol.method`) and range. A missp
   ```
   An attempt's `result` is `committed`, `retry`, `error`, or `exhausted` (a retryable failure on the last of 5 tries). Attempt spans cover only BEGIN through COMMIT; the backoff between attempts counts toward `db.tx` but not toward any attempt. `foks.db.tx.retries` counts retries actually performed (at most 4).
   `TxName` values become the `db.tx.name` label, so they must be fixed strings.
+- **Expected answers are not span errors.** `KV_NOENT_ERROR` (kvGet: no such key) and `KV_STALE_CACHE_ERROR` (kvCacheCheck: cache is stale) answer the request rather than report a failure. Their spans carry `error.code` but no error status (`expectedRPCErrors` in `server/shared/rpc_instrument.go`). Before this they were ~50k error spans an hour, which Datadog's default `status:error` retention filter indexed in full. The `foks.rpc.server.*` metrics still count them as `outcome:error`, so filter by `error.code` when you want real failures.
 - **Query spans only exist under a sampled parent.** Background loops record query metrics but produce no orphan spans.
 
 ## Diagnosing the realtime send path
