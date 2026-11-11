@@ -71,6 +71,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "RPC rate by service (calls/s)",
               "show_legend": true,
               "requests": [{ "q": "count:foks.rpc.server.duration{$env,$service} by {service}.as_rate()", "display_type": "area" }]
@@ -79,6 +80,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Open client connections by service",
               "show_legend": true,
               "requests": [{ "q": "sum:foks.rpc.server.connections{$env,$service} by {service}", "display_type": "line" }]
@@ -110,6 +112,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Worst-case latency by RPC, max ms (long poll excluded)",
               "show_legend": true,
               "requests": [{ "q": "top(max:foks.rpc.server.duration{$env,$service,!rpc.method:realtime.rtpollinbox} by {rpc.method}, 8, 'max', 'desc')", "display_type": "line" }]
@@ -125,6 +128,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "In-flight RPCs by method",
               "show_legend": true,
               "requests": [{ "q": "top(sum:foks.rpc.server.active{$env,$service,!rpc.method:realtime.rtpollinbox} by {rpc.method}, 8, 'max', 'desc')", "display_type": "line" }]
@@ -151,6 +155,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Send phases, avg ms",
               "show_legend": true,
               "requests": [{ "q": "avg:foks.rt.phase.duration{$env,!phase:wake,!phase:reconcile} by {phase}", "display_type": "bars" }]
@@ -159,6 +164,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Wake cost by cause, avg ms",
               "show_legend": true,
               "requests": [{ "q": "avg:foks.rt.phase.duration{$env,phase:wake} by {op}", "display_type": "line" }]
@@ -167,6 +173,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Members woken per wake, by cause (avg and max)",
               "show_legend": true,
               "requests": [
@@ -178,6 +185,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Inbox long-polls by outcome (/s)",
               "show_legend": true,
               "requests": [{ "q": "count:foks.rt.poll.duration{$env} by {outcome}.as_rate()", "display_type": "bars" }]
@@ -186,6 +194,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Late-join reconcile by tier (/s)",
               "show_legend": true,
               "requests": [{ "q": "sum:foks.rt.reconcile{$env} by {result}.as_rate()", "display_type": "bars" }]
@@ -194,6 +203,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Push outbox backlog by status",
               "show_legend": true,
               "requests": [{ "q": "max:foks.rt.push_outbox.backlog{$env} by {status}", "display_type": "line" }]
@@ -218,6 +228,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Transaction latency, max ms",
               "show_legend": true,
               "requests": [{ "q": "top(max:foks.db.tx.duration{$env,$service} by {db.tx.name}, 8, 'max', 'desc')", "display_type": "line" }]
@@ -226,6 +237,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Query latency by service and statement type, avg ms",
               "show_legend": true,
               "requests": [{ "q": "top(avg:foks.db.query.duration{$env,$service} by {service,db.operation.name}, 10, 'mean', 'desc')", "display_type": "line" }]
@@ -234,6 +246,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Pool connections in use vs pool size",
               "show_legend": true,
               "requests": [
@@ -245,6 +258,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Pool waits: acquires that had to wait (/s)",
               "show_legend": true,
               "requests": [{ "q": "sum:foks.db.pool.empty_acquires{$env,$service} by {service,db.type}.as_rate()", "display_type": "bars" }]
@@ -267,6 +281,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Postgres connections used (%)",
               "show_legend": false,
               "requests": [{ "q": "max:postgresql.percent_usage_connections{$env}*100", "display_type": "line" }]
@@ -284,6 +299,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "CPU by container (cores)",
               "show_legend": true,
               "requests": [{ "q": "top(sum:container.cpu.usage{$env} by {container_name} / 1000000000, 8, 'mean', 'desc')", "display_type": "area" }]
@@ -292,6 +308,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Memory by container",
               "show_legend": true,
               "requests": [{ "q": "top(sum:container.memory.usage{$env} by {container_name}, 8, 'mean', 'desc')", "display_type": "area" }]
@@ -300,6 +317,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Host memory usable",
               "show_legend": false,
               "requests": [{ "q": "avg:system.mem.usable{$env}", "display_type": "line" }]
@@ -308,6 +326,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Host CPU (%)",
               "show_legend": true,
               "requests": [
@@ -320,6 +339,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "Go heap in use by service",
               "show_legend": true,
               "requests": [{ "q": "avg:go.memory.used{$env,$service} by {service}", "display_type": "line" }]
@@ -328,6 +348,7 @@
           {
             "definition": {
               "type": "timeseries",
+              "events": [{ "q": "tags:deploy $env", "tags_execution": "and_tags" }],
               "title": "APM spans ingested (/s, drives cost)",
               "show_legend": true,
               "requests": [{ "q": "sum:datadog.estimated_usage.apm.ingested_spans{$env} by {service}.as_rate()", "display_type": "bars" }]
