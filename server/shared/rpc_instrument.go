@@ -90,11 +90,25 @@ func (t *Telemetry) wrapRPC(
 			inst.rpcErrors.Add(ctx, 1, metric.WithAttributes(methodAttr, attribute.String("error.code", code)))
 			// Only the status code: raw error strings can echo user data.
 			span.SetAttributes(attribute.String("error.code", code))
-			span.SetStatus(codes.Error, code)
+			if !expectedRPCErrors[code] {
+				span.SetStatus(codes.Error, code)
+			}
 			span.End()
 		}()
 		return h(ctx, arg)
 	}
+}
+
+// expectedRPCErrors are status codes that answer the request rather than
+// report a failure: "no such key" from kvGet, "your cache is stale" from
+// kvCacheCheck. Their spans keep error.code but are not marked as errors,
+// so they don't inflate APM error rates or fill Datadog's error retention
+// filter (on staging they were ~50k indexed spans an hour, nearly all of
+// the indexed-span bill). The foks.rpc.server.* metrics still count them as
+// outcome=error with their error.code, so dashboards are unchanged.
+var expectedRPCErrors = map[string]bool{
+	"KV_NOENT_ERROR":       true,
+	"KV_STALE_CACHE_ERROR": true,
 }
 
 // statusCodeName maps an error to its proto status code name, a small

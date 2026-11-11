@@ -10,12 +10,14 @@ import (
 	"time"
 
 	"github.com/foks-proj/go-foks/lib/core"
+	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-snowpack-rpc/rpc"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -202,7 +204,45 @@ func TestInstrumentProtocol(t *testing.T) {
 	ended := h.spans.Ended()
 	require.Len(t, ended, 4)
 	require.Equal(t, "TestProto.bad", ended[3].Name())
+	require.Equal(t, codes.Error, ended[3].Status().Code)
 
+	h.assertPrivate(t)
+}
+
+// Expected "answer" codes keep error.code and count as errors in metrics,
+// but their spans aren't marked as errors.
+func TestInstrumentProtocolExpectedErrors(t *testing.T) {
+	h := newTelemetryHarness(t, false)
+	noent := func(ctx context.Context, arg interface{}) (interface{}, error) {
+		return nil, core.KVNoentError{Path: proto.KVPath("/" + secretMarker)}
+	}
+	stale := func(ctx context.Context, arg interface{}) (interface{}, error) {
+		return nil, core.KVStaleCacheError{}
+	}
+	p := InstrumentProtocol(h.g, testProtocol(noent, stale))
+	for _, m := range p.Methods {
+		_, err := m.Handler(context.Background(), nil)
+		require.Error(t, err)
+	}
+
+	ended := h.spans.Ended()
+	require.Len(t, ended, 2)
+	got := map[string]codes.Code{}
+	for _, sp := range ended {
+		got[spanAttr(sp, "error.code").AsString()] = sp.Status().Code
+	}
+	require.Equal(t, map[string]codes.Code{
+		"KV_NOENT_ERROR":       codes.Unset,
+		"KV_STALE_CACHE_ERROR": codes.Unset,
+	}, got)
+
+	errs := findMetric(h.collect(t), "foks.rpc.server.errors")
+	require.NotNil(t, errs)
+	var n int64
+	for _, dp := range errs.Data.(metricdata.Sum[int64]).DataPoints {
+		n += dp.Value
+	}
+	require.Equal(t, int64(2), n)
 	h.assertPrivate(t)
 }
 
