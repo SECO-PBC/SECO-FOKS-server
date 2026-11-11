@@ -106,7 +106,7 @@ This used to say the opposite, and that is how `foks_kv_store/p1` reached produc
 
 ## Telemetry (Datadog)
 
-The server can export OpenTelemetry metrics and traces over OTLP to a Datadog Agent sidecar. The agent also collects host and container metrics, plus Postgres Database Monitoring. Telemetry is off unless `telemetry.enabled` is set. See `docs/observability.md` for the metric list and the privacy rule.
+The server can export OpenTelemetry metrics and traces over OTLP to a Datadog Agent sidecar. The agent also collects host and container metrics, Postgres Database Monitoring, and the foks-server and Postgres container logs. Logs are shipped raw, which is a **staging-only** exception to the privacy rule; see `docs/observability.md`, "Logs". Telemetry is off unless `telemetry.enabled` is set. See `docs/observability.md` for the metric list and the privacy rule.
 
 One-time setup on the server, in `/opt/foks/workdir`:
 
@@ -115,7 +115,7 @@ One-time setup on the server, in `/opt/foks/workdir`:
    - `DD_SITE=<site>` (for example `datadoghq.com` or `datadoghq.eu`)
    - `DD_PG_PASSWORD=<random>`
    - `DD_ENV=staging` (optional; this is the default). It must match `telemetry.env` in step 5: the agent tags host, container and Postgres metrics with `DD_ENV`, and the servers tag `foks.*` metrics and traces with `telemetry.env`. If they differ, Datadog splits the two under different `env` values.
-2. **Load the sidecar.** Copy `scripts/deploy/datadog/docker-compose.datadog.yml` into the workdir. Then add this line to `.env`:
+2. **Load the sidecar.** Copy `scripts/deploy/datadog/docker-compose.datadog.yml` into the workdir, and run `mkdir -p /opt/datadog-agent/run` (the logs agent keeps its tail positions there). Then add this line to `.env`:
 
    `COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.datadog.yml`
 
@@ -134,10 +134,11 @@ One-time setup on the server, in `/opt/foks/workdir`:
 - `docker compose exec datadog-agent agent status` shows the OTLP receiver and the `postgres` check as OK.
 - Each server logs `telemetry stage=enabled` at startup.
 - `foks.*` metrics appear in Datadog within a minute.
+- `agent status` → "Logs Agent" lists each foks container and `postgresql` with `Status: OK`. Their logs appear under `env:staging service:foks-*`.
 
 **Deploy markers:** when `.env` has `DD_API_KEY`, `server-deploy.sh` posts a Datadog change event when a deploy starts and another when it ends. The end event is `deploy_phase:end` on success, or `deploy_phase:failed` on any failure, including a health-check rollback. Events go to the v2 events API on `event-management-intake.<DD_SITE>`, because this org has the v1 events API turned off. Datadog also files each event under `source:change_tracking`. Each event is tagged `deploy`, `env:<DD_ENV>`, `service:foks-server` and `version:<tag>`, and the pair shares an `aggregation_key`. The timeseries widgets in `docs/ops/datadog-*.json` overlay `tags:deploy $env`. To overlay only the moment new code went live, use `tags:deploy deploy_phase:end $env`. If the event can't be sent, the deploy logs a warning and carries on.
 
-**Turn it off:** set `enabled : false` (or remove the line), then restart the servers with the same `docker compose restart ...` command. To also remove the agent, take `docker-compose.datadog.yml` out of `COMPOSE_FILE`.
+**Turn it off:** set `enabled : false` (or remove the line), then restart the servers with the same `docker compose restart ...` command. To stop shipping logs only, set `DD_LOGS_ENABLED: "false"` in `docker-compose.datadog.yml` and run `docker compose up -d datadog-agent`. To also remove the agent, take `docker-compose.datadog.yml` out of `COMPOSE_FILE`.
 
 **Security:** the agent mounts the Docker socket, which gives it root-equivalent access to the host. `:ro` doesn't limit the API. We accept this for staging, for container metrics and label-based Postgres autodiscovery. The image is pinned to an exact version (`agent:7.85.3`), so upgrades happen only when that line changes. Revisit before running the agent in prod; `docker-compose.datadog.yml` lists the alternatives.
 

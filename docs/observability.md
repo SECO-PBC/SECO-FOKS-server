@@ -17,8 +17,31 @@ SECO promises end-to-end encryption, and the team has ruled out client-style tel
 How the code enforces this:
 - **RPC spans** record the proto status code name, never `err.Error()`.
 - **pgx spans** record the SQLSTATE, never the Postgres message (messages can echo values). They are named `pg.<OP>`. SQL text is recorded only when `db_statement: true`; all server SQL is parameterized (`$n`), and parameters are never recorded.
-- **Container logs are not shipped.** zap logs can contain UIDs and remote IPs. Datadog log collection is off in the sidecar config.
+- **Container logs: staging-only exception.** Since 2026-11-11, staging ships the foks-server and Postgres container logs to Datadog **raw**. These logs do not follow the table above. zap logs contain UIDs, team IDs and client IPs, and Postgres error `DETAIL` lines can echo row values. This was accepted for staging only. Before the sidecar runs anywhere else, either turn log collection off or add masking rules (see "Logs" below).
 - **The `allowedTelemetryKeys` test** in `server/shared/telemetry_test.go` is the allowlist. Every exported attribute key must be in it, and a planted user ID must not appear in any attribute, span name, status or event. Adding a key is a privacy decision.
+
+## Logs
+
+In staging, the Datadog Agent tails container logs from disk. It collects only the containers that have a `com.datadoghq.ad.logs` label in `scripts/deploy/datadog/docker-compose.datadog.yml`:
+
+| Containers | `source` | `service` |
+|---|---|---|
+| each foks-server container | `go` | `foks-<server type>`, the same as the OTel `service.name` (e.g. `foks-realtime`), so logs, APM and `foks.*` metrics line up |
+| `postgresql` | `postgresql` | `postgresql`. A `multi_line` rule joins `DETAIL`/`STATEMENT`/`HINT` lines to their event |
+
+Nothing else is collected, including the agent's own logs and any new container without a label. Volume is about 6 MB a day. Most of it is `foks-user` info lines from the chain loader.
+
+- **Searching:** for example, `env:staging service:foks-realtime status:warn`. zap writes JSON, so Datadog maps `level` to the status, `msg` to the message, and the other fields to attributes (`@remoteAddr`, `@caller`, ...).
+- **Timestamps:** zap's `ts` is epoch seconds, which Datadog doesn't remap by default, so events carry the time the agent read them (normally under a second later). If that matters, add a date remapper on `ts` in a Datadog log pipeline.
+- **Trace correlation:** structured logs (`Infow`/`Warnw`/`Errorw`/`Debugw`/`WarnwWithContext` on `MetaContext`) written under a sampled span carry `dd.trace_id` and `dd.span_id`. These are the lower 64 bits of the OTel IDs as decimals, which is the format Datadog documents. Datadog uses them to link the log line and the trace both ways: the trace's **Logs** tab, and the log's **Trace** panel. Logs **without** these fields:
+  - logs written before an RPC span exists, such as `servConnection` TLS handshake failures;
+  - background loops;
+  - the unstructured `Error`/`Infof`/`Errorf` calls;
+  - logs written directly through `lib/core`, such as `reply error`;
+  - logs under an unsampled trace, because a link to it would be dead.
+
+  The IDs are random and identify no one (`addTraceLogFields` in `server/shared/telemetry.go`).
+- **For prod:** shipping raw logs breaks the privacy rule. Either set `DD_LOGS_ENABLED: "false"` or add `log_processing_rules` of type `mask_sequences` to every label to mask IPs and IDs. Masking is a regex on the raw line, so it can't be exhaustive. Prefer dropping `info` lines and auditing what's left.
 
 ## Configuration
 
