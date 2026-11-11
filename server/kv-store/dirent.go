@@ -340,9 +340,13 @@ func (p *direntUpdater) insertNewDirent(m shared.MetaContext) error {
 
 	_, err = p.tx.Exec(
 		m.Ctx(),
+		// Only the newest version is active, so this flips one row. Without
+		// the active filter it rewrote every older version on each put,
+		// which made a put cost O(history) (684ms on staging for an entry
+		// with 92k versions). dirent_active_key_idx finds the row directly.
 		`UPDATE dirent SET active=false
 		 WHERE short_host_id=$1 AND short_party_id=$2 AND dir_id=$3
-		   AND dirent_id=$4 AND version < $5`,
+		   AND dirent_id=$4 AND version < $5 AND active=true`,
 		int(m.ShortHostID()),
 		p.pid.Shorten().ExportToDB(),
 		de.ParentDir.ExportToDB(),
