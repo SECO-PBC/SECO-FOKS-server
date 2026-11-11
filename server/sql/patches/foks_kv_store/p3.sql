@@ -9,11 +9,15 @@
 --
 -- The index is small (one row per live entry) and builds quickly. It is a
 -- plain CREATE INDEX, which blocks writes to dirent while it builds.
+-- IF NOT EXISTS: if the index was created by hand ahead of the deploy (for
+-- quick relief), this patch must still succeed, since server-deploy.sh
+-- treats a failed patch as fatal. CONCURRENTLY isn't possible: patch-db runs
+-- each patch in a transaction.
 --
 -- Operator note: foks_kv_store is sharded, and patch-db applies patches per
 -- shard, each shard keeping its own schema_patches table. Confirm every
 -- shard reports id 3 before calling the rollout done.
 
-CREATE INDEX dirent_active_key_idx
+CREATE INDEX IF NOT EXISTS dirent_active_key_idx
     ON dirent(short_host_id, short_party_id, dir_id, dirent_id)
     WHERE (active = true);
