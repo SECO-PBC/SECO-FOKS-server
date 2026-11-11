@@ -2,15 +2,19 @@
 #
 # Receives OTLP metrics + traces from the foks-server containers (their
 # config's telemetry.otlp_endpoint = "datadog-agent:4317") and adds host,
-# container and Postgres (Database Monitoring) metrics.
+# container and Postgres (Database Monitoring) metrics. It also ships the
+# foks-server and Postgres container logs (see the privacy note).
 #
 # Loaded alongside docker-compose.yml and docker-compose.override.yml via
 # COMPOSE_FILE in the workdir's .env; see scripts/deploy/README.md,
 # "Telemetry (Datadog)". Needs in .env: DD_API_KEY, DD_SITE, DD_PG_PASSWORD.
 #
-# Privacy: container LOG collection is deliberately OFF. foks-server logs can
-# carry UIDs, usernames and remote IPs, which must not leave the host
-# (docs/observability.md). Don't enable DD_LOGS_ENABLED without scrubbing.
+# Privacy: STAGING-ONLY EXCEPTION (decided 2026-11-11). Container logs are
+# shipped RAW. foks-server logs carry UIDs, team IDs, usernames and client
+# IPs, and Postgres error DETAIL lines can echo row values. That's accepted
+# for staging only (docs/observability.md, "Privacy rule"). Before reusing
+# this file in prod, either set DD_LOGS_ENABLED to "false" or add
+# log_processing_rules (mask_sequences) to every com.datadoghq.ad.logs label.
 
 services:
   datadog-agent:
@@ -32,8 +36,13 @@ services:
       DD_OTLP_CONFIG_LOGS_ENABLED: "false"
       DD_APM_ENABLED: "true"
       DD_APM_NON_LOCAL_TRAFFIC: "true"
-      # Off: see privacy note above.
-      DD_LOGS_ENABLED: "false"
+      # Logs: staging only, raw; see the privacy note above. Only containers
+      # with a com.datadoghq.ad.logs label are collected, so the agent's own
+      # logs and any new, unlabelled container stay on the host.
+      DD_LOGS_ENABLED: "true"
+      DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL: "false"
+      # Tail the json-file logs from disk (mounted below), not the Docker API.
+      DD_LOGS_CONFIG_DOCKER_CONTAINER_USE_FILE: "true"
       # Off to save CPU/RAM on a small host; container metrics stay on.
       DD_PROCESS_CONFIG_PROCESS_COLLECTION_ENABLED: "false"
       # Read by the Postgres check below via %%env_DD_PG_PASSWORD%%.
@@ -48,6 +57,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /proc/:/host/proc/:ro
       - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+      # Log collection: container log files, plus the agent's tail positions
+      # so a restart neither re-sends nor skips lines.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /opt/datadog-agent/run:/opt/datadog-agent/run:rw
     # The staging host is small (2 vCPU / 2 GB); keep the agent from
     # competing with the server under benchmark load.
     # Datadog's documented Docker setup. The agent's OTLP collector looks up
@@ -64,6 +77,12 @@ services:
 
   postgresql:
     labels:
+      # Log lines start with a timestamp; anything else (DETAIL, STATEMENT,
+      # HINT continuations) joins the previous event.
+      com.datadoghq.ad.logs: >-
+        [{"source": "postgresql", "service": "postgresql",
+          "log_processing_rules": [{"type": "multi_line", "name": "new_log",
+            "pattern": "\\d{4}-\\d{2}-\\d{2} "}]}]
       # Datadog autodiscovery: Postgres integration + Database Monitoring
       # across every foks_* database. Query samples are obfuscated by the
       # agent; parameters are never collected (all server SQL uses $n).
@@ -78,3 +97,47 @@ services:
           "collect_settings": {"enabled": true},
           "collect_schemas": {"enabled": false}
         }]}}
+
+  # Log collection for the foks-server containers. `service` matches the
+  # OTel service.name (foks-<server type>; compose service names are the
+  # server types), so logs, APM and foks.* metrics line up per service.
+  # zap writes JSON, which Datadog parses: `level` becomes the status and
+  # `msg` the message. A service listed here must exist in
+  # docker-compose.yml, or compose fails with "has neither an image nor a
+  # build context"; a service missing from here just doesn't ship logs.
+  autocert:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-autocert"}]'
+  internal_ca:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-internal_ca"}]'
+  kv_store:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-kv_store"}]'
+  merkle_batcher:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-merkle_batcher"}]'
+  merkle_builder:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-merkle_builder"}]'
+  merkle_query:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-merkle_query"}]'
+  merkle_signer:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-merkle_signer"}]'
+  probe:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-probe"}]'
+  queue:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-queue"}]'
+  realtime:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-realtime"}]'
+  reg:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-reg"}]'
+  user:
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "foks-user"}]'

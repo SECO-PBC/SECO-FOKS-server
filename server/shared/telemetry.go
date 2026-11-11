@@ -5,7 +5,9 @@ package shared
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -330,4 +332,29 @@ func (g *GlobalContext) ShutdownTelemetry() {
 		g.Log().Warnw("telemetry", "stage", "shutdown", "err", err)
 	}
 	g.telemetry.p.Store(newNoopTelemetry())
+}
+
+// Log keys Datadog reads to link a log line to its APM trace.
+const (
+	logKeyDDTraceID = "dd.trace_id"
+	logKeyDDSpanID  = "dd.span_id"
+)
+
+// addTraceLogFields appends dd.trace_id/dd.span_id when ctx carries a sampled
+// span, so Datadog links the log line to its trace. Datadog's documented
+// format for OTel IDs is the lower 64 bits as an unsigned decimal. Unsampled
+// spans are skipped: their traces are never exported, so the link would be
+// dead. With telemetry off there is no valid span and nothing is added. The
+// IDs are random and identify no one (docs/observability.md, "Logs").
+func addTraceLogFields(ctx context.Context, keysAndValues []interface{}) []interface{} {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() || !sc.IsSampled() {
+		return keysAndValues
+	}
+	tid := sc.TraceID()
+	sid := sc.SpanID()
+	return append(keysAndValues,
+		logKeyDDTraceID, strconv.FormatUint(binary.BigEndian.Uint64(tid[8:]), 10),
+		logKeyDDSpanID, strconv.FormatUint(binary.BigEndian.Uint64(sid[:]), 10),
+	)
 }
