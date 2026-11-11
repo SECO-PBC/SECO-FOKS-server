@@ -118,7 +118,15 @@ For one `RealTime.rtSend`, read the following together:
 - **Database:** slowest transactions, query latency, pool usage and waits, query errors by SQLSTATE, and, from Database Monitoring, Postgres statements by total time and connection usage.
 - **Host and containers:** CPU and memory per container, host CPU and memory, Go heap per service, and ingested APM spans (the main cost driver).
 
-**To import it:** in Datadog, open **Dashboards → New Dashboard**, then the gear menu → **Import dashboard JSON**, and paste the file. Importing into an existing dashboard replaces its widgets.
+`docs/ops/datadog-send-latency-dashboard.json` ("FOKS message send latency") focuses on one question: how long the server makes a user wait to send a message. It has three sections:
+
+- **Sender:** p50/p95/p99 of `rtSend`, from the APM trace metric `trace.snowpack.server.request`, which covers every span and has percentiles, in seconds, so the dashboard multiplies by 1000. Also the slowest send, the send count and failures, and a list of the slowest send traces, each linking to its full trace.
+- **Where the send time goes:** send phases, the send transaction, channel lock wait, recipients per send, fan-out cost per recipient, realtime pool waits, and realtime statements by time per call.
+- **Recipients:** the server's share of delivery, which is the wake after commit plus the recipient's `rtGetChangedThreads` and `rtGetThreadRecents`. There's a pessimistic p95 estimate of the server time to deliver, the slowest fetch traces, listening pollers, and the push outbox for offline recipients. The trace lists show indexed spans, which Datadog keeps as a sample that favours slow and failed requests. Span search is case-sensitive, so they match `RealTime.rtSend` and not the lowercased `realtime.rtsend` that metric tags use.
+
+It covers server time only, with no network, client or end-to-end time. Staging sends a few messages an hour, so use windows of a day or more.
+
+**To import either dashboard:** in Datadog, open **Dashboards → New Dashboard**, then the gear menu → **Import dashboard JSON**, and paste the file. Importing into an existing dashboard replaces its widgets.
 
 **Editing it:** the file is the source of truth. If you change the dashboard in the UI, export it (gear menu → **Export dashboard JSON**) and commit the result here. Keep the queries in step with the metric table above when metrics change. Two things trip up queries:
 

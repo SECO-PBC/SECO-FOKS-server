@@ -1,0 +1,485 @@
+{
+  "title": "FOKS message send latency",
+  "description": "Server-side latency of sending a chat message, as a predictor of what users feel: the sender's acknowledgement, where that time goes, and the server's share of delivery to recipients. Excludes the network, the client and end-to-end time. Percentiles come from APM trace metrics (every span, in seconds, shown here as ms); breakdowns come from the foks.* OTel metrics. See docs/observability.md in SECO-FOKS-server.",
+  "layout_type": "ordered",
+  "reflow_type": "auto",
+  "template_variables": [
+    {
+      "name": "env",
+      "prefix": "env",
+      "available_values": [],
+      "default": "staging"
+    }
+  ],
+  "widgets": [
+    {
+      "definition": {
+        "type": "note",
+        "content": "**What this shows.** A send has two audiences. The **sender** waits for `rtSend` to return (lock the channel, insert the message, fan it out to every member's inbox, commit). Each **recipient** sees it once the server wakes their parked long-poll and their app fetches the change (`rtGetChangedThreads`, then `rtGetThreadRecents`). Everything here is server time only: add network round trips and client work for the real experience.\n\n**Low volume.** Staging sends only a few messages an hour, so percentiles are noisy over short windows. Use a window of a day or more.",
+        "background_color": "blue",
+        "font_size": "14",
+        "show_tick": false
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Sender: time to acknowledge a send",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "p50 send (ms)",
+              "requests": [
+                {
+                  "q": "p50:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtsend}*1000",
+                  "aggregator": "avg"
+                }
+              ],
+              "precision": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "p95 send (ms)",
+              "requests": [
+                {
+                  "q": "p95:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtsend}*1000",
+                  "aggregator": "avg"
+                }
+              ],
+              "precision": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "p99 send (ms)",
+              "requests": [
+                {
+                  "q": "p99:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtsend}*1000",
+                  "aggregator": "avg"
+                }
+              ],
+              "precision": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "Slowest send (ms)",
+              "requests": [
+                {
+                  "q": "max:foks.rpc.server.duration{$env,rpc.method:realtime.rtsend}",
+                  "aggregator": "max"
+                }
+              ],
+              "precision": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "Sends",
+              "requests": [
+                {
+                  "q": "sum:trace.snowpack.server.request.hits{$env,service:foks-realtime,resource_name:realtime.rtsend}.as_count()",
+                  "aggregator": "sum"
+                }
+              ],
+              "precision": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "Failed sends",
+              "requests": [
+                {
+                  "q": "sum:foks.rpc.server.errors{$env,rpc.method:realtime.rtsend}.as_count()",
+                  "aggregator": "sum"
+                }
+              ],
+              "precision": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Send latency over time (ms)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "q": "p50:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtsend}*1000",
+                  "display_type": "line"
+                },
+                {
+                  "q": "p95:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtsend}*1000",
+                  "display_type": "line"
+                },
+                {
+                  "q": "p99:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtsend}*1000",
+                  "display_type": "line"
+                },
+                {
+                  "q": "max:foks.rpc.server.duration{$env,rpc.method:realtime.rtsend}",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Send failures by error code",
+              "requests": [
+                {
+                  "q": "top(sum:foks.rpc.server.errors{$env,rpc.method:realtime.rtsend} by {error.code}.as_count(), 10, 'sum', 'desc')"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "list_stream",
+              "title": "Slowest sends (click a row for its trace: lock, insert, fan-out and every query)",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "event_list",
+                  "query": {
+                    "data_source": "trace_stream",
+                    "query_string": "$env service:foks-realtime resource_name:RealTime.rtSend",
+                    "indexes": [],
+                    "sort": {
+                      "column": "@duration",
+                      "order": "desc"
+                    }
+                  },
+                  "columns": [
+                    {
+                      "field": "timestamp",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "resource_name",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@duration",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "status",
+                      "width": "compact"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Where the send time goes",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Send phases, avg ms (stacked = most of rtSend)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "q": "avg:foks.rt.phase.duration{$env,!phase:wake,!phase:reconcile} by {phase}",
+                  "display_type": "bars"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "rtSend vs its transaction (avg ms)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "q": "avg:foks.rpc.server.duration{$env,rpc.method:realtime.rtsend}",
+                  "display_type": "line"
+                },
+                {
+                  "q": "avg:foks.db.tx.duration{$env,db.tx.name:realtime.sendmessage}",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Channel lock wait, avg and max ms (sends to one channel queue here)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "q": "avg:foks.rt.phase.duration{$env,phase:lock}",
+                  "display_type": "line"
+                },
+                {
+                  "q": "max:foks.rt.phase.duration{$env,phase:lock}",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Recipients per send (avg and max)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "q": "avg:foks.rt.fanout.members{$env,op:send}",
+                  "display_type": "line"
+                },
+                {
+                  "q": "max:foks.rt.fanout.members{$env,op:send}",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "Fan-out cost per recipient (ms)",
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "fanout",
+                      "query": "avg:foks.rt.phase.duration{$env,phase:fanout}",
+                      "aggregator": "avg"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "members",
+                      "query": "avg:foks.rt.fanout.members{$env,op:send}",
+                      "aggregator": "avg"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "fanout / members"
+                    }
+                  ]
+                }
+              ],
+              "precision": 2
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Realtime DB pool: wait to get a connection (avg ms)",
+              "show_legend": true,
+              "requests": [
+                {
+                  "q": "avg:foks.db.pool.acquire.duration{$env,service:foks-realtime} by {db.type}",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "toplist",
+              "title": "Realtime DB statements by avg time per call (ms, from DBM)",
+              "requests": [
+                {
+                  "q": "top(sum:postgresql.queries.time{$env,db:foks_realtime} by {query}.as_count() / sum:postgresql.queries.count{$env,db:foks_realtime} by {query}.as_count() / 1000000, 10, 'mean', 'desc')"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "definition": {
+        "type": "group",
+        "title": "Recipients: server's share of delivery",
+        "layout_type": "ordered",
+        "widgets": [
+          {
+            "definition": {
+              "type": "query_value",
+              "title": "Estimated server time to deliver, p95 (ms)",
+              "requests": [
+                {
+                  "response_format": "scalar",
+                  "queries": [
+                    {
+                      "data_source": "metrics",
+                      "name": "send",
+                      "query": "p95:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtsend}",
+                      "aggregator": "avg"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "wake",
+                      "query": "avg:foks.db.tx.post_commit.duration{$env,db.tx.name:realtime.sendmessage}",
+                      "aggregator": "avg"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "changed",
+                      "query": "p95:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtgetchangedthreads}",
+                      "aggregator": "avg"
+                    },
+                    {
+                      "data_source": "metrics",
+                      "name": "recents",
+                      "query": "p95:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtgetthreadrecents}",
+                      "aggregator": "avg"
+                    }
+                  ],
+                  "formulas": [
+                    {
+                      "formula": "(send + changed + recents) * 1000 + wake"
+                    }
+                  ]
+                }
+              ],
+              "precision": 0
+            }
+          },
+          {
+            "definition": {
+              "type": "note",
+              "content": "**Estimate** = p95 `rtSend` + wake after commit + p95 `rtGetChangedThreads` + p95 `rtGetThreadRecents`. Adding p95s over-states a typical delivery, so treat it as a pessimistic server budget. The real delivery also includes three or more network round trips (send, poll wake-up, fetch) and client rendering.",
+              "background_color": "gray",
+              "font_size": "14",
+              "show_tick": false
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Wake after commit, avg and max ms",
+              "show_legend": true,
+              "requests": [
+                {
+                  "q": "avg:foks.db.tx.post_commit.duration{$env,db.tx.name:realtime.sendmessage}",
+                  "display_type": "line"
+                },
+                {
+                  "q": "max:foks.db.tx.post_commit.duration{$env,db.tx.name:realtime.sendmessage}",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Recipient fetch RPCs, p95 ms",
+              "show_legend": true,
+              "requests": [
+                {
+                  "q": "p95:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtgetchangedthreads}*1000",
+                  "display_type": "line"
+                },
+                {
+                  "q": "p95:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtgetthreadrecents}*1000",
+                  "display_type": "line"
+                },
+                {
+                  "q": "p95:trace.snowpack.server.request{$env,service:foks-realtime,resource_name:realtime.rtgetthread}*1000",
+                  "display_type": "line"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Listening recipients (parked long-polls)",
+              "show_legend": false,
+              "requests": [
+                {
+                  "q": "sum:foks.rt.pollers.parked{$env}",
+                  "display_type": "area"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "timeseries",
+              "title": "Offline recipients: oldest unsent push (s) and backlog",
+              "show_legend": true,
+              "requests": [
+                {
+                  "q": "max:foks.rt.push_outbox.oldest_age{$env}",
+                  "display_type": "line"
+                },
+                {
+                  "q": "max:foks.rt.push_outbox.backlog{$env,status:queued}",
+                  "display_type": "bars"
+                }
+              ]
+            }
+          },
+          {
+            "definition": {
+              "type": "list_stream",
+              "title": "Slowest recipient fetches (sampled; slow requests are kept preferentially)",
+              "title_size": "16",
+              "title_align": "left",
+              "requests": [
+                {
+                  "response_format": "event_list",
+                  "query": {
+                    "data_source": "trace_stream",
+                    "query_string": "$env service:foks-realtime resource_name:(RealTime.rtGetChangedThreads OR RealTime.rtGetThreadRecents)",
+                    "indexes": [],
+                    "sort": {
+                      "column": "@duration",
+                      "order": "desc"
+                    }
+                  },
+                  "columns": [
+                    {
+                      "field": "timestamp",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "resource_name",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "@duration",
+                      "width": "auto"
+                    },
+                    {
+                      "field": "status",
+                      "width": "compact"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
