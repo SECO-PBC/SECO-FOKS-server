@@ -106,7 +106,7 @@ This used to say the opposite, and that is how `foks_kv_store/p1` reached produc
 
 ## Telemetry (Datadog)
 
-The server can export OpenTelemetry metrics and traces over OTLP to a Datadog Agent sidecar. The agent also collects host and container metrics, Postgres Database Monitoring, and the foks-server and Postgres container logs. Logs are shipped raw, which is a **staging-only** exception to the privacy rule; see `docs/observability.md`, "Logs". Telemetry is off unless `telemetry.enabled` is set. See `docs/observability.md` for the metric list and the privacy rule.
+The server can export OpenTelemetry metrics and traces over OTLP to a Datadog Agent sidecar. The agent also collects host and container metrics, Postgres metrics (Database Monitoring is currently turned off to save cost; see the comment in `docker-compose.datadog.yml`), and the foks-server and Postgres container logs. Logs are shipped raw, which is a **staging-only** exception to the privacy rule; see `docs/observability.md`, "Logs". Telemetry is off unless `telemetry.enabled` is set. See `docs/observability.md` for the metric list and the privacy rule.
 
 One-time setup on the server, in `/opt/foks/workdir`:
 
