@@ -431,7 +431,7 @@ themselves.
   has no membership chain in this database. The chain rule (§5.3) still
   limits the removal to members at `m/0` or below. The check only runs for
   someone else's add, so a Steward's own invitees cost no extra queries.
-- **Where:** one call in `openLink` (`server/engine/team_admin.go:571`), with
+- **Where:** one call in `teamEditor.runEditCommon` (`server/engine/team_admin.go`), with
   the function in a fork-only file. The upstream file differs by one line.
 - **Why the signer and not the social invite:** see §4. The signer is exact,
   needs no new table, and covers members added before this change.
