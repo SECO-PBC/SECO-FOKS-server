@@ -116,3 +116,38 @@ func TestSilentSendDoesNotEndDepartedHoldersHold(t *testing.T) {
 	require.Equal(t, 1, sc.holdCount(t), "a silent send leaves the hold in place")
 	require.Equal(t, held(1), sc.pushRowsByStatus(t, ch, sc.cleo))
 }
+
+// A pegged send flagged noPush never pushes either (fork; SendTypedSilent).
+// The app withdraws a reaction this way: the server cannot tell a withdrawn
+// reaction from a new one, because "on" is sealed in the body, and without
+// the flag the author's phone would buzz about nothing. A reaction sent the
+// ordinary way still pushes.
+func TestSilentTypedSendQueuesNoPushRows(t *testing.T) {
+	sc, ch := setupEditScene(t)
+	recipients := []*privActor{sc.alice, sc.cleo, sc.dara, sc.eddie}
+
+	s1 := sc.sendSeq(t, sc.bob, ch, "lunch?")
+	target := sc.msgIDAt(t, sc.bob, ch, s1)
+	for _, a := range recipients {
+		require.Equal(t, 1, sc.pushRowsFor(t, ch, a), "a message pushes")
+	}
+
+	before := map[*privActor]int64{}
+	for _, a := range recipients {
+		before[a] = sc.inboxVersion(t, a)
+	}
+	_, err := sc.bob.minder.SendTypedSilent(sc.bob.m, sc.teamCfg(), proto.RTAppID_Chat,
+		lcl.NewRTChannelSpecifierWithId(ch), []byte(`{"e":"8J+Rjw==","on":false}`),
+		proto.RTMsgType_Reactji, &target)
+	require.NoError(t, err)
+	for _, a := range recipients {
+		require.Equal(t, 1, sc.pushRowsFor(t, ch, a), "a silent reaction must not push")
+		require.Greater(t, sc.inboxVersion(t, a), before[a],
+			"a silent reaction must still bump the inbox version (online delivery)")
+	}
+
+	sc.sendTypedSeq(t, sc.bob, ch, `{"e":"8J+Rjw==","on":true}`, proto.RTMsgType_Reactji, target)
+	for _, a := range recipients {
+		require.Equal(t, 2, sc.pushRowsFor(t, ch, a), "an ordinary reaction still pushes")
+	}
+}
