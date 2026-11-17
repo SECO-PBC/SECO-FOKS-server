@@ -456,11 +456,11 @@ func (k *Minder) PutFileFirst(
 		// doing this persistently to resume uploads after a restart, but for now,
 		// do the simple thing.
 		if !isFinal {
-			kvp.caches.upload[*fid] = &fileUploadState{
+			kvp.caches.putUpload(*fid, &fileUploadState{
 				fks: &fks,
 				off: proto.Offset(len(data)),
 				sz:  sz,
-			}
+			})
 		}
 		// Large files upload through their own chunked state machine before
 		// the dirent link, so the node is already sent by the time putFile
@@ -492,7 +492,7 @@ func (k *Minder) PutFileChunk(
 		return err
 	}
 
-	us := kvp.caches.upload[id]
+	us := kvp.caches.getUpload(id)
 	if us == nil {
 		return core.NotFoundError("upload state")
 	}
@@ -529,6 +529,9 @@ func (k *Minder) PutFileChunk(
 	})
 	if err != nil {
 		return err
+	}
+	if final {
+		kvp.caches.dropUpload(id)
 	}
 	end := time.Now()
 	dur := end.Sub(start)
