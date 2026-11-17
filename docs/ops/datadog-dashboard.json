@@ -274,7 +274,7 @@
           {
             "definition": {
               "type": "toplist",
-              "title": "Postgres: statements by total time (s/s, from DBM)",
+              "title": "TEMP DISABLED (cost): Postgres: statements by total time (s/s, from DBM)",
               "requests": [{ "q": "top(sum:postgresql.queries.time{$env} by {db,query}.as_rate() / 1000000000, 10, 'mean', 'desc')" }]
             }
           },
