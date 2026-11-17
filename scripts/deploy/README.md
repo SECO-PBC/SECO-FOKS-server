@@ -115,6 +115,7 @@ One-time setup on the server, in `/opt/foks/workdir`:
    - `DD_SITE=<site>` (for example `datadoghq.com` or `datadoghq.eu`)
    - `DD_PG_PASSWORD=<random>`
    - `DD_ENV=staging` (optional; this is the default). It must match `telemetry.env` in step 5: the agent tags host, container and Postgres metrics with `DD_ENV`, and the servers tag `foks.*` metrics and traces with `telemetry.env`. If they differ, Datadog splits the two under different `env` values.
+   - `DD_HOSTNAME=<name>` (optional; defaults to `foks-staging`). The agent reports the host under this name, and so does the Postgres check (as its `reported_hostname`). **Set it on any host other than staging**; otherwise that host's metrics and its DBM instance merge with staging's.
 2. **Load the sidecar.** Copy `scripts/deploy/datadog/docker-compose.datadog.yml` into the workdir, and run `mkdir -p /opt/datadog-agent/run` (the logs agent keeps its tail positions there). Then add this line to `.env`:
 
    `COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.datadog.yml`
@@ -124,11 +125,18 @@ One-time setup on the server, in `/opt/foks/workdir`:
    ```yaml
    command: ["postgres", "-c", "max_connections=200",
              "-c", "shared_preload_libraries=pg_stat_statements",
-             "-c", "pg_stat_statements.track=all", "-c", "track_io_timing=on"]
+             "-c", "pg_stat_statements.track=all", "-c", "track_io_timing=on",
+             "-c", "track_activity_query_size=4096"]
    ```
+   `track_activity_query_size` raises Postgres's 1024-byte cap on query text in `pg_stat_activity`. At the default, DBM can't explain any longer query; it reports the error `explain-query_truncated`.
 4. **Create the monitoring role.** From `scripts/deploy/datadog/`, run `(set -a; . /opt/foks/workdir/.env; set +a; ./pg-setup.sh)`. This loads `DD_PG_PASSWORD` from `.env`, so the password never appears in your shell history or on a command line. The script is idempotent. It restricts the `SECURITY DEFINER` explain helper to the `datadog` role, so if you ran an earlier version of the script, run this one again.
 5. **Point the servers at the agent.** Add `telemetry +: { enabled : true, env : "staging" },` to `final()` in `conf-guest/local.pre.libsonnet`. `env` must equal `DD_ENV` from step 1; servers log a warning at startup if it is empty.
 6. **Start the agent and restart the servers.** Run `docker compose up -d` to start `datadog-agent`; this also recreates `postgresql` with its new labels. Then restart the FOKS servers so they re-read their config: `docker compose restart $(docker compose config --services | grep -vxE 'postgresql|datadog-agent')`. A plain `up -d` doesn't do this, because editing `local.pre.libsonnet` changes no compose definition. If you finish these steps *before* deploying a tag, the deploy recreates the servers anyway. Later CI deploys run `docker compose up -d`, which picks up `COMPOSE_FILE` and keeps the agent running.
+
+**Updating a host that is already set up.** The deploy never syncs `docker-compose.datadog.yml` or the Postgres flags, so changes to either reach a host only by hand:
+- Re-copy `scripts/deploy/datadog/docker-compose.datadog.yml` into the workdir.
+- Make the `postgresql` command in `docker-compose.override.yml` match step 3. For example, hosts set up before `track_activity_query_size` was added need that flag.
+- Run `docker compose up -d postgresql datadog-agent`. This briefly restarts Postgres whenever its command or labels changed.
 
 **Check that it works:**
 - `docker compose exec datadog-agent agent status` shows the OTLP receiver and the `postgres` check as OK.
