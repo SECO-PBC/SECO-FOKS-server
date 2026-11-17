@@ -1365,6 +1365,27 @@ func (d *Minder) SendTyped(
 	return d.sendTyped(m, team, appID, channel, body, typ, replyTo, nil, false)
 }
 
+// SendTypedSilent is SendTyped for a pegged message no phone should be woken
+// for (fork-only): stored and delivered to online members as any send, but
+// the server queues no push for it (rem.RTSendArg.NoPush). The app sends a
+// withdrawn reaction this way, which would otherwise buzz the author's phone
+// about nothing. A send queued offline keeps the flag until the outbox
+// drains it.
+func (d *Minder) SendTypedSilent(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	body []byte,
+	typ proto.RTMsgType,
+	replyTo *proto.RTMsgID,
+) (
+	*rem.RTSendRes,
+	error,
+) {
+	return d.sendTyped(m, team, appID, channel, body, typ, replyTo, nil, true)
+}
+
 func (d *Minder) sendTyped(
 	m MetaContext,
 	team lcl.ConfigTeam,
