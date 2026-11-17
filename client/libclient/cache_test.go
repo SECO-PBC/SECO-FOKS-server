@@ -21,8 +21,7 @@ func TestCacheMemTierIsBounded(t *testing.T) {
 		s := "v"
 		c.PutMem(i, proto.SmallFileBox{}, &s)
 	}
-	require.Len(t, c.m, 3)
-	require.Equal(t, 3, c.ll.Len())
+	require.Equal(t, 3, c.m.Len())
 	for i := range 7 {
 		v, _ := c.getMem(i)
 		require.Nil(t, v, "key %d should have been evicted", i)
@@ -50,13 +49,12 @@ func TestCacheMemTierEvictsLeastRecentlyUsed(t *testing.T) {
 
 	// Overwriting a key replaces it in place and does not grow the tier.
 	c.PutMem(1, proto.SmallFileBox{}, &b)
-	require.Len(t, c.m, 2)
+	require.Equal(t, 2, c.m.Len())
 	_, mv = c.getMem(1)
 	require.Equal(t, "b", *mv)
 
 	c.clearMem(1)
-	require.Len(t, c.m, 1)
-	require.Equal(t, 1, c.ll.Len())
+	require.Equal(t, 1, c.m.Len())
 }
 
 func TestCacheMemTierDefaultCap(t *testing.T) {
@@ -64,5 +62,5 @@ func TestCacheMemTierDefaultCap(t *testing.T) {
 	for i := range DefaultMemCacheCap + 100 {
 		c.PutMem(i, proto.SmallFileBox{}, nil)
 	}
-	require.Len(t, c.m, DefaultMemCacheCap)
+	require.Equal(t, DefaultMemCacheCap, c.m.Len())
 }

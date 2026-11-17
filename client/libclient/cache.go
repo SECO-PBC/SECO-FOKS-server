@@ -1,21 +1,20 @@
 package libclient
 
 import (
-	"container/list"
 	"errors"
 	"sync"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 type Versioner interface {
 	GetVersion() proto.Version
 }
 
-type memNode[K comparable, V any, M any] struct {
-	k K
+type memNode[V any, M any] struct {
 	v *V
 	m *M
 }
@@ -59,9 +58,8 @@ type Cache[
 	sync.RWMutex
 	typ   lcl.DataType
 	Scope S
-	// m and ll are the memory tier: an LRU, front most recently used.
-	m        map[K]*list.Element
-	ll       *list.List
+	// m is the memory tier, made on the first PutMem.
+	m        *lru.Cache[K, memNode[V, MV]]
 	dbt      DbType
 	Settings CacheSettings
 }
@@ -90,22 +88,11 @@ func (c *Cache[S, K, V, VP, MV]) PutMem(k K, v V, mv *MV) {
 	if !c.Settings.UseMem {
 		return
 	}
-	node := &memNode[K, V, MV]{k: k, v: &v, m: mv}
 	if c.m == nil {
-		c.m = make(map[K]*list.Element)
-		c.ll = list.New()
+		// Errors only on a size <= 0, which memCap never returns.
+		c.m, _ = lru.New[K, memNode[V, MV]](c.Settings.memCap())
 	}
-	if el, ok := c.m[k]; ok {
-		el.Value = node
-		c.ll.MoveToFront(el)
-		return
-	}
-	c.m[k] = c.ll.PushFront(node)
-	for c.ll.Len() > c.Settings.memCap() {
-		oldest := c.ll.Back()
-		c.ll.Remove(oldest)
-		delete(c.m, oldest.Value.(*memNode[K, V, MV]).k)
-	}
+	c.m.Add(k, memNode[V, MV]{v: &v, m: mv})
 }
 
 func (c *Cache[S, K, V, VP, MV]) clearMem(k K) {
@@ -114,10 +101,7 @@ func (c *Cache[S, K, V, VP, MV]) clearMem(k K) {
 	if c.m == nil {
 		return
 	}
-	if el, ok := c.m[k]; ok {
-		c.ll.Remove(el)
-		delete(c.m, k)
-	}
+	c.m.Remove(k)
 }
 
 func (c *Cache[S, K, V, VP, MV]) putDb(m MetaContext, k K, v V) error {
@@ -144,19 +128,16 @@ func (c *Cache[S, K, V, VP, MV]) Put(m MetaContext, k K, v V, memVal *MV) error 
 	return nil
 }
 
-// getMem takes the write lock: a hit moves the entry to the front.
 func (c *Cache[S, K, V, VP, MV]) getMem(k K) (*V, *MV) {
-	c.Lock()
-	defer c.Unlock()
+	c.RLock()
+	defer c.RUnlock()
 	if c.m == nil {
 		return nil, nil
 	}
-	el, ok := c.m[k]
+	n, ok := c.m.Get(k)
 	if !ok {
 		return nil, nil
 	}
-	c.ll.MoveToFront(el)
-	n := el.Value.(*memNode[K, V, MV])
 	return n.v, n.m
 }
 
