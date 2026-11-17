@@ -124,19 +124,19 @@ func loadCurrentMembership(
 // a delegated remover clear such a leaver even when a Leader added them
 // (docs/team-roster-delegation.md, "Leavers").
 //
-// The leaver's links for this team (user src role) are read newest first:
+// A leave is a Removed link for this team (user src role) whose previous
+// link for the team is Approved or ApprovedAdHoc: the shape TeamLeaveSelf
+// writes. A Removed after a Requested is a cancelled request
+// (TeamCancelRequest), not a leave. Later links do not undo a leave: the
+// leaver is still on the roster, so their client's next explore posts
+// Approved again (serverTrustListForUser), and accepting a FOKS team invite
+// posts Requested. Rejoining takes a new add, which the time check covers.
 //
-//   - Requested links are skipped. Accepting a re-invite posts one, and
-//     the Steward's Accept of that re-invite is the removal this exists for.
-//   - The newest other link must be Removed, and the link for this team
-//     just before it must be Approved or ApprovedAdHoc. That is the shape
-//     TeamLeaveSelf writes; a Removed after a Requested is a cancelled
-//     request (TeamCancelRequest), not a leave.
-//   - The Removed link must have been posted after the current membership
-//     was added, so a leave from an earlier membership does not carry over
-//     to a re-add. Both times are server clock: the removal key row's ctime
-//     and the link's merkle_work_queue ctime (links.ctime is the time the
-//     client signed into the link, so it is not used).
+// The leave must have been posted after the current membership was added,
+// so a leave from an earlier membership does not carry over to a re-add.
+// Both times are server clock: the removal key row's ctime and the link's
+// merkle_work_queue ctime (links.ctime is the time the client signed into
+// the link). A link with no queue row counts as posted before the add.
 //
 // false for team members and for users on other hosts: their membership
 // chains do not live in this host's database.
@@ -169,12 +169,12 @@ func MemberLeftSinceCurrentAdd(
 	}
 
 	rows, err := tx.Query(m.Ctx(),
-		`SELECT l.body, q.ctime > $4 FROM links AS l
-		 JOIN merkle_work_queue AS q
+		`SELECT l.body, COALESCE(q.ctime > $4, FALSE) FROM links AS l
+		 LEFT JOIN merkle_work_queue AS q
 		   ON q.short_host_id=l.short_host_id AND q.id=l.entity_id
 		   AND q.chain_type=l.chain_type AND q.seqno=l.seqno
 		 WHERE l.short_host_id=$1 AND l.chain_type=$2 AND l.entity_id=$3
-		 ORDER BY l.seqno DESC`,
+		 ORDER BY l.seqno ASC`,
 		m.ShortHostID().ExportToDB(),
 		int(proto.ChainType_TeamMembership),
 		fqp.Party.ExportToDB(),
@@ -186,7 +186,7 @@ func MemberLeftSinceCurrentAdd(
 	defer rows.Close()
 
 	fqt := proto.FQTeam{Host: m.HostID().Id, Team: teamID}
-	var removedAfterAdd *bool
+	wasActive := false
 	for rows.Next() {
 		var body []byte
 		var afterAdd bool
@@ -201,27 +201,19 @@ func MemberLeftSinceCurrentAdd(
 		if !ok {
 			continue
 		}
-		if removedAfterAdd != nil {
-			// The link just before the Removed one: a leave follows an
-			// active membership.
-			left := state == proto.TeamMembershipLinkState_Approved ||
-				state == proto.TeamMembershipLinkState_ApprovedAdHoc
-			return left && *removedAfterAdd, nil
+		if state == proto.TeamMembershipLinkState_Removed && wasActive && afterAdd {
+			return true, nil
 		}
-		switch state {
-		case proto.TeamMembershipLinkState_Requested:
-			continue
-		case proto.TeamMembershipLinkState_Removed:
-			removedAfterAdd = &afterAdd
-		default:
-			return false, nil
-		}
+		wasActive = state == proto.TeamMembershipLinkState_Approved ||
+			state == proto.TeamMembershipLinkState_ApprovedAdHoc
 	}
 	return false, rows.Err()
 }
 
-// teamMembershipStateFor decodes one membership-chain link and returns its
-// state when it is about this team at the user src role.
+// teamMembershipStateFor decodes one stored membership-chain link and
+// returns its state when it is about this team at the user src role. The
+// signature was verified when the link was posted, so it is not checked
+// again here.
 func teamMembershipStateFor(
 	body []byte,
 	fqt proto.FQTeam,
@@ -235,18 +227,34 @@ func teamMembershipStateFor(
 	if err != nil {
 		return 0, false, err
 	}
-	ovgl, err := core.OpenAndVerifyGenericLink(link)
+	v, err := link.GetV()
 	if err != nil {
 		return 0, false, err
 	}
-	typ, err := ovgl.Link.Payload.GetT()
+	if v != proto.LinkVersion_V1 {
+		return 0, false, core.VersionNotSupportedError("can only support link V1s")
+	}
+	l1 := link.V1()
+	inner, err := l1.Inner.AllocAndDecode(core.DecoderFactory{})
+	if err != nil {
+		return 0, false, err
+	}
+	lt, err := inner.GetT()
+	if err != nil {
+		return 0, false, err
+	}
+	if lt != proto.LinkType_GENERIC {
+		return 0, false, nil
+	}
+	payload := inner.Generic().Payload
+	typ, err := payload.GetT()
 	if err != nil {
 		return 0, false, err
 	}
 	if typ != proto.ChainType_TeamMembership {
 		return 0, false, nil
 	}
-	tml := ovgl.Link.Payload.Teammembership()
+	tml := payload.Teammembership()
 	if !tml.Team.Eq(fqt) {
 		return 0, false, nil
 	}

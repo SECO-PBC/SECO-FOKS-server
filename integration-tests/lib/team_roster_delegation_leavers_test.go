@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/foks-proj/go-foks/client/libclient"
+	"github.com/foks-proj/go-foks/lib/team"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/stretchr/testify/require"
@@ -24,6 +25,7 @@ func TestDelegatedRemovalOfSelfLeftMembers(t *testing.T) {
 	bob := tew.NewTestUserAtVHost(t, vh)
 	carl := tew.NewTestUserAtVHost(t, vh)
 	dave := tew.NewTestUserAtVHost(t, vh)
+	erin := tew.NewTestUserAtVHost(t, vh)
 	tew.DirectDoubleMerklePokeInTest(t)
 	tm := tew.makeTeamForOwner(t, owner)
 	m := tew.MetaContext()
@@ -70,17 +72,17 @@ func TestDelegatedRemovalOfSelfLeftMembers(t *testing.T) {
 	}
 	// The leaver's client writes Approved on its membership chain once it
 	// finds the team, then Removed on leaving; the roster is unchanged.
-	leave := func(who *TestUser) libclient.MetaContext {
+	leave := func(who *TestUser) (libclient.MetaContext, *libclient.TeamMinder) {
 		mw, tmw := tew.teamMinderFor(t, who)
 		require.NoError(t, tmw.ExploreAndIndex(mw, nil))
 		tew.DirectDoubleMerklePokeInTest(t)
 		require.NoError(t, tmw.TeamLeaveSelf(mw, fqtp))
 		tew.DirectDoubleMerklePokeInTest(t)
-		return mw
+		return mw, tmw
 	}
 	const refusal = "a delegated change may only remove members its signer added"
 
-	for _, u := range []*TestUser{bob, carl, dave} {
+	for _, u := range []*TestUser{bob, carl, dave, erin} {
 		addAs(mo, tmo, u)
 	}
 
@@ -89,8 +91,12 @@ func TestDelegatedRemovalOfSelfLeftMembers(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, refusal)
 
-	// Leader-added, then left: the Steward may clear them.
-	leave(bob)
+	// Leader-added, then left: the Steward may clear them. The leaver is
+	// still on the roster, so their client's next explore posts Approved
+	// again; that does not undo the leave.
+	mb, tmb := leave(bob)
+	require.NoError(t, tmb.ExploreAndIndex(mb, nil))
+	tew.DirectDoubleMerklePokeInTest(t)
 	require.NoError(t, remove(ms, tms, bob))
 
 	// Left, then removed and re-added by the Leader: the leave belongs to
@@ -102,16 +108,28 @@ func TestDelegatedRemovalOfSelfLeftMembers(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, refusal)
 
-	// Left, then accepted a re-invite: accepting posts a Requested link
-	// after the Removed one, and the leave still counts. This is the
-	// Steward's Accept of a returning member, which clears the old entry.
-	md := leave(dave)
+	// Left, then accepted a FOKS team invite: accepting posts a Requested
+	// link after the Removed one, and the leave still counts.
 	inv, err := tmo.CreateInvite(mo, fqtp)
 	require.NoError(t, err)
 	tew.DirectDoubleMerklePokeInTest(t)
-	_, tmd := tew.teamMinderFor(t, dave)
+	md, tmd := leave(dave)
 	_, err = tmd.AcceptInvite(md, lcl.TeamAcceptInviteArg{I: *inv})
 	require.NoError(t, err)
 	tew.DirectDoubleMerklePokeInTest(t)
 	require.NoError(t, remove(ms, tms, dave))
+
+	// A cancelled request is not a leave: Requested then Removed
+	// (TeamCancelRequest) leaves a Leader-added member to the admins.
+	me, tme := tew.teamMinderFor(t, erin)
+	_, err = tme.AcceptInvite(me, lcl.TeamAcceptInviteArg{I: *inv})
+	require.NoError(t, err)
+	tew.DirectDoubleMerklePokeInTest(t)
+	invStr, err := team.ExportTeamInvite(*inv)
+	require.NoError(t, err)
+	require.NoError(t, tme.TeamCancelRequest(me, invStr))
+	tew.DirectDoubleMerklePokeInTest(t)
+	err = remove(ms, tms, erin)
+	require.Error(t, err)
+	require.ErrorContains(t, err, refusal)
 }

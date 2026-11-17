@@ -409,20 +409,23 @@ themselves.
   `TeamMembershipLink` on the leaver's own membership chain
   (`ChainType_TeamMembership`, keyed by their UID), and they stay on the
   roster until someone removes them. The server reads that chain from its own
-  `links` table (`shared.MemberLeftSinceCurrentAdd`), newest first, keeping
-  only links for this team at the user src role:
-  - `Requested` links are skipped. Accepting a re-invite posts one, and the
-    Steward's Accept of that re-invite is the removal this is for.
-  - The newest other link must be `Removed`, and the link just before it
-    must be `Approved` or `ApprovedAdHoc`. That is the shape `TeamLeaveSelf`
-    writes; a `Removed` after a `Requested` is a cancelled request
+  `links` table (`shared.MemberLeftSinceCurrentAdd`), keeping only links for
+  this team at the user src role:
+  - A leave is a `Removed` link whose previous link for the team is
+    `Approved` or `ApprovedAdHoc`: the shape `TeamLeaveSelf` writes. A
+    `Removed` after a `Requested` is a cancelled request
     (`TeamCancelRequest`), not a leave.
-  - The `Removed` link must have been posted after the current membership
-    was added, so a leave from an earlier membership does not cover a
-    re-add. Both times come from the server clock: the `team_removal_keys`
-    row's `ctime` and the link's `merkle_work_queue` row's `ctime`.
-    `links.ctime` is the time the client signed into the link, so it is not
-    used.
+  - Later links do not undo a leave. The leaver is still on the roster, so
+    their client's next explore posts `Approved` again
+    (`serverTrustListForUser`), and accepting a FOKS team invite posts
+    `Requested`. A SECO social invite posts nothing on the invitee's chain.
+    Rejoining takes a new add, which the next rule covers.
+  - The leave must have been posted after the current membership was added,
+    so a leave from an earlier membership does not cover a re-add. Both
+    times come from the server clock: the `team_removal_keys` row's `ctime`
+    and the link's `merkle_work_queue` row's `ctime`. `links.ctime` is the
+    time the client signed into the link, so it is not used. A link with no
+    queue row counts as posted before the add.
 
   Only users on this host qualify: a team member, or a user on another host,
   has no membership chain in this database. The chain rule (§5.3) still
@@ -437,6 +440,12 @@ themselves.
     left with `TeamLeaveSelf`. Until then, only an admin can.
   - A member a Steward added and a Leader later re-added belongs to the
     Leader.
+  - The leave check orders by `NOW()`, which is a transaction's start
+    time: a leave whose transaction overlaps a Leader's re-add can land on
+    either side of it.
+  - The leave check reads `merkle_work_queue` for the time a link was
+    posted. Nothing deletes those rows today; if that changes, leavers stop
+    qualifying (the check fails closed).
   - This is a server check (§2).
 
 ### 5.9 Errors
@@ -526,8 +535,9 @@ check and confirm a test fails.
   - a Steward promoted after a rotation of the floor key can remove;
   - the Steward is refused for a member a Leader added (fork);
   - the Steward may remove a Leader-added member who left with
-    `TeamLeaveSelf`, also after they accepted a re-invite; and is refused
-    when the leave predates a Leader's re-add (fork).
+    `TeamLeaveSelf`, also after the leaver's client explored again or they
+    accepted a team invite; and is refused when the leave predates a
+    Leader's re-add, or for a cancelled request (fork).
 - **Server gates:** drive the raw RPCs as a Steward and as a plain member, not
   only through the client: `EditTeam` without a token, the delegate-box fetch,
   and the admin-only bulk fetch. A client-API test can pass while the server
