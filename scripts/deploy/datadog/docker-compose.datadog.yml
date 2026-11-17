@@ -90,9 +90,15 @@ services:
       # compose-network IP (%%host%%) as the host, which splits Postgres
       # metrics from the agent's host and gives DBM a new instance whenever
       # compose hands out a different IP.
+      # DBM is temporarily OFF to save cost (~$70/mo; decided 2026-11-17).
+      # The standard Postgres integration metrics stay on. With it off,
+      # postgresql.queries.*, postgresql.activity.* waits and query samples /
+      # explain plans stop; dashboard widgets that use them are titled
+      # "TEMP DISABLED (cost)". To re-enable, set "dbm": true and run
+      # `docker compose up -d postgresql` (briefly restarts Postgres).
       com.datadoghq.ad.checks: >-
         {"postgres": {"init_config": {}, "instances": [{
-          "dbm": true,
+          "dbm": false,
           "host": "%%host%%", "port": 5432,
           "reported_hostname": "%%env_DD_HOSTNAME%%",
           "username": "datadog", "password": "%%env_DD_PG_PASSWORD%%",

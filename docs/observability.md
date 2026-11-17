@@ -130,7 +130,7 @@ For one `RealTime.rtSend`, read the following together:
 3. **`foks.db.pool.acquire.duration` and `foks.db.pool.empty_acquires`** for pool starvation.
 4. **Deadlocks and failed sends:** `foks.db.query.errors{db.response.status_code:40P01}` and `foks.db.tx.duration{db.tx.name:realtime.SendMessage, outcome:error}`. `RetryTx2` deliberately doesn't retry deadlocks or other server errors; it retries only a COMMIT that never reached the server, so `foks.db.tx.retries` should stay near zero. Contention between sends shows up as `lock` time instead.
 5. **`foks.db.tx.post_commit.duration{db.tx.name:realtime.SendMessage}`** for the wake cost outside the transaction.
-6. **Datadog DBM → Query Metrics** for the `INSERT INTO user_inbox ... SELECT` fan-out statement: lock waits, rows and I/O.
+6. **Datadog DBM → Query Metrics** for the `INSERT INTO user_inbox ... SELECT` fan-out statement: lock waits, rows and I/O. *DBM is temporarily off on staging to save cost (since 2026-11-17). Turn it back on for benchmark runs; see `scripts/deploy/datadog/docker-compose.datadog.yml`.*
 
 ## Dashboard
 
@@ -139,7 +139,7 @@ For one `RealTime.rtSend`, read the following together:
 - **Overview:** RPC rate and errors, messages sent, send latency, parked long-polls, oldest outbox push, and rate and connections per service.
 - **RPCs:** busiest and slowest methods, worst-case latency, errors by method and code, and in-flight calls.
 - **Realtime:** send phases, wake cost and members woken by `op`, poll outcomes, reconcile tiers, and the push outbox backlog.
-- **Database:** slowest transactions, query latency, pool usage and waits, query errors by SQLSTATE, and, from Database Monitoring, Postgres statements by total time and connection usage.
+- **Database:** slowest transactions, query latency, pool usage and waits, query errors by SQLSTATE, Postgres connection usage, and, from Database Monitoring, Postgres statements by total time (that widget is titled "TEMP DISABLED (cost)" while DBM is off).
 - **Host and containers:** CPU and memory per container, host CPU and memory, Go heap per service, and ingested APM spans (the main cost driver).
 
 `docs/ops/datadog-send-latency-dashboard.json` ("FOKS message send latency") focuses on one question: how long the server makes a user wait to send a message. It has three sections:
