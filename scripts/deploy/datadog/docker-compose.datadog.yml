@@ -86,10 +86,15 @@ services:
       # Datadog autodiscovery: Postgres integration + Database Monitoring
       # across every foks_* database. Query samples are obfuscated by the
       # agent; parameters are never collected (all server SQL uses $n).
+      # reported_hostname: without it the check reports the container's
+      # compose-network IP (%%host%%) as the host, which splits Postgres
+      # metrics from the agent's host and gives DBM a new instance whenever
+      # compose hands out a different IP.
       com.datadoghq.ad.checks: >-
         {"postgres": {"init_config": {}, "instances": [{
           "dbm": true,
           "host": "%%host%%", "port": 5432,
+          "reported_hostname": "%%env_DD_HOSTNAME%%",
           "username": "datadog", "password": "%%env_DD_PG_PASSWORD%%",
           "dbname": "postgres",
           "database_autodiscovery": {"enabled": true, "include": ["^foks_"]},
