@@ -5,6 +5,7 @@ package shared
 
 import (
 	"errors"
+	"time"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/lib/team"
@@ -14,11 +15,8 @@ import (
 
 // LoadAdderOfCurrentMembership (fork-only) returns the party that signed
 // the chain link which added this member's CURRENT membership: their
-// newest team_removal_keys row names the link seqno, and the stored link
-// names its signer. Newest by create_seqno, not "no removal recorded" --
-// this runs inside the transaction that is removing the member, after the
-// removal MAC has already been stamped onto that very row. nil when no
-// row exists.
+// newest team_removal_keys row names the link seqno (loadCurrentMembership),
+// and the stored link names its signer. nil when no row exists.
 //
 // This is what enforces the fork's community rule that a delegated remover
 // may only remove members they added themselves (docs/
@@ -34,28 +32,8 @@ func LoadAdderOfCurrentMembership(
 	*proto.PartyID,
 	error,
 ) {
-	fqp, err := mid.Fqe.Unfix().FQParty()
-	if err != nil {
-		return nil, err
-	}
-	var createSeqno int
-	err = tx.QueryRow(m.Ctx(),
-		`SELECT create_seqno FROM team_removal_keys
-		 WHERE short_host_id=$1 AND team_id=$2
-		 AND member_id=$3 AND member_host_id=$4
-		 AND src_role_type=$5 AND src_viz_level=$6
-		 ORDER BY create_seqno DESC LIMIT 1`,
-		m.ShortHostID().ExportToDB(),
-		teamID.ExportToDB(),
-		fqp.Party.ExportToDB(),
-		ExportHostInScope(m, fqp.Host),
-		int(mid.SrcRole.Typ),
-		int(mid.SrcRole.Lev),
-	).Scan(&createSeqno)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
+	cur, err := loadCurrentMembership(m, tx, teamID, mid)
+	if err != nil || cur == nil {
 		return nil, err
 	}
 	var body []byte
@@ -66,7 +44,7 @@ func LoadAdderOfCurrentMembership(
 		m.ShortHostID().ExportToDB(),
 		int(proto.ChainType_Team),
 		teamID.ToPartyID().ExportToDB(),
-		createSeqno,
+		cur.createSeqno,
 	).Scan(&body)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -88,4 +66,205 @@ func LoadAdderOfCurrentMembership(
 	}
 	ret := gc.Signer.KeyOwner.Party
 	return &ret, nil
+}
+
+// currentMembership is a member's newest team_removal_keys row: the team
+// chain seqno that added their current membership, and when the server
+// stored that add.
+type currentMembership struct {
+	createSeqno int
+	ctime       time.Time
+}
+
+// loadCurrentMembership reads the newest team_removal_keys row for this
+// member. Newest by create_seqno, not "no removal recorded": it runs inside
+// the transaction that is removing the member, after the removal MAC has
+// already been stamped onto that very row. nil when no row exists.
+func loadCurrentMembership(
+	m MetaContext,
+	tx pgx.Tx,
+	teamID proto.TeamID,
+	mid team.MemberID,
+) (
+	*currentMembership,
+	error,
+) {
+	fqp, err := mid.Fqe.Unfix().FQParty()
+	if err != nil {
+		return nil, err
+	}
+	var ret currentMembership
+	err = tx.QueryRow(m.Ctx(),
+		`SELECT create_seqno, ctime FROM team_removal_keys
+		 WHERE short_host_id=$1 AND team_id=$2
+		 AND member_id=$3 AND member_host_id=$4
+		 AND src_role_type=$5 AND src_viz_level=$6
+		 ORDER BY create_seqno DESC LIMIT 1`,
+		m.ShortHostID().ExportToDB(),
+		teamID.ExportToDB(),
+		fqp.Party.ExportToDB(),
+		ExportHostInScope(m, fqp.Host),
+		int(mid.SrcRole.Typ),
+		int(mid.SrcRole.Lev),
+	).Scan(&ret.createSeqno, &ret.ctime)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ret, nil
+}
+
+// MemberLeftSinceCurrentAdd (fork-only) reports whether a user on this host
+// has left the team themselves since their current membership was added.
+// FOKS has no self-removal: a leaver's client (TeamMinder.TeamLeaveSelf)
+// only posts a Removed TeamMembershipLink on the leaver's own membership
+// chain, and they stay on the roster until someone removes them. This lets
+// a delegated remover clear such a leaver even when a Leader added them
+// (docs/team-roster-delegation.md, "Leavers").
+//
+// A leave is a Removed link for this team (user src role) whose previous
+// link for the team is Approved or ApprovedAdHoc: the shape TeamLeaveSelf
+// writes. A Removed after a Requested is a cancelled request
+// (TeamCancelRequest), not a leave. Later links do not undo a leave: the
+// leaver is still on the roster, so their client's next explore posts
+// Approved again (serverTrustListForUser), and accepting a FOKS team invite
+// posts Requested. Rejoining takes a new add, which the time check covers.
+//
+// The leave must have been posted after the current membership was added,
+// so a leave from an earlier membership does not carry over to a re-add.
+// Both times are server clock: the removal key row's ctime and the link's
+// merkle_work_queue ctime (links.ctime is the time the client signed into
+// the link). A link with no queue row counts as posted before the add.
+//
+// false for team members and for users on other hosts: their membership
+// chains do not live in this host's database.
+func MemberLeftSinceCurrentAdd(
+	m MetaContext,
+	tx pgx.Tx,
+	teamID proto.TeamID,
+	mid team.MemberID,
+) (
+	bool,
+	error,
+) {
+	fqp, err := mid.Fqe.Unfix().FQParty()
+	if err != nil {
+		return false, err
+	}
+	if !fqp.Party.IsUser() || !m.HostID().Id.Eq(fqp.Host) {
+		return false, nil
+	}
+	userSrc, err := core.ImportRole(team.UserSrcRole)
+	if err != nil {
+		return false, err
+	}
+	if !mid.SrcRole.Eq(*userSrc) {
+		return false, nil
+	}
+	cur, err := loadCurrentMembership(m, tx, teamID, mid)
+	if err != nil || cur == nil {
+		return false, err
+	}
+
+	rows, err := tx.Query(m.Ctx(),
+		`SELECT l.body, COALESCE(q.ctime > $4, FALSE) FROM links AS l
+		 LEFT JOIN merkle_work_queue AS q
+		   ON q.short_host_id=l.short_host_id AND q.id=l.entity_id
+		   AND q.chain_type=l.chain_type AND q.seqno=l.seqno
+		 WHERE l.short_host_id=$1 AND l.chain_type=$2 AND l.entity_id=$3
+		 ORDER BY l.seqno ASC`,
+		m.ShortHostID().ExportToDB(),
+		int(proto.ChainType_TeamMembership),
+		fqp.Party.ExportToDB(),
+		cur.ctime,
+	)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	fqt := proto.FQTeam{Host: m.HostID().Id, Team: teamID}
+	wasActive := false
+	for rows.Next() {
+		var body []byte
+		var afterAdd bool
+		err = rows.Scan(&body, &afterAdd)
+		if err != nil {
+			return false, err
+		}
+		state, ok, err := teamMembershipStateFor(body, fqt)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			continue
+		}
+		if state == proto.TeamMembershipLinkState_Removed && wasActive && afterAdd {
+			return true, nil
+		}
+		wasActive = state == proto.TeamMembershipLinkState_Approved ||
+			state == proto.TeamMembershipLinkState_ApprovedAdHoc
+	}
+	return false, rows.Err()
+}
+
+// teamMembershipStateFor decodes one stored membership-chain link and
+// returns its state when it is about this team at the user src role. The
+// signature was verified when the link was posted, so it is not checked
+// again here.
+func teamMembershipStateFor(
+	body []byte,
+	fqt proto.FQTeam,
+) (
+	proto.TeamMembershipLinkState,
+	bool,
+	error,
+) {
+	var link proto.LinkOuter
+	err := core.DecodeFromBytes(&link, body)
+	if err != nil {
+		return 0, false, err
+	}
+	v, err := link.GetV()
+	if err != nil {
+		return 0, false, err
+	}
+	if v != proto.LinkVersion_V1 {
+		return 0, false, core.VersionNotSupportedError("can only support link V1s")
+	}
+	l1 := link.V1()
+	inner, err := l1.Inner.AllocAndDecode(core.DecoderFactory{})
+	if err != nil {
+		return 0, false, err
+	}
+	lt, err := inner.GetT()
+	if err != nil {
+		return 0, false, err
+	}
+	if lt != proto.LinkType_GENERIC {
+		return 0, false, nil
+	}
+	payload := inner.Generic().Payload
+	typ, err := payload.GetT()
+	if err != nil {
+		return 0, false, err
+	}
+	if typ != proto.ChainType_TeamMembership {
+		return 0, false, nil
+	}
+	tml := payload.Teammembership()
+	if !tml.Team.Eq(fqt) {
+		return 0, false, nil
+	}
+	same, err := tml.SrcRole.Eq(team.UserSrcRole)
+	if err != nil || !same {
+		return 0, false, err
+	}
+	state, err := tml.State.GetT()
+	if err != nil {
+		return 0, false, err
+	}
+	return state, true, nil
 }

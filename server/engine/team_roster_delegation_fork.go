@@ -10,9 +10,12 @@ import (
 
 // checkDelegatedRemovalsOwnAdds (fork-only) narrows the delegated-removal
 // rule for this host's communities: a signer below admin may only remove
-// members whose current membership THEY added. The chain rule has already
-// limited such a link to adds and removes of members at m/0 or below; this
-// compares each removed member's add-link signer with this link's signer.
+// members whose current membership THEY added, or members who have since
+// left the team themselves (shared.MemberLeftSinceCurrentAdd). The chain
+// rule has already limited such a link to adds and removes of members at
+// m/0 or below; this compares each removed member's add-link signer with
+// this link's signer, and only for someone else's add reads the member's
+// own membership chain for a leave.
 // A server check, not a chain rule: a host that skipped it would widen the
 // rule back to "any plain member", never to anything above m/0.
 func (c *teamEditor) checkDelegatedRemovalsOwnAdds(
@@ -33,7 +36,14 @@ func (c *teamEditor) checkDelegatedRemovalsOwnAdds(
 		if err != nil {
 			return err
 		}
-		if adder == nil || !adder.EntityID().Eq(signer.Party.EntityID()) {
+		if adder != nil && adder.EntityID().Eq(signer.Party.EntityID()) {
+			continue
+		}
+		left, err := shared.MemberLeftSinceCurrentAdd(m, c.tx, c.teamID, mid)
+		if err != nil {
+			return err
+		}
+		if !left {
 			return core.PermissionError("a delegated change may only remove members its signer added")
 		}
 	}

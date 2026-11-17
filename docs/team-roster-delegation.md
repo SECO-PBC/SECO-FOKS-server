@@ -198,8 +198,9 @@ A doer with role `Rd` may sign the change set if:
 Everything else stays admin-only. That includes:
 - role changes and key-generation bumps;
 - any change to a member above `m/0`;
-- processing a member's `TeamLeaveSelf`, which today is always an admin edit
-  (`client/libclient/team_minder_inbox.go:1337`).
+- processing the `TeamLeaveSelf` of a member above `m/0`. For a member at
+  `m/0` it is an ordinary removal; on this fork §5.8 decides which Steward may
+  make it.
 
 The existing checks at `lib/team/core.go:387-396` stay as they are. The new
 rule is stricter.
@@ -393,21 +394,58 @@ themselves.
 - **Check:** when the server accepts a link signed by a non-admin, each
   removed member's add is looked up. `team_removal_keys` holds the seqno at
   which the member was added (`create_seqno`). A member added more than once
-  has several rows; the one that counts is the current membership's, the row
-  with no removal recorded yet. The `links` table holds that link
+  has several rows; the one that counts is the current membership's, the
+  newest by `create_seqno`. The `links` table holds that link
   (`server/sql/foks_users.sql:69`). The server opens it and compares its
-  signer with the Steward. If they differ, it refuses with a
-  `PermissionError`, an existing status code, so no fork-only error number is
-  needed.
-- **Where:** one call in `openLink` (`server/engine/team_admin.go:571`), with
+  signer with the Steward. If they differ, and the member has not left
+  (below), it refuses with a `PermissionError`, an existing status code, so
+  no fork-only error number is needed. The message stays "a delegated change
+  may only remove members its signer added"; the app keys on it.
+- **Leavers:** decided by Stefan on 2026-11-16, following Carter's product
+  call that a Steward may re-admit anyone, including someone a Leader
+  removed. A Steward may also remove a member who has left the team
+  themselves since their current membership was added, whoever added them.
+  FOKS has no self-removal: `TeamLeaveSelf` posts a `Removed`
+  `TeamMembershipLink` on the leaver's own membership chain
+  (`ChainType_TeamMembership`, keyed by their UID), and they stay on the
+  roster until someone removes them. The server reads that chain from its own
+  `links` table (`shared.MemberLeftSinceCurrentAdd`), keeping only links for
+  this team at the user src role:
+  - A leave is a `Removed` link whose previous link for the team is
+    `Approved` or `ApprovedAdHoc`: the shape `TeamLeaveSelf` writes. A
+    `Removed` after a `Requested` is a cancelled request
+    (`TeamCancelRequest`), not a leave.
+  - Later links do not undo a leave. The leaver is still on the roster, so
+    their client's next explore posts `Approved` again
+    (`serverTrustListForUser`), and accepting a FOKS team invite posts
+    `Requested`. A SECO social invite posts nothing on the invitee's chain.
+    Rejoining takes a new add, which the next rule covers.
+  - The leave must have been posted after the current membership was added,
+    so a leave from an earlier membership does not cover a re-add. Both
+    times come from the server clock: the `team_removal_keys` row's `ctime`
+    and the link's `merkle_work_queue` row's `ctime`. `links.ctime` is the
+    time the client signed into the link, so it is not used. A link with no
+    queue row counts as posted before the add.
+
+  Only users on this host qualify: a team member, or a user on another host,
+  has no membership chain in this database. The chain rule (§5.3) still
+  limits the removal to members at `m/0` or below. The check only runs for
+  someone else's add, so a Steward's own invitees cost no extra queries.
+- **Where:** one call in `teamEditor.runEditCommon` (`server/engine/team_admin.go`), with
   the function in a fork-only file. The upstream file differs by one line.
 - **Why the signer and not the social invite:** see §4. The signer is exact,
   needs no new table, and covers members added before this change.
 - **Limits:**
-  - A member a Leader added can be removed only by an admin, even after they
-    have left with `TeamLeaveSelf` and a Steward is re-inviting them.
+  - A member a Leader added can be removed by a Steward only after they have
+    left with `TeamLeaveSelf`. Until then, only an admin can.
   - A member a Steward added and a Leader later re-added belongs to the
     Leader.
+  - The leave check orders by `NOW()`, which is a transaction's start
+    time: a leave whose transaction overlaps a Leader's re-add can land on
+    either side of it.
+  - The leave check reads `merkle_work_queue` for the time a link was
+    posted. Nothing deletes those rows today; if that changes, leavers stop
+    qualifying (the check fails closed).
   - This is a server check (§2).
 
 ### 5.9 Errors
@@ -495,7 +533,11 @@ check and confirm a test fails.
     admin still can;
   - the Steward removes a member who joined before the floor was set;
   - a Steward promoted after a rotation of the floor key can remove;
-  - the Steward is refused for a member a Leader added (fork).
+  - the Steward is refused for a member a Leader added (fork);
+  - the Steward may remove a Leader-added member who left with
+    `TeamLeaveSelf`, also after the leaver's client explored again or they
+    accepted a team invite; and is refused when the leave predates a
+    Leader's re-add, or for a cancelled request (fork).
 - **Server gates:** drive the raw RPCs as a Steward and as a plain member, not
   only through the client: `EditTeam` without a token, the delegate-box fetch,
   and the admin-only bulk fetch. A client-API test can pass while the server
@@ -557,6 +599,6 @@ Branch each upstream PR from `upstream/main`, stacked where noted.
 - **Not this change:** the per-community "who may add to a private channel"
   policy is not enforced by the server, which allows the
   channel owner or an admin. It is worth its own change.
-- **Follow-up:** should a Steward be allowed to process the `TeamLeaveSelf` of
-  a member they added? It would need the server or chain to read the member's
-  own membership chain, which has not been checked.
+- **Resolved 2026-11-16:** a Steward may process any member's
+  `TeamLeaveSelf`, not only that of a member they added. The server reads the
+  leaver's membership chain (§5.8, "Leavers").
