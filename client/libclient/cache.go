@@ -1,6 +1,7 @@
 package libclient
 
 import (
+	"container/list"
 	"errors"
 	"sync"
 
@@ -13,14 +14,36 @@ type Versioner interface {
 	GetVersion() proto.Version
 }
 
-type memNode[V any, M any] struct {
+type memNode[K comparable, V any, M any] struct {
+	k K
 	v *V
 	m *M
 }
 
+// DefaultMemCacheCap bounds each Cache's memory tier when
+// CacheSettings.MemCap is unset.
+//
+// SECO fork: the memory tier used to be a plain map that nothing evicted.
+// Keys like SmallFileID are minted fresh on every write, so a long-lived
+// client that overwrites the same KV paths (the SECO daemon's cursors) kept
+// every version it ever wrote or read, plaintext and box both, and grew
+// without bound. A miss falls through to the disk tier and then the
+// server, the same path a cold start takes, so evicting is always safe.
+const DefaultMemCacheCap = 4096
+
 type CacheSettings struct {
 	UseMem  bool
 	UseDisk bool
+	// MemCap is the most entries the memory tier holds before evicting the
+	// least recently used. Zero means DefaultMemCacheCap.
+	MemCap int
+}
+
+func (s CacheSettings) memCap() int {
+	if s.MemCap > 0 {
+		return s.MemCap
+	}
+	return DefaultMemCacheCap
 }
 
 type Cache[
@@ -34,9 +57,11 @@ type Cache[
 	MV any, // A MemVal, something that we only store in memory (like decrypted data)
 ] struct {
 	sync.RWMutex
-	typ      lcl.DataType
-	Scope    S
-	m        map[K]*memNode[V, MV]
+	typ   lcl.DataType
+	Scope S
+	// m and ll are the memory tier: an LRU, front most recently used.
+	m        map[K]*list.Element
+	ll       *list.List
 	dbt      DbType
 	Settings CacheSettings
 }
@@ -65,10 +90,22 @@ func (c *Cache[S, K, V, VP, MV]) PutMem(k K, v V, mv *MV) {
 	if !c.Settings.UseMem {
 		return
 	}
+	node := &memNode[K, V, MV]{k: k, v: &v, m: mv}
 	if c.m == nil {
-		c.m = make(map[K]*memNode[V, MV])
+		c.m = make(map[K]*list.Element)
+		c.ll = list.New()
 	}
-	c.m[k] = &memNode[V, MV]{v: &v, m: mv}
+	if el, ok := c.m[k]; ok {
+		el.Value = node
+		c.ll.MoveToFront(el)
+		return
+	}
+	c.m[k] = c.ll.PushFront(node)
+	for c.ll.Len() > c.Settings.memCap() {
+		oldest := c.ll.Back()
+		c.ll.Remove(oldest)
+		delete(c.m, oldest.Value.(*memNode[K, V, MV]).k)
+	}
 }
 
 func (c *Cache[S, K, V, VP, MV]) clearMem(k K) {
@@ -77,7 +114,10 @@ func (c *Cache[S, K, V, VP, MV]) clearMem(k K) {
 	if c.m == nil {
 		return
 	}
-	delete(c.m, k)
+	if el, ok := c.m[k]; ok {
+		c.ll.Remove(el)
+		delete(c.m, k)
+	}
 }
 
 func (c *Cache[S, K, V, VP, MV]) putDb(m MetaContext, k K, v V) error {
@@ -104,17 +144,20 @@ func (c *Cache[S, K, V, VP, MV]) Put(m MetaContext, k K, v V, memVal *MV) error 
 	return nil
 }
 
+// getMem takes the write lock: a hit moves the entry to the front.
 func (c *Cache[S, K, V, VP, MV]) getMem(k K) (*V, *MV) {
-	c.RLock()
-	defer c.RUnlock()
+	c.Lock()
+	defer c.Unlock()
 	if c.m == nil {
 		return nil, nil
 	}
-	v := c.m[k]
-	if v == nil {
+	el, ok := c.m[k]
+	if !ok {
 		return nil, nil
 	}
-	return v.v, v.m
+	c.ll.MoveToFront(el)
+	n := el.Value.(*memNode[K, V, MV])
+	return n.v, n.m
 }
 
 func (c *Cache[S, K, V, VP, MV]) getDb(m MetaContext, k K) (*V, error) {
