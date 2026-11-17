@@ -58,6 +58,7 @@ type RTSendArg struct {
 	Mw              lib.RTMsgWrapper
 	ExpectedPrevSeq lib.RTMsgSeq
 	NoPush          bool
+	PushTo          *lib.UID
 }
 type RTSendArgInternal__ struct {
 	_struct         struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -66,6 +67,7 @@ type RTSendArgInternal__ struct {
 	Mw              *lib.RTMsgWrapperInternal__
 	ExpectedPrevSeq *lib.RTMsgSeqInternal__
 	NoPush          *bool
+	PushTo          *lib.UIDInternal__
 }
 
 func (r RTSendArgInternal__) Import() RTSendArg {
@@ -100,6 +102,18 @@ func (r RTSendArgInternal__) Import() RTSendArg {
 			}
 			return *x
 		})(r.NoPush),
+		PushTo: (func(x *lib.UIDInternal__) *lib.UID {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *lib.UIDInternal__) (ret lib.UID) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(r.PushTo),
 	}
 }
 func (r RTSendArg) Export() *RTSendArgInternal__ {
@@ -109,6 +123,12 @@ func (r RTSendArg) Export() *RTSendArgInternal__ {
 		Mw:              r.Mw.Export(),
 		ExpectedPrevSeq: r.ExpectedPrevSeq.Export(),
 		NoPush:          &r.NoPush,
+		PushTo: (func(x *lib.UID) *lib.UIDInternal__ {
+			if x == nil {
+				return nil
+			}
+			return (*x).Export()
+		})(r.PushTo),
 	}
 }
 func (r *RTSendArg) Encode(enc rpc.Encoder) error {

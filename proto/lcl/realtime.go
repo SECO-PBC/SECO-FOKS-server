@@ -3275,6 +3275,7 @@ type RTOutboxEntry struct {
 	LastErrCode lib.StatusCode
 	Ord         uint64
 	NoPush      bool
+	PushTo      *lib.UID
 }
 type RTOutboxEntryInternal__ struct {
 	_struct     struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -3284,6 +3285,7 @@ type RTOutboxEntryInternal__ struct {
 	LastErrCode *lib.StatusCodeInternal__
 	Ord         *uint64
 	NoPush      *bool
+	PushTo      *lib.UIDInternal__
 }
 
 func (r RTOutboxEntryInternal__) Import() RTOutboxEntry {
@@ -3324,6 +3326,18 @@ func (r RTOutboxEntryInternal__) Import() RTOutboxEntry {
 			}
 			return *x
 		})(r.NoPush),
+		PushTo: (func(x *lib.UIDInternal__) *lib.UID {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *lib.UIDInternal__) (ret lib.UID) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(r.PushTo),
 	}
 }
 func (r RTOutboxEntry) Export() *RTOutboxEntryInternal__ {
@@ -3334,6 +3348,12 @@ func (r RTOutboxEntry) Export() *RTOutboxEntryInternal__ {
 		LastErrCode: r.LastErrCode.Export(),
 		Ord:         &r.Ord,
 		NoPush:      &r.NoPush,
+		PushTo: (func(x *lib.UID) *lib.UIDInternal__ {
+			if x == nil {
+				return nil
+			}
+			return (*x).Export()
+		})(r.PushTo),
 	}
 }
 func (r *RTOutboxEntry) Encode(enc rpc.Encoder) error {

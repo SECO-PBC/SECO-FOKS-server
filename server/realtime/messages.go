@@ -452,18 +452,29 @@ func (s *messageSender) fanoutInboxVersions(
 	if err != nil {
 		return err
 	}
+	// A send naming one member to push (fork-only, reaction-push-to-author)
+	// narrows the same fan-out to that member: still only when they have a
+	// delivery row, are not the sender and have not muted the channel, so
+	// naming anyone else writes nothing. The SECO app names a reaction's
+	// target's author.
+	var pushTo []byte
+	if s.arg.PushTo != nil {
+		pushTo = s.arg.PushTo.ExportToDB()
+	}
 	_, err = s.tx.Exec(
 		m.Ctx(),
 		`INSERT INTO push_outbox (short_host_id, uid, channel_id, kind, seq, status, ctime, mtime)
 		 SELECT uc.short_host_id, uc.uid, uc.channel_id, 'msg', $3, $5::push_status, NOW(), NOW()
 		   FROM user_channels uc
 		  WHERE uc.short_host_id=$1 AND uc.channel_id=$2 AND uc.uid <> $4
-		    AND NOT uc.muted`,
+		    AND NOT uc.muted
+		    AND ($6::bytea IS NULL OR uc.uid = $6)`,
 		m.ShortHostID(),
 		s.channelID(),
 		seq.Int64(),
 		s.sender.ExportToDB(),
 		status,
+		pushTo,
 	)
 	return err
 }

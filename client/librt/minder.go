@@ -1128,7 +1128,7 @@ func (d *Minder) SendSilent(
 	*rem.RTSendRes,
 	error,
 ) {
-	return d.sendTyped(m, team, appID, channel, body, proto.RTMsgType_Basic, nil, nil, true)
+	return d.sendTyped(m, team, appID, channel, body, proto.RTMsgType_Basic, nil, nil, sendPush{noPush: true})
 }
 
 // ReadThrough advances the caller's read pointer in a channel to seq, so
@@ -1345,7 +1345,7 @@ func (d *Minder) SendWithTestHooks(
 	*rem.RTSendRes,
 	error,
 ) {
-	return d.sendTyped(m, team, appID, channel, body, proto.RTMsgType_Basic, nil, test, false)
+	return d.sendTyped(m, team, appID, channel, body, proto.RTMsgType_Basic, nil, test, sendPush{})
 }
 
 // SendTyped sends a non-Basic message type: Reply / Reactji /
@@ -1362,7 +1362,7 @@ func (d *Minder) SendTyped(
 	*rem.RTSendRes,
 	error,
 ) {
-	return d.sendTyped(m, team, appID, channel, body, typ, replyTo, nil, false)
+	return d.sendTyped(m, team, appID, channel, body, typ, replyTo, nil, sendPush{})
 }
 
 // SendTypedSilent is SendTyped for a pegged message no phone should be woken
@@ -1383,7 +1383,86 @@ func (d *Minder) SendTypedSilent(
 	*rem.RTSendRes,
 	error,
 ) {
-	return d.sendTyped(m, team, appID, channel, body, typ, replyTo, nil, true)
+	return d.sendTyped(m, team, appID, channel, body, typ, replyTo, nil, sendPush{noPush: true})
+}
+
+// SendTypedPushTo is SendTyped pushing one member only (fork-only,
+// reaction-push-to-author): the server writes a push row for pushTo alone,
+// and only when they are a recipient anyway (rem.RTSendArg.PushTo). The app
+// sends an added reaction this way, for the author of the message it reacts
+// to. A send queued offline keeps the member until the outbox drains it.
+func (d *Minder) SendTypedPushTo(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	body []byte,
+	typ proto.RTMsgType,
+	replyTo *proto.RTMsgID,
+	pushTo proto.UID,
+) (
+	*rem.RTSendRes,
+	error,
+) {
+	return d.sendTyped(m, team, appID, channel, body, typ, replyTo, nil, sendPush{pushTo: &pushTo})
+}
+
+// msgSenderScanDepth bounds MsgSender's walk back through the local DB when
+// the message is not in the in-memory id cache (a fresh process: the cache
+// fills only as messages are stored).
+const msgSenderScanDepth = 1000
+
+// MsgSender is the sender of a message this device already holds in the
+// channel (fork-only, reaction-push-to-author), read from the cached row's
+// clear metadata with no network call. Nil when the device does not hold it:
+// not in the id cache and not among the channel's newest msgSenderScanDepth
+// cached messages. Cached rows were verified when stored.
+func (d *Minder) MsgSender(
+	m MetaContext,
+	team lcl.ConfigTeam,
+	appID proto.RTAppID,
+	channel lcl.RTChannelSpecifier,
+	msgID proto.RTMsgID,
+) (
+	*proto.PartyID,
+	error,
+) {
+	err := assertTeam(team)
+	if err != nil {
+		return nil, err
+	}
+	rtp, err := d.base.GetParty(m.Base(), team)
+	if err != nil {
+		return nil, err
+	}
+	ch, err := d.resolveChannel(m, rtp, appID, channel)
+	if err != nil {
+		return nil, err
+	}
+	var rows []proto.RTMsgCachedWithSeq
+	if seq, ok := d.msgIDCache.Peek(msgID); ok {
+		rows, err = dbGetMsgs(m, d.au, ch.Id, seq, seq)
+	} else {
+		rows, err = dbGetRecentMsgs(m, d.au, ch.Id, msgSenderScanDepth)
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if r.Cm.Md.Md.MsgID == msgID && r.Cm.Md.Sender != nil {
+			p := r.Cm.Md.Sender.Party
+			return &p, nil
+		}
+	}
+	return nil, nil
+}
+
+// sendPush is who a send wakes (fork-only): everyone it reaches (the zero
+// value), nobody (noPush, silent-system-notices), or one member
+// (pushTo, reaction-push-to-author). rem.RTSendArg carries both.
+type sendPush struct {
+	noPush bool
+	pushTo *proto.UID
 }
 
 func (d *Minder) sendTyped(
@@ -1395,7 +1474,7 @@ func (d *Minder) sendTyped(
 	typ proto.RTMsgType,
 	replyTo *proto.RTMsgID,
 	test *SendTestHooks,
-	noPush bool,
+	push sendPush,
 ) (
 	*rem.RTSendRes,
 	error,
@@ -1463,7 +1542,7 @@ func (d *Minder) sendTyped(
 	// Queue durably before the first network attempt: from here the message
 	// survives transport failures and crashes, and re-attempting is safe
 	// because rtSend is idempotent on msgID (docs/rt_offline.md, D1/D2).
-	hasEarlier, err := d.enqueueOutbox(m, msgCached, noPush)
+	hasEarlier, err := d.enqueueOutbox(m, msgCached, push)
 	if err != nil {
 		return nil, err
 	}
@@ -1494,7 +1573,7 @@ func (d *Minder) sendTyped(
 		return nil, core.RTMsgQueuedError{MsgID: md.MsgID}
 	}
 
-	res, err := d.attemptSend(m, &msgCached, noPush)
+	res, err := d.attemptSend(m, &msgCached, push)
 	if err != nil {
 		if core.IsTransportError(err) {
 			// The message sits durably in the outbox, to drain on reconnect.
