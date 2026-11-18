@@ -86,11 +86,13 @@ func (t *Telemetry) wrapRPC(
 				return
 			}
 			code := statusCodeName(err)
-			inst.rpcDuration.Record(ctx, elapsed, metric.WithAttributes(methodAttr, errOutcome))
-			inst.rpcErrors.Add(ctx, 1, metric.WithAttributes(methodAttr, attribute.String("error.code", code)))
 			// Only the status code: raw error strings can echo user data.
 			span.SetAttributes(attribute.String("error.code", code))
-			if !expectedRPCErrors[code] {
+			if expectedRPCErrors[code] {
+				inst.rpcDuration.Record(ctx, elapsed, okOpt)
+			} else {
+				inst.rpcDuration.Record(ctx, elapsed, metric.WithAttributes(methodAttr, errOutcome))
+				inst.rpcErrors.Add(ctx, 1, metric.WithAttributes(methodAttr, attribute.String("error.code", code)))
 				span.SetStatus(codes.Error, code)
 			}
 			span.End()
@@ -104,8 +106,9 @@ func (t *Telemetry) wrapRPC(
 // kvCacheCheck. Their spans keep error.code but are not marked as errors,
 // so they don't inflate APM error rates or fill Datadog's error retention
 // filter (on staging they were ~50k indexed spans an hour, nearly all of
-// the indexed-span bill). The foks.rpc.server.* metrics still count them as
-// outcome=error with their error.code, so dashboards are unchanged.
+// the indexed-span bill). In the foks.rpc.server.* metrics they count as
+// outcome=ok and are left out of foks.rpc.server.errors: on staging they
+// were ~99% of that counter, which hid the real failures.
 var expectedRPCErrors = map[string]bool{
 	"KV_NOENT_ERROR":       true,
 	"KV_STALE_CACHE_ERROR": true,

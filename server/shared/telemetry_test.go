@@ -209,8 +209,8 @@ func TestInstrumentProtocol(t *testing.T) {
 	h.assertPrivate(t)
 }
 
-// Expected "answer" codes keep error.code and count as errors in metrics,
-// but their spans aren't marked as errors.
+// Expected "answer" codes keep error.code on the span, but neither the span
+// nor the metrics treat them as errors.
 func TestInstrumentProtocolExpectedErrors(t *testing.T) {
 	h := newTelemetryHarness(t, false)
 	noent := func(ctx context.Context, arg interface{}) (interface{}, error) {
@@ -236,13 +236,17 @@ func TestInstrumentProtocolExpectedErrors(t *testing.T) {
 		"KV_STALE_CACHE_ERROR": codes.Unset,
 	}, got)
 
-	errs := findMetric(h.collect(t), "foks.rpc.server.errors")
-	require.NotNil(t, errs)
-	var n int64
-	for _, dp := range errs.Data.(metricdata.Sum[int64]).DataPoints {
-		n += dp.Value
+	rm := h.collect(t)
+	require.Nil(t, findMetric(rm, "foks.rpc.server.errors"))
+	dur := findMetric(rm, "foks.rpc.server.duration")
+	require.NotNil(t, dur)
+	counts := map[string]uint64{}
+	for _, dp := range dur.Data.(metricdata.Histogram[float64]).DataPoints {
+		m, _ := dp.Attributes.Value("rpc.method")
+		o, _ := dp.Attributes.Value("outcome")
+		counts[m.AsString()+"/"+o.AsString()] += dp.Count
 	}
-	require.Equal(t, int64(2), n)
+	require.Equal(t, map[string]uint64{"TestProto.good/ok": 1, "TestProto.bad/ok": 1}, counts)
 	h.assertPrivate(t)
 }
 
