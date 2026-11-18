@@ -1,93 +1,115 @@
 # API sessions: bearer tokens for `/api/v1` (fork-only)
 
 The web server has an authenticated JSON surface at `/api/v1` for app clients.
-The first real consumer will be opt-in client analytics
+Its first real consumer will be opt-in client analytics
 (`POST /api/v1/client-analytics`). Today the only route is `GET /api/v1/ping`,
 which proves the stack end to end.
 
-FOKS authenticates users with device keys over snowpack RPC, which an HTTP
-client cannot do. So a logged-in client **mints a short-lived bearer token over
-the RPC connection it already has**, then sends it over HTTPS. This is the shape
-the web admin panel already uses (`newWebAdminPanelURL` → `user_web_sessions`),
-with three differences: tokens are scoped, hashed and short-lived, and they live
-in their own table.
+## Use it only for non-sensitive endpoints
+
+**`/api/v1` is for analytics, health checks and similar data that is
+harmless if the wrong person sends or reads it.** Never add a route that
+returns user data, changes account or team state, or acts on behalf of the
+user. Those belong on the FOKS RPC protocols, where every call is
+authenticated by the device key.
+
+The reason is a set of trade-offs we made deliberately, to keep this code
+small and lean on a standard library:
+
+- **Tokens can't be revoked.** A token is valid until it expires (1 hour by
+  default). Revoking a device, deleting an account or changing a password
+  does not end the tokens already minted.
+- **Expiry is the only control on a stolen token.** Anyone who copies a
+  token (from a log, a proxy, a compromised device) can use it until it
+  expires, from anywhere.
+- **No per-token state.** The server keeps no record of which tokens exist,
+  so it can't list a user's tokens, cap how many there are, or tell a
+  replayed token from a fresh request.
+- **Tokens are signed, not encrypted.** The payload is readable by anyone
+  holding the token: user ID, host, scope and timestamps. Never put anything
+  else in it.
+- **The user's identity is as of minting.** A token minted before an account
+  was deleted keeps naming that account until it expires.
+- **Rate limits are per process and in memory.** Behind several web servers,
+  each enforces its own share.
+
+If a sensitive endpoint is ever needed, it needs a revocation check (a
+per-request lookup, or a denylist), and that is a design change, not a new
+route.
 
 ## Flow
 
 1. The app calls lcl `Admin.apiSession(scope)`. The agent forwards it to rem
-   `User.newApiSession(scope)` on the user's home server.
+   `User.newApiSession(scope)` on the user's home server, over the
+   connection authenticated by the device key.
 2. The server returns `lib.ApiSession{token, baseURL, lifetime}`.
-   `baseURL` comes from the same logic as admin-panel links (`adminBaseURL`),
-   so clients need no config for where the API lives. There is deliberately
-   no absolute expiry: a client schedules re-mints from `lifetime` and its own
-   clock, so a skewed device clock can't make it re-mint on every call.
-3. The client sends `Authorization: Bearer foksapi_<base62>` to
-   `<baseURL>/api/v1/...`. It keeps the token in memory, mints again shortly
-   before it expires, and mints again once on a 401.
+   - `token` is a JWT signed with HS256 by one of the host's `api_session`
+     challenge HMAC keys. Its claims are `iss=foks`, `aud=foks-api`,
+     `sub=<uid>`, `hst=<short host id>`, `scope`, `iat` and `exp`, and its
+     header names the key (`kid`).
+   - `baseURL` comes from the same logic as admin-panel links
+     (`adminBaseURL`), so clients need no config for where the API lives.
+   - There is no absolute expiry: a client schedules re-mints from
+     `lifetime` and its own clock, so a skewed device clock doesn't matter.
+3. The client sends `Authorization: Bearer <token>` to `<baseURL>/api/v1/...`.
+   It keeps the token in memory, mints again shortly before it expires, and
+   mints again once on a 401.
 
 In Go, `ApiToken.String()` is redacted, so formatting a token or a session
-never prints the credential; `ApiToken.Bearer()` is the real encoding. A
-token's SHA-256 has its own type, `ApiTokenHash`.
+never prints the credential; `ApiToken.Reveal()` is the real value.
 
-## Storage
+## Keys
 
-- Tokens are stored in `user_api_sessions` (`foks_users` **p13**), keyed by
-  `token_hash = SHA-256(token)`. The token itself is never stored.
-- `scope` is a `lib.ApiScope`. A token works only on routes that require its
-  scope.
-- The lifetime is `apps.web.api_session_duration`, 24h by default. A value
-  below zero is a config error.
-- A user has at most 10 tokens per scope. Minting past that cap deletes the
-  oldest others (never the new one), and a user may mint at most 5 tokens
-  per scope per minute.
-- The user server garbage-collects rows more than an hour past `etime`
-  (`shared.RunApiSessionGC`).
-- This is a separate table from `user_web_sessions`. An API token can never
-  open the admin panel, and an admin cookie can never call `/api`.
+- Tokens are signed with keys of type `api_session` in `challenge_keys`
+  (`foks_users` **p13** adds the enum value). There is no table of tokens.
+- A host's first key is created on its first mint, so existing hosts need no
+  setup step.
+- To rotate, generate a new `api_session` key for the host. New tokens use
+  the newest key; tokens signed with older keys stay valid until they
+  expire, because each names its key.
+- The web server reads each key from the database once and caches it for the
+  life of the process (keys never change). Lookups of keys not yet cached
+  share a small global budget (1/s, burst 10), since the key ID comes from
+  the unverified token.
+- Token lifetime is `apps.web.api_session_duration`, 1 hour by default. A
+  negative value is a config error.
 
 ## HTTP layer (`server/web/app/api`)
 
 `/api/v1` is mounted outside the HTML/CSP middleware. Every request runs
 through these middlewares, in order:
 
-1. **Telemetry.** Records a span and `foks.http.api.duration`, tagged only with
-   the route pattern, a normalized method and the status class. Unknown paths
-   are labelled `unmatched` and CORS preflights `preflight`. It never records
-   a uid, token or raw path.
+1. **Telemetry.** Records a span and `foks.http.api.duration`, tagged only
+   with the route pattern, a normalized method and the status class. Unknown
+   paths are labelled `unmatched` and CORS preflights `preflight`. It never
+   records a uid, token or raw path. A handler that panics is recorded as a
+   500.
 2. **CORS** with `Access-Control-Allow-Origin: *`, exposing `Retry-After` and
    `WWW-Authenticate` to scripts. This is safe because auth is a bearer header
    and never a cookie. It is needed because the desktop renderer is a
    `file://` page (Origin `null`).
 3. **Body limit** of 64 KiB.
 4. **`route(scope, handler)`** wraps each route:
-   - A token verified in the last 30s (and not yet expired) is served from an
-     in-memory cache, without a database lookup. So a deleted or expired
-     token can keep working for up to 30s.
-   - Otherwise the client IP must be under its budget of *refused* tokens
-     (1/s, burst 20) before the database is asked. A flood of made-up tokens
-     gets 429s without touching the connection pool. Only refusals spend this
-     budget, and the IP is the TCP peer; forwarding headers are ignored.
+   - The token is verified with `golang-jwt/jwt/v5`: HS256 only, issuer,
+     audience, scope and expiry (with 30s leeway for clock skew between the
+     server that signed it and the one checking it). The key must belong to
+     the host the token names.
    - Every refusal is the same 401 (`WWW-Authenticate: Bearer`), whatever the
      reason.
-   - A client that hangs up mid-lookup is recorded as 499, not 500.
-   - Each user is rate-limited with a token bucket of 2/s and a burst of 30;
+   - A client that hangs up mid-check is recorded as 499, not 500.
+   - Each user is rate-limited (`golang.org/x/time/rate`, 2/s, burst 30);
      over the limit it gets 429 with `Retry-After`.
+   - Handlers receive the verified caller as a `shared.ApiSessionAuth` value.
 
 Errors are JSON: `{"error": "<code>"}`.
 
-## Known gaps
-
-- Revoking a device does not revoke the API tokens it minted; they live out
-  their lifetime (24h by default). Fine for `Ping` and analytics. Fix before
-  adding any scope that reads or changes user data.
-
 ## Adding a route
 
-1. Add a scope to `ApiScope` in `proto-src/lib/api.snowp` and regenerate.
+1. Check it against "Use it only for non-sensitive endpoints" above.
+2. Add a scope to `ApiScope` in `proto-src/lib/api.snowp` and regenerate.
    Clients mint per scope.
-2. Register it in `api.InitRouter` as `a.route(scope, h)`. Handlers have the
-   type `authedHandler` and receive the verified caller as a
-   `shared.ApiSessionAuth` value, so a handler can't be mounted without a
-   scope check or find its caller missing.
-3. Never put the uid, or anything derived from the request body, into
+3. Register it in `api.InitRouter` as `a.route(scope, h)`. Handlers have the
+   type `authedHandler`; scope any data access to `auth.ShortHostID` and
+   `auth.UID`.
+4. Never put the uid, or anything derived from the request body, into
    telemetry attributes.

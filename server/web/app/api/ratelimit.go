@@ -18,13 +18,6 @@ const (
 	defaultRatePerSec = 2.0
 	defaultBurst      = 30
 
-	// Failed bearer checks per client IP. Charged only when a token is
-	// refused, and checked BEFORE the database lookup, so a flood of made-up
-	// tokens is turned away without touching the pool. Honest clients almost
-	// never fail, so the budget can be small.
-	failRatePerSec = 1.0
-	failBurst      = 20
-
 	// limiterIdle is how long an unused limiter is kept. A full bucket after
 	// this long is indistinguishable from a fresh one, so dropping it is free.
 	limiterIdle = 10 * time.Minute
@@ -34,10 +27,6 @@ type rateKey struct {
 	shid core.ShortHostID
 	uid  proto.UID
 }
-
-// clientAddr is a client's IP as the TCP peer reports it; a distinct type so
-// a uid or token string can't be used as the per-IP key by mistake.
-type clientAddr string
 
 type keyedEntry struct {
 	lim  *rate.Limiter
@@ -103,29 +92,4 @@ func (l *rateLimiter[K]) allow(k K) (time.Duration, bool) {
 		return 0, true
 	}
 	return l.untilToken(lim, now), false
-}
-
-// check reports whether k has a token left, without taking it.
-func (l *rateLimiter[K]) check(k K) (time.Duration, bool) {
-	l.Lock()
-	defer l.Unlock()
-	now := l.now()
-	lim := l.get(k, now)
-	if lim.TokensAt(now) >= 1 {
-		return 0, true
-	}
-	return l.untilToken(lim, now), false
-}
-
-// charge takes a token from k even when none is left, so a client that keeps
-// failing while blocked stays blocked. The debt stops at -burst, so a
-// blocked client is never shut out longer than two bursts' worth of refill.
-func (l *rateLimiter[K]) charge(k K) {
-	l.Lock()
-	defer l.Unlock()
-	now := l.now()
-	lim := l.get(k, now)
-	if lim.TokensAt(now) > -float64(l.burst) {
-		lim.ReserveN(now, 1)
-	}
 }

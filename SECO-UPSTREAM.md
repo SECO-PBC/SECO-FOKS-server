@@ -171,12 +171,13 @@ cubic finding on #21. Real but cosmetic — same error type, one word apart, in 
 subsystem unrelated to anything we are proposing. Not worth the review cost.
 
 **`/api/v1` bearer tokens (API sessions).** Branch `feat/api-sessions`
-(2026-11-18). Short-lived, scoped, hashed bearer tokens are minted over the
-User RPC, and the web server has a JSON `/api/v1` surface that accepts them.
-SECO uses it for opt-in client analytics; design in `docs/api-sessions.md`.
-The change adds:
+(2026-11-18). Short-lived, scoped JWTs (HS256, `golang-jwt/jwt/v5`) are minted
+over the User RPC and signed with a host challenge key; the web server has a
+JSON `/api/v1` surface that accepts them. Intended first for opt-in client
+analytics, and only ever for non-sensitive endpoints: tokens can't be revoked.
+Design and limits in `docs/api-sessions.md`. The change adds:
 
-- `foks_users` **p13** (`user_api_sessions`);
+- `foks_users` **p13** (`challenge_type` value `api_session`);
 - `lib.ApiToken`, `lib.ApiScope` and `lib.ApiSession` (`proto-src/lib/api.snowp`);
 - rem `User.newApiSession @201` and lcl `Admin.apiSession @200`;
 - the `apps.web.api_session_duration` config key;

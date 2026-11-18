@@ -397,7 +397,7 @@ CREATE TABLE passphrase_boxes (
     PRIMARY KEY(short_host_id, uid, ppgen)
 );
 
-CREATE TYPE challenge_type AS ENUM('login', 'user_lookup', 'subkey_box', 'team_vo_bearer_token', 'csrf_protect');
+CREATE TYPE challenge_type AS ENUM('login', 'user_lookup', 'subkey_box', 'team_vo_bearer_token', 'csrf_protect', 'api_session'); -- api_session: p13, fork-only
 
 CREATE TABLE challenge_keys (
     short_host_id SMALLINT NOT NULL,
@@ -1082,25 +1082,6 @@ CREATE TABLE social_invite_msgs (
     FOREIGN KEY(short_host_id, id)
         REFERENCES social_invites(short_host_id, id) ON DELETE CASCADE
 );
-
-
-/*
- * p13 (fork-only; docs/api-sessions.md): bearer tokens for the web server's
- * /api/v1 HTTPS surface. Separate from user_web_sessions so an API token can
- * never open the admin panel and an admin cookie can never call /api.
- */
-CREATE TABLE user_api_sessions (
-    short_host_id SMALLINT NOT NULL,
-    uid BYTEA NOT NULL,
-    token_hash BYTEA NOT NULL,   -- SHA-256 of the bearer token; the token itself is never stored
-    scope SMALLINT NOT NULL,     -- proto lib.ApiScope
-    ctime TIMESTAMP NOT NULL,
-    etime TIMESTAMP NOT NULL,
-    active BOOLEAN NOT NULL,
-    PRIMARY KEY(token_hash)
-);
-CREATE INDEX user_api_sessions_uid_idx ON user_api_sessions(short_host_id, uid, scope, ctime);
-CREATE INDEX user_api_sessions_etime_idx ON user_api_sessions(etime);
 
 
 INSERT INTO schema_patches (id, ctime) VALUES (1, NOW());

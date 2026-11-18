@@ -7,16 +7,16 @@ import (
 	"github.com/foks-proj/go-snowpack-rpc/rpc"
 )
 
-type ApiToken [32]byte
-type ApiTokenInternal__ [32]byte
+type ApiToken string
+type ApiTokenInternal__ string
 
 func (a ApiToken) Export() *ApiTokenInternal__ {
-	tmp := (([32]byte)(a))
+	tmp := ((string)(a))
 	return ((*ApiTokenInternal__)(&tmp))
 }
 func (a ApiTokenInternal__) Import() ApiToken {
-	tmp := ([32]byte)(a)
-	return ApiToken((func(x *[32]byte) (ret [32]byte) {
+	tmp := (string)(a)
+	return ApiToken((func(x *string) (ret string) {
 		if x == nil {
 			return ret
 		}
@@ -39,7 +39,7 @@ func (a *ApiToken) Decode(dec rpc.Decoder) error {
 }
 
 func (a ApiToken) Bytes() []byte {
-	return (a)[:]
+	return nil
 }
 
 type ApiScope int

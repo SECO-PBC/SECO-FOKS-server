@@ -7,6 +7,7 @@ package lib
 // over the User RPC, then call the web server with them.
 
 import (
+	"encoding/hex"
 	"net/http"
 	"net/url"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-foks/server/shared"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
 )
 
@@ -40,6 +42,25 @@ func apiPing(t *testing.T, base proto.URLString, auth string) *http.Response {
 	return res
 }
 
+// forge signs claims the way the server does, with a key the test picks, so
+// the test can probe every way a token can be wrong.
+type forgeArgs struct {
+	method jwt.SigningMethod
+	key    any
+	kid    string
+	claims jwt.MapClaims
+}
+
+func forge(t *testing.T, a forgeArgs) string {
+	tok := jwt.NewWithClaims(a.method, a.claims)
+	if a.kid != "" {
+		tok.Header["kid"] = a.kid
+	}
+	s, err := tok.SignedString(a.key)
+	require.NoError(t, err)
+	return s
+}
+
 func TestApiSessionPing(t *testing.T) {
 	m := testMetaContext()
 	tu := GenerateNewTestUser(t)
@@ -49,36 +70,26 @@ func TestApiSessionPing(t *testing.T) {
 	sess, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
 	require.NoError(t, err)
 	require.NotEmpty(t, sess.BaseURL)
-	require.Equal(t, 24*time.Hour, sess.Lifetime.Import())
+	require.Equal(t, time.Hour, sess.Lifetime.Import())
 
-	bearer := "Bearer " + sess.Token.Bearer()
+	bearer := "Bearer " + sess.Token.Reveal()
 
 	res := apiPing(t, sess.BaseURL, bearer)
 	require.Equal(t, http.StatusNoContent, res.StatusCode)
 	require.Equal(t, "*", res.Header.Get("Access-Control-Allow-Origin"))
 
-	// The scheme is case-insensitive.
-	res = apiPing(t, sess.BaseURL, "bearer "+sess.Token.Bearer())
-	require.Equal(t, http.StatusNoContent, res.StatusCode)
-
 	// Every refusal is the same 401.
 	for _, bad := range []string{
 		"",
 		"Bearer",
-		"Bearer foksapi_",
 		"Bearer garbage",
-		"Basic " + sess.Token.Bearer(),
+		"Bearer a.b.c",
+		"Basic " + sess.Token.Reveal(),
 	} {
 		res = apiPing(t, sess.BaseURL, bad)
 		require.Equal(t, http.StatusUnauthorized, res.StatusCode, "auth %q", bad)
 		require.Contains(t, res.Header.Get("WWW-Authenticate"), "Bearer")
 	}
-
-	// A well-formed token the server never minted.
-	var stranger proto.ApiToken
-	stranger[0] = 1
-	res = apiPing(t, sess.BaseURL, "Bearer "+stranger.Bearer())
-	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 
 	// An admin-panel web session is not an API token.
 	adminURL, err := ucli.NewWebAdminPanelURL(m.Ctx())
@@ -88,8 +99,6 @@ func TestApiSessionPing(t *testing.T) {
 	webSess := u.Query().Get("s")
 	require.NotEmpty(t, webSess)
 	res = apiPing(t, sess.BaseURL, "Bearer "+webSess)
-	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
-	res = apiPing(t, sess.BaseURL, "Bearer foksapi_"+webSess)
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 
 	// Unknown routes are JSON 404s, not the HTML app.
@@ -111,171 +120,82 @@ func TestApiSessionPing(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, res.StatusCode)
 	require.Equal(t, "*", res.Header.Get("Access-Control-Allow-Origin"))
 	require.Contains(t, res.Header.Get("Access-Control-Allow-Headers"), "Authorization")
-}
-
-// backdateApiSessions moves the user's tokens a couple of minutes into the
-// past, so the mint throttle (5 per scope per minute) doesn't trip while a
-// test mints a batch; their relative order is kept.
-func backdateApiSessions(t *testing.T, m shared.MetaContext, uid proto.UID) {
-	db, err := m.G().Db(m.Ctx(), shared.DbTypeUsers)
-	require.NoError(t, err)
-	defer db.Release()
-	_, err = db.Exec(m.Ctx(),
-		`UPDATE user_api_sessions SET ctime = ctime - INTERVAL '2 minutes'
-		 WHERE short_host_id = $1 AND uid = $2`,
-		int(m.G().ShortHostID()), uid.ExportToDB(),
-	)
-	require.NoError(t, err)
-}
-
-func TestApiSessionScopeExpiryAndCap(t *testing.T) {
-	m := testMetaContext()
-	tu := GenerateNewTestUser(t)
-	ucli, closeFn := tu.newUserCertAndClient(t, m.Ctx())
-	defer closeFn()
-
-	db, err := m.G().Db(m.Ctx(), shared.DbTypeUsers)
-	require.NoError(t, err)
-	defer db.Release()
-	rowExists := func(tok proto.ApiToken) bool {
-		var n int
-		err := db.QueryRow(m.Ctx(),
-			`SELECT COUNT(*) FROM user_api_sessions WHERE token_hash = $1`,
-			tok.Hash().ExportToDB(),
-		).Scan(&n)
-		require.NoError(t, err)
-		return n == 1
-	}
-
-	// A token is good only for the scope it was minted with.
-	analytics, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_ClientAnalytics)
-	require.NoError(t, err)
-	require.Equal(t, 24*time.Hour, analytics.Lifetime.Import())
-	res := apiPing(t, analytics.BaseURL, "Bearer "+analytics.Token.Bearer())
-	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
+	require.Contains(t, res.Header.Get("Access-Control-Expose-Headers"), "Retry-After")
 
 	// Unknown scopes are refused at mint time.
 	_, err = ucli.NewApiSession(m.Ctx(), proto.ApiScope(99))
 	require.Error(t, err)
-
-	// Expired tokens are refused. (Not pinged before expiring: a verified
-	// token is cached for up to 30s, by design.)
-	exp, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
-	require.NoError(t, err)
-	_, err = db.Exec(m.Ctx(),
-		`UPDATE user_api_sessions SET etime = NOW() - INTERVAL '1 minute' WHERE token_hash = $1`,
-		exp.Token.Hash().ExportToDB(),
-	)
-	require.NoError(t, err)
-	res = apiPing(t, exp.BaseURL, "Bearer "+exp.Token.Bearer())
-	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
-
-	// Minting past the per-scope cap deletes the oldest others; the other
-	// scope's token is untouched.
-	backdateApiSessions(t, m, tu.uid)
-	first, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
-	require.NoError(t, err)
-	var last proto.ApiSession
-	for i := range 10 {
-		if i%4 == 0 {
-			backdateApiSessions(t, m, tu.uid)
-		}
-		time.Sleep(2 * time.Millisecond)
-		last, err = ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
-		require.NoError(t, err)
-	}
-	require.False(t, rowExists(first.Token))
-	require.False(t, rowExists(exp.Token))
-	require.True(t, rowExists(analytics.Token))
-	res = apiPing(t, first.BaseURL, "Bearer "+first.Token.Bearer())
-	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
-	res = apiPing(t, last.BaseURL, "Bearer "+last.Token.Bearer())
-	require.Equal(t, http.StatusNoContent, res.StatusCode)
-
-	var nPing int
-	err = db.QueryRow(m.Ctx(),
-		`SELECT COUNT(*) FROM user_api_sessions
-		 WHERE short_host_id = $1 AND uid = $2 AND scope = $3`,
-		int(m.G().ShortHostID()), tu.uid.ExportToDB(), int(proto.ApiScope_Ping),
-	).Scan(&nPing)
-	require.NoError(t, err)
-	require.Equal(t, 10, nPing)
-
-	// GC removes rows past etime + margin, and leaves the rest.
-	_, err = db.Exec(m.Ctx(),
-		`UPDATE user_api_sessions SET etime = NOW() - INTERVAL '1 minute' WHERE token_hash = $1`,
-		analytics.Token.Hash().ExportToDB(),
-	)
-	require.NoError(t, err)
-	_, err = shared.DeleteExpiredApiSessions(m, time.Hour, 1000000)
-	require.NoError(t, err)
-	require.True(t, rowExists(analytics.Token), "expired a minute ago is inside the GC margin")
-	_, err = db.Exec(m.Ctx(),
-		`UPDATE user_api_sessions SET etime = NOW() - INTERVAL '2 hours' WHERE token_hash = $1`,
-		analytics.Token.Hash().ExportToDB(),
-	)
-	require.NoError(t, err)
-	_, err = shared.DeleteExpiredApiSessions(m, time.Hour, 1000000)
-	require.NoError(t, err)
-	require.False(t, rowExists(analytics.Token))
-	require.True(t, rowExists(last.Token))
 }
 
-func TestApiSessionMintThrottle(t *testing.T) {
+func TestApiSessionRejectsBadTokens(t *testing.T) {
 	m := testMetaContext()
 	tu := GenerateNewTestUser(t)
 	ucli, closeFn := tu.newUserCertAndClient(t, m.Ctx())
 	defer closeFn()
 
-	for range 5 {
-		_, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
-		require.NoError(t, err)
-	}
-	_, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
-	require.Error(t, err)
-	require.Equal(t, core.RateLimitError{}, err)
-
-	// The throttle is per scope.
-	_, err = ucli.NewApiSession(m.Ctx(), proto.ApiScope_ClientAnalytics)
+	// A real mint first, so the host has an api_session key.
+	sess, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
 	require.NoError(t, err)
-
-	// And it lifts once the minute has passed.
-	backdateApiSessions(t, m, tu.uid)
-	_, err = ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
-	require.NoError(t, err)
-}
-
-// Runs last among the API tests: it exhausts 127.0.0.1's budget of refused
-// tokens, which would turn later uncached lookups from this IP into 429s.
-func TestApiSessionZFailGate(t *testing.T) {
-	m := testMetaContext()
-	tu := GenerateNewTestUser(t)
-	ucli, closeFn := tu.newUserCertAndClient(t, m.Ctx())
-	defer closeFn()
-
-	good, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
-	require.NoError(t, err)
-	bearer := "Bearer " + good.Token.Bearer()
-	res := apiPing(t, good.BaseURL, bearer)
+	res := apiPing(t, sess.BaseURL, "Bearer "+sess.Token.Reveal())
 	require.Equal(t, http.StatusNoContent, res.StatusCode)
 
-	var stranger proto.ApiToken
-	stranger[1] = 2
-	got429 := false
-	for range 40 {
-		res = apiPing(t, good.BaseURL, "Bearer "+stranger.Bearer())
-		if res.StatusCode == http.StatusTooManyRequests {
-			got429 = true
-			require.NotEmpty(t, res.Header.Get("Retry-After"))
-			require.Contains(t, res.Header.Get("Access-Control-Expose-Headers"), "Retry-After")
-			break
+	keyID, key, err := shared.LookupLatestChallengeKey(m, shared.HmacKeyApiSession)
+	require.NoError(t, err)
+	kid := hex.EncodeToString(keyID[:])
+	sub, err := tu.uid.StringErr()
+	require.NoError(t, err)
+	now := time.Now()
+	good := func() jwt.MapClaims {
+		return jwt.MapClaims{
+			"iss":   "foks",
+			"aud":   []string{"foks-api"},
+			"sub":   sub,
+			"scope": "Ping",
+			"hst":   int(m.G().ShortHostID()),
+			"iat":   now.Unix(),
+			"exp":   now.Add(time.Hour).Unix(),
 		}
-		require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 	}
-	require.True(t, got429, "a flood of refused tokens is throttled before the DB")
+	with := func(k string, v any) jwt.MapClaims {
+		c := good()
+		if v == nil {
+			delete(c, k)
+		} else {
+			c[k] = v
+		}
+		return c
+	}
+	ping := func(tok string) int {
+		return apiPing(t, sess.BaseURL, "Bearer "+tok).StatusCode
+	}
 
-	// A token verified moments ago is served from the cache, so it still
-	// works while its IP is blocked for unknown tokens.
-	res = apiPing(t, good.BaseURL, bearer)
-	require.Equal(t, http.StatusNoContent, res.StatusCode)
+	// The test's own signing matches the server's: a correct forgery passes.
+	require.Equal(t, http.StatusNoContent, ping(forge(t, forgeArgs{jwt.SigningMethodHS256, key[:], kid, good()})))
+
+	var otherKey [32]byte
+	require.NoError(t, core.RandomFill(otherKey[:]))
+	var otherKid [16]byte
+	require.NoError(t, core.RandomFill(otherKid[:]))
+	real := sess.Token.Reveal()
+
+	for name, tok := range map[string]string{
+		"wrong key":           forge(t, forgeArgs{jwt.SigningMethodHS256, otherKey[:], kid, good()}),
+		"unknown kid":         forge(t, forgeArgs{jwt.SigningMethodHS256, key[:], hex.EncodeToString(otherKid[:]), good()}),
+		"no kid":              forge(t, forgeArgs{jwt.SigningMethodHS256, key[:], "", good()}),
+		"alg none":            forge(t, forgeArgs{jwt.SigningMethodNone, jwt.UnsafeAllowNoneSignatureType, kid, good()}),
+		"HS512":               forge(t, forgeArgs{jwt.SigningMethodHS512, key[:], kid, good()}),
+		"expired":             forge(t, forgeArgs{jwt.SigningMethodHS256, key[:], kid, with("exp", now.Add(-time.Minute).Unix())}),
+		"no expiry":           forge(t, forgeArgs{jwt.SigningMethodHS256, key[:], kid, with("exp", nil)}),
+		"other scope":         forge(t, forgeArgs{jwt.SigningMethodHS256, key[:], kid, with("scope", "ClientAnalytics")}),
+		"other audience":      forge(t, forgeArgs{jwt.SigningMethodHS256, key[:], kid, with("aud", []string{"elsewhere"})}),
+		"other issuer":        forge(t, forgeArgs{jwt.SigningMethodHS256, key[:], kid, with("iss", "elsewhere")}),
+		"host not its key's":  forge(t, forgeArgs{jwt.SigningMethodHS256, key[:], kid, with("hst", int(m.G().ShortHostID())+1000)}),
+		"subject not a uid":   forge(t, forgeArgs{jwt.SigningMethodHS256, key[:], kid, with("sub", "nobody")}),
+		"tampered after sign": real[:len(real)-4] + "AAAA",
+	} {
+		require.Equal(t, http.StatusUnauthorized, ping(tok), name)
+	}
+
+	// Inside the 30s leeway for clock skew between servers, still good.
+	require.Equal(t, http.StatusNoContent, ping(forge(t, forgeArgs{jwt.SigningMethodHS256, key[:], kid, with("exp", now.Add(-10*time.Second).Unix())})))
 }

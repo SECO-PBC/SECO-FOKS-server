@@ -58,11 +58,9 @@ func (s *UserServer) Setup(m shared.MetaContext) error {
 
 // RunBackgroundLoops starts the GC of expired team VO bearer tokens. The user
 // server is one of the two that mint them (reg is the other) and runs on every
-// deployment, so one cleaner covers both. It also GCs expired /api/v1 bearer
-// tokens, which only the user server mints (fork-only; docs/api-sessions.md).
+// deployment, so one cleaner covers both.
 func (s *UserServer) RunBackgroundLoops(m shared.MetaContext, _ chan<- error) error {
 	go shared.RunVOBearerTokenGC(m)
-	go shared.RunApiSessionGC(m)
 	return nil
 }
 

@@ -4,8 +4,9 @@
 @0x98674936639570cb;
 
 // Fork-only (docs/api-sessions.md): bearer tokens for the web server's
-// /api/v1 HTTPS surface, minted over the authenticated User protocol.
-typedef ApiToken = Blob(32);
+// /api/v1 HTTPS surface, minted over the authenticated User protocol. A
+// signed JWT (HS256), verified without any per-token server state.
+typedef ApiToken = Text;
 
 // What an ApiToken may be used for. Each /api/v1 route requires exactly one
 // scope, and a token is good only for the scope it was minted with.

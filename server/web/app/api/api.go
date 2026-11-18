@@ -7,12 +7,14 @@
 // Clients authenticate with `Authorization: Bearer <token>`, where the token
 // was minted over the authenticated User RPC (newApiSession) for one
 // proto.ApiScope. Every route requires exactly one scope.
+//
+// FOR NON-SENSITIVE ENDPOINTS ONLY (analytics, health): tokens can't be
+// revoked before they expire. See docs/api-sessions.md before adding a route.
 package api
 
 import (
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,20 +40,18 @@ const (
 type authedHandler func(w http.ResponseWriter, r *http.Request, auth shared.ApiSessionAuth)
 
 type api struct {
-	g       *shared.GlobalContext
-	limiter *rateLimiter[rateKey]    // per user, every authenticated request
-	fails   *rateLimiter[clientAddr] // per client IP, refused tokens only
-	cache   *authCache
+	g        *shared.GlobalContext
+	verifier *shared.ApiTokenVerifier
+	limiter  *rateLimiter[rateKey] // per user, every authenticated request
 }
 
 // InitRouter mounts /api/v1 on mux. It must not sit under the HTML/CSP
 // middleware the rest of the web app uses.
 func InitRouter(g *shared.GlobalContext, mux chi.Router) {
 	a := &api{
-		g:       g,
-		limiter: newRateLimiter[rateKey](defaultRatePerSec, defaultBurst, time.Now),
-		fails:   newRateLimiter[clientAddr](failRatePerSec, failBurst, time.Now),
-		cache:   newAuthCache(time.Now),
+		g:        g,
+		verifier: shared.NewApiTokenVerifier(g),
+		limiter:  newRateLimiter[rateKey](defaultRatePerSec, defaultBurst, time.Now),
 	}
 	mux.Route(Prefix, func(r chi.Router) {
 		r.Use(a.telemetry, cors, limitBody)
@@ -72,50 +72,36 @@ func ping(w http.ResponseWriter, _ *http.Request, _ shared.ApiSessionAuth) {
 
 // route authenticates the bearer token for scope, rate-limits its user, and
 // only then calls h. Every refusal is the same 401, whatever the reason.
-//
-// The database is consulted only for a token not verified in the last
-// authCacheTTL, and only while the client's IP is under its budget of
-// refused tokens -- so neither a flood of made-up tokens nor a runaway client
-// over its per-user limit costs a query per request.
+// Verifying a token is a signature check against a cached key, so a flood
+// of bad tokens costs no database work (shared.ApiTokenVerifier).
 func (a *api) route(scope proto.ApiScope, h authedHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
-		tok, ok := bearerToken(r)
+		raw, ok := bearerToken(r)
 		if !ok {
-			a.refuse(w, ip)
+			unauthorized(w)
 			return
 		}
-		key := authCacheKey{hash: tok.Hash(), scope: scope}
-		auth, hit := a.cache.get(key)
-		if !hit {
-			if wait, ok := a.fails.check(ip); !ok {
-				tooMany(w, wait)
-				return
-			}
-			m := shared.NewMetaContext(r.Context(), a.g)
-			found, err := shared.CheckApiSession(m, key.hash, scope)
-			switch {
-			case errors.As(err, &shared.ApiSessionNotFoundError{}):
-				a.refuse(w, ip)
-				return
-			case err != nil && r.Context().Err() != nil:
-				// The client hung up mid-lookup: not a server fault.
-				w.WriteHeader(statusClientClosed)
-				return
-			case err != nil:
-				// No uid or token in the log line: only the failure.
-				m.Warnw("api.route", "err", err)
-				writeErr(w, http.StatusInternalServerError, "internal")
-				return
-			}
-			auth = *found
-			a.cache.put(key, auth)
+		m := shared.NewMetaContext(r.Context(), a.g)
+		auth, err := a.verifier.Verify(m, raw, scope)
+		switch {
+		case errors.As(err, &shared.ApiSessionNotFoundError{}):
+			unauthorized(w)
+			return
+		case err != nil && r.Context().Err() != nil:
+			// The client hung up mid-lookup: not a server fault.
+			w.WriteHeader(statusClientClosed)
+			return
+		case err != nil:
+			// No uid or token in the log line: only the failure.
+			m.Warnw("api.route", "err", err)
+			writeErr(w, http.StatusInternalServerError, "internal")
+			return
 		}
 		if wait, ok := a.limiter.allow(rateKey{shid: auth.ShortHostID, uid: auth.UID}); !ok {
 			tooMany(w, wait)
 			return
 		}
-		h(w, r, auth)
+		h(w, r, *auth)
 	}
 }
 
@@ -123,38 +109,20 @@ func (a *api) route(scope proto.ApiScope, h authedHandler) http.HandlerFunc {
 // Recorded as 4xx, so hang-ups never read as server errors.
 const statusClientClosed = 499
 
-func (a *api) refuse(w http.ResponseWriter, ip clientAddr) {
-	a.fails.charge(ip)
-	unauthorized(w)
-}
-
-// clientIP is the TCP peer. Forwarding headers are ignored: the web server
-// faces the internet directly, and a client could set them to anything.
-func clientIP(r *http.Request) clientAddr {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return clientAddr(r.RemoteAddr)
-	}
-	return clientAddr(host)
-}
-
 func tooMany(w http.ResponseWriter, wait time.Duration) {
 	secs := max(1, int((wait+time.Second-1)/time.Second))
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
 	writeErr(w, http.StatusTooManyRequests, "rate_limited")
 }
 
-func bearerToken(r *http.Request) (*proto.ApiToken, bool) {
+func bearerToken(r *http.Request) (string, bool) {
 	h := r.Header.Get("Authorization")
 	scheme, val, ok := strings.Cut(h, " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
-		return nil, false
+	val = strings.TrimSpace(val)
+	if !ok || !strings.EqualFold(scheme, "Bearer") || val == "" {
+		return "", false
 	}
-	tok, err := proto.ParseApiToken(strings.TrimSpace(val))
-	if err != nil {
-		return nil, false
-	}
-	return tok, true
+	return val, true
 }
 
 func unauthorized(w http.ResponseWriter) {
@@ -200,8 +168,15 @@ func (a *api) telemetry(next http.Handler) http.Handler {
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		r = r.WithContext(ctx)
 		defer func() {
+			// A panicking handler would otherwise be recorded with whatever
+			// status it had written -- usually none, i.e. 200. Record a 500
+			// and let the panic continue to net/http.
+			p := recover()
 			status := ww.Status()
-			if status == 0 {
+			switch {
+			case p != nil:
+				status = http.StatusInternalServerError
+			case status == 0:
 				status = http.StatusOK
 			}
 			// Fixed labels for the two cases chi would both report as the
@@ -218,6 +193,9 @@ func (a *api) telemetry(next http.Handler) http.Handler {
 				}
 			}
 			t.FinishHTTPAPIRequest(ctx, span, method, route, status, time.Since(start))
+			if p != nil {
+				panic(p)
+			}
 		}()
 		next.ServeHTTP(ww, r)
 	})

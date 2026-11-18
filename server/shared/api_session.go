@@ -4,48 +4,45 @@
 package shared
 
 import (
+	"encoding/hex"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
-	"github.com/jackc/pgx/v5"
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/time/rate"
 )
 
 // Fork-only (docs/api-sessions.md): bearer tokens for the web server's
 // /api/v1 HTTPS surface.
 //
 // A logged-in client mints a token over the authenticated User RPC
-// (newApiSession) and sends it as `Authorization: Bearer <token>`. Tokens are
-// scoped (proto.ApiScope), short-lived, and stored only as a SHA-256 hash in
-// user_api_sessions -- a table separate from user_web_sessions, so an API token
-// can never open the admin panel and an admin cookie can never call /api.
+// (newApiSession) and sends it as `Authorization: Bearer <token>`. The token
+// is a JWT (HS256) signed with one of the host's challenge HMAC keys; the web
+// server verifies it with golang-jwt and keeps no per-token state.
+//
+// FOR NON-SENSITIVE ENDPOINTS ONLY (analytics, health). By design a token
+// cannot be revoked: it stays valid until it expires, even if the device that
+// minted it is revoked or the account is deleted. See the doc for the full
+// list of what this does not protect against.
 
 const (
-	// maxApiSessionsPerScope caps live tokens per user and scope. apiFetch
-	// caches a token per scope for its lifetime, so each running client holds
-	// one; ten covers a user's devices and restarts. Minting past the cap
-	// DELETES the oldest others (never the one being minted), so the table
-	// stays bounded however a client misbehaves.
-	maxApiSessionsPerScope = 10
+	// HmacKeyApiSession signs /api/v1 tokens. Created on a host's first mint
+	// (ensureApiSessionKey), so existing deployments need no migration.
+	HmacKeyApiSession HmacKeyType = "api_session"
 
-	// maxApiMintsPerMinute throttles newApiSession per user and scope. An
-	// honest client mints about once a day per scope; a client stuck in a
-	// mint-then-401 loop is refused here instead of costing a write each time.
-	maxApiMintsPerMinute = 5
+	apiTokenIssuer   = "foks"
+	apiTokenAudience = "foks-api"
 
-	apiSessionGCStartDelay   = 7 * time.Minute
-	apiSessionGCInterval     = time.Hour
-	apiSessionGCBatch        = 10000
-	apiSessionGCBatchTimeout = 60 * time.Second
-
-	// apiSessionGCMargin keeps expired rows a little past etime, so a check
-	// that began just before expiry never races its row's delete.
-	apiSessionGCMargin = time.Hour
+	// apiTokenLeeway tolerates clock skew between the user server that
+	// signed a token and the web server that checks it.
+	apiTokenLeeway = 30 * time.Second
 )
 
 // ApiSessionNotFoundError is returned for every reason a bearer token is
-// refused (unknown, expired, revoked, wrong scope, user gone), so the HTTP
+// refused (malformed, forged, expired, wrong scope, unknown key), so the HTTP
 // layer cannot leak which.
 type ApiSessionNotFoundError struct{}
 
@@ -55,7 +52,12 @@ func (ApiSessionNotFoundError) Error() string { return "API session not found" }
 type ApiSessionAuth struct {
 	ShortHostID core.ShortHostID
 	UID         proto.UID
-	Expires     time.Time
+}
+
+type apiClaims struct {
+	Scope string `json:"scope"`
+	Host  int    `json:"hst"`
+	jwt.RegisteredClaims
 }
 
 // NewApiSession mints a bearer token for the user and host in m, good for
@@ -82,184 +84,170 @@ func NewApiSession(
 	if err != nil {
 		return nil, err
 	}
-
-	var tok proto.ApiToken
-	err = core.RandomFill(tok[:])
-	if err != nil {
-		return nil, err
-	}
 	dur, err := wcfg.ApiSessionDuration()
 	if err != nil {
 		return nil, err
 	}
-	shid := int(m.ShortHostID())
-	uidDB := uid.ExportToDB()
-	hash := tok.Hash()
-
-	err = RetryTxUserDB(m, "NewApiSession", func(m MetaContext, tx pgx.Tx) error {
-		var recent int
-		err := tx.QueryRow(
-			m.Ctx(),
-			`SELECT COUNT(*) FROM user_api_sessions
-			 WHERE short_host_id = $1 AND uid = $2 AND scope = $3
-			   AND ctime > NOW() - INTERVAL '1 minute'`,
-			shid, uidDB, int(scope),
-		).Scan(&recent)
-		if err != nil {
-			return err
-		}
-		if recent >= maxApiMintsPerMinute {
-			return core.RateLimitError{}
-		}
-		_, err = tx.Exec(
-			m.Ctx(),
-			`INSERT INTO user_api_sessions
-			   (short_host_id, uid, token_hash, scope, ctime, etime, active)
-			 VALUES($1, $2, $3, $4, NOW(), NOW() + $5, true)`,
-			shid, uidDB, hash.ExportToDB(), int(scope), dur,
-		)
-		if err != nil {
-			return err
-		}
-		// Keep the new token plus the newest maxApiSessionsPerScope-1 others.
-		// The new one is excluded by hash, not by ctime: NOW() is the
-		// transaction's start, so a slow concurrent mint could otherwise
-		// look oldest and retire the token it is about to return.
-		_, err = tx.Exec(
-			m.Ctx(),
-			`DELETE FROM user_api_sessions
-			 WHERE short_host_id = $1 AND uid = $2 AND scope = $3
-			   AND token_hash <> $4
-			   AND token_hash NOT IN (
-			     SELECT token_hash FROM user_api_sessions
-			     WHERE short_host_id = $1 AND uid = $2 AND scope = $3
-			       AND token_hash <> $4
-			     ORDER BY ctime DESC
-			     LIMIT $5)`,
-			shid, uidDB, int(scope), hash.ExportToDB(), maxApiSessionsPerScope-1,
-		)
-		return err
-	})
+	sub, err := uid.StringErr()
 	if err != nil {
 		return nil, err
 	}
-
+	keyID, key, err := ensureApiSessionKey(m)
+	if err != nil {
+		return nil, err
+	}
+	now := m.Now()
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, apiClaims{
+		Scope: scope.String(),
+		Host:  int(m.ShortHostID()),
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    apiTokenIssuer,
+			Subject:   sub,
+			Audience:  jwt.ClaimStrings{apiTokenAudience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(dur)),
+		},
+	})
+	tok.Header["kid"] = hex.EncodeToString(keyID[:])
+	signed, err := tok.SignedString(key[:])
+	if err != nil {
+		return nil, err
+	}
 	return &proto.ApiSession{
-		Token:    tok,
+		Token:    proto.ApiToken(signed),
 		BaseURL:  baseURL,
 		Lifetime: proto.ExportDurationMilli(dur),
 	}, nil
 }
 
-// CheckApiSession resolves a token (by its hash) to its user, provided it is
-// active, unexpired, minted for scope, and its user is still in use. Any
-// failure to match is ApiSessionNotFoundError.
-func CheckApiSession(
-	m MetaContext,
-	hash proto.ApiTokenHash,
-	scope proto.ApiScope,
-) (
-	*ApiSessionAuth,
-	error,
-) {
-	db, err := m.Db(DbTypeUsers)
+// ensureApiSessionKey returns the host's newest api_session key, creating the
+// first one if the host has none. Two first mints racing each create a key;
+// both stay valid, since tokens name their key.
+func ensureApiSessionKey(m MetaContext) (*proto.HMACKeyID, *proto.HMACKey, error) {
+	id, key, err := LookupLatestChallengeKey(m, HmacKeyApiSession)
+	if errors.As(err, new(core.BadServerDataError)) {
+		err = GenerateSomeNewChallengeHMACKeys(m, []HmacKeyType{HmacKeyApiSession})
+		if err != nil {
+			return nil, nil, err
+		}
+		id, key, err = LookupLatestChallengeKey(m, HmacKeyApiSession)
+	}
+	return id, key, err
+}
+
+type apiKeyRef struct {
+	host core.ShortHostID
+	id   proto.HMACKeyID
+}
+
+// ApiTokenVerifier checks /api/v1 tokens. Keys are immutable once created, so
+// each one is read from the database once and then cached for the life of
+// the process. Lookups of keys not yet cached share one small global budget:
+// key IDs come from the (unverified) token, so without it a flood of tokens
+// naming made-up keys would cost a query each.
+type ApiTokenVerifier struct {
+	sync.Mutex
+	g       *GlobalContext
+	keys    map[apiKeyRef]proto.HMACKey
+	lookups *rate.Limiter
+}
+
+func NewApiTokenVerifier(g *GlobalContext) *ApiTokenVerifier {
+	return &ApiTokenVerifier{
+		g:       g,
+		keys:    make(map[apiKeyRef]proto.HMACKey),
+		lookups: rate.NewLimiter(1, 10),
+	}
+}
+
+func (v *ApiTokenVerifier) key(m MetaContext, ref apiKeyRef) (*proto.HMACKey, error) {
+	v.Lock()
+	key, ok := v.keys[ref]
+	v.Unlock()
+	if ok {
+		return &key, nil
+	}
+	if !v.lookups.Allow() {
+		return nil, ApiSessionNotFoundError{}
+	}
+	mh, err := m.WithShortHostID(ref.host)
+	if err != nil {
+		return nil, ApiSessionNotFoundError{}
+	}
+	db, err := mh.Db(DbTypeUsers)
 	if err != nil {
 		return nil, err
 	}
 	defer db.Release()
-	var shid int
-	var uidRaw []byte
-	var etime time.Time
-	err = db.QueryRow(
-		m.Ctx(),
-		`SELECT s.short_host_id, s.uid, s.etime
-		 FROM user_api_sessions AS s
-		 JOIN users AS u USING(short_host_id, uid)
-		 JOIN names AS n USING(short_host_id, name_ascii)
-		 WHERE s.token_hash = $1 AND s.scope = $2
-		   AND s.active = true AND s.etime > NOW()
-		   AND n.state = 'in_use'`,
-		hash.ExportToDB(),
-		int(scope),
-	).Scan(&shid, &uidRaw, &etime)
-	if errors.Is(err, pgx.ErrNoRows) {
+	k, err := LookupHMACKeyByID(mh, db, ref.id, HmacKeyApiSession)
+	if errors.As(err, new(core.KeyNotFoundError)) {
 		return nil, ApiSessionNotFoundError{}
 	}
 	if err != nil {
 		return nil, err
 	}
-	var uid proto.UID
-	err = uid.ImportFromDB(uidRaw)
+	v.Lock()
+	v.keys[ref] = *k
+	v.Unlock()
+	return k, nil
+}
+
+// Verify resolves a bearer token to its user, provided it is correctly signed
+// by a key of the host it names, unexpired, and minted for scope. Any failure
+// to match is ApiSessionNotFoundError; other errors are server-side (e.g. the
+// database) and the caller should answer 5xx.
+func (v *ApiTokenVerifier) Verify(
+	m MetaContext,
+	raw string,
+	scope proto.ApiScope,
+) (
+	*ApiSessionAuth,
+	error,
+) {
+	var serverErr error
+	var claims apiClaims
+	_, err := jwt.ParseWithClaims(raw, &claims,
+		func(t *jwt.Token) (any, error) {
+			kid, _ := t.Header["kid"].(string)
+			b, err := hex.DecodeString(kid)
+			var ref apiKeyRef
+			if err != nil || len(b) != len(ref.id) || claims.Host <= 0 {
+				return nil, ApiSessionNotFoundError{}
+			}
+			copy(ref.id[:], b)
+			ref.host = core.ShortHostID(claims.Host)
+			key, err := v.key(m, ref)
+			if err != nil {
+				if !errors.As(err, new(ApiSessionNotFoundError)) {
+					serverErr = err
+				}
+				return nil, err
+			}
+			return key[:], nil
+		},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuer(apiTokenIssuer),
+		jwt.WithAudience(apiTokenAudience),
+		jwt.WithExpirationRequired(),
+		jwt.WithLeeway(apiTokenLeeway),
+		jwt.WithTimeFunc(m.Now),
+	)
+	if serverErr != nil {
+		return nil, serverErr
+	}
+	if err != nil || claims.Scope != scope.String() {
+		return nil, ApiSessionNotFoundError{}
+	}
+	eid, err := proto.ImportEntityIDFromString(claims.Subject)
 	if err != nil {
-		return nil, err
+		return nil, ApiSessionNotFoundError{}
+	}
+	uid, err := eid.ToUID()
+	if err != nil {
+		return nil, ApiSessionNotFoundError{}
 	}
 	return &ApiSessionAuth{
-		ShortHostID: core.ShortHostID(shid),
+		ShortHostID: core.ShortHostID(claims.Host),
 		UID:         uid,
-		Expires:     etime,
 	}, nil
-}
-
-// DeleteExpiredApiSessions deletes up to limit API sessions whose etime is
-// more than grace in the past, reporting how many it deleted. The cutoff is
-// computed in SQL from NOW(), the same clock that wrote etime, so neither a
-// skewed process clock nor a non-UTC process time zone (pgx sends a TIMESTAMP
-// parameter's wall clock) can shift it.
-func DeleteExpiredApiSessions(m MetaContext, grace time.Duration, limit int) (int, error) {
-	db, err := m.Db(DbTypeUsers)
-	if err != nil {
-		return 0, err
-	}
-	defer db.Release()
-	tag, err := db.Exec(m.Ctx(),
-		`DELETE FROM user_api_sessions
-		 WHERE token_hash IN (
-		   SELECT token_hash FROM user_api_sessions
-		   WHERE etime < NOW() - $1::interval
-		   LIMIT $2)`,
-		grace,
-		limit,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return int(tag.RowsAffected()), nil
-}
-
-func gcExpiredApiSessions(m MetaContext) (int, error) {
-	total := 0
-	for {
-		mb, cancel := m.WithContextTimeout(apiSessionGCBatchTimeout)
-		n, err := DeleteExpiredApiSessions(mb, apiSessionGCMargin, apiSessionGCBatch)
-		cancel()
-		total += n
-		if err != nil {
-			return total, err
-		}
-		if n < apiSessionGCBatch {
-			return total, nil
-		}
-	}
-}
-
-// RunApiSessionGC deletes expired API sessions apiSessionGCStartDelay after
-// startup and then every apiSessionGCInterval, until m's context ends. Like
-// RunVOBearerTokenGC, a failed round is retried on the next tick and running
-// it in several processes is harmless.
-func RunApiSessionGC(m MetaContext) {
-	wait := apiSessionGCStartDelay
-	for {
-		select {
-		case <-time.After(wait):
-		case <-m.Ctx().Done():
-			return
-		}
-		wait = apiSessionGCInterval
-		n, err := gcExpiredApiSessions(m)
-		if err != nil {
-			m.Warnw("RunApiSessionGC", "deleted", n, "err", err)
-		} else if n > 0 {
-			m.Infow("RunApiSessionGC", "deleted", n)
-		}
-	}
 }

@@ -15,15 +15,15 @@ func TestApiSessionDurationConfig(t *testing.T) {
 	var nilCfg *WebConfigJSON
 	d, err := nilCfg.ApiSessionDuration()
 	require.NoError(t, err)
-	require.Equal(t, 24*time.Hour, d)
+	require.Equal(t, time.Hour, d)
 
 	d, err = (&WebConfigJSON{}).ApiSessionDuration()
 	require.NoError(t, err)
-	require.Equal(t, 24*time.Hour, d)
-
-	d, err = (&WebConfigJSON{ApiSessionDuration_: core.Duration{Duration: time.Hour}}).ApiSessionDuration()
-	require.NoError(t, err)
 	require.Equal(t, time.Hour, d)
+
+	d, err = (&WebConfigJSON{ApiSessionDuration_: core.Duration{Duration: 10 * time.Minute}}).ApiSessionDuration()
+	require.NoError(t, err)
+	require.Equal(t, 10*time.Minute, d)
 
 	// A negative lifetime would mint tokens born expired, and wrap to a huge
 	// unsigned DurationMilli on the wire: refuse it.
