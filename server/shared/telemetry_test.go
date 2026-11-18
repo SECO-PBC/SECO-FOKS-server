@@ -47,6 +47,12 @@ var allowedTelemetryKeys = map[attribute.Key]bool{
 	"status":                  true,
 	"result":                  true,
 	"rt.fanout.members":       true,
+	// /api/v1 (telemetry_http.go): the chi route pattern or a fixed label,
+	// never a raw path; the method normalized to a fixed set.
+	"http.request.method":       true,
+	"http.route":                true,
+	"http.response.status_code": true,
+	"status_class":              true,
 }
 
 // A stand-in for user data that must never reach telemetry.
@@ -704,4 +710,32 @@ func TestOtelErrorHandlerRateLimits(t *testing.T) {
 		{"warn", 3},
 		{"debug", 0},
 	}, log)
+}
+
+// /api/v1 telemetry stays inside the allowlist and carries the route
+// pattern, never the raw path (which could hold anything a client sent).
+func TestHTTPAPITelemetryPrivate(t *testing.T) {
+	h := newTelemetryHarness(t, false)
+	ctx := context.Background()
+	for _, c := range []struct {
+		route  string
+		status int
+	}{
+		{"/api/v1/ping", 204},
+		{"", 404},
+		{"/api/v1/ping", 500},
+	} {
+		_, span := h.t.StartHTTPAPISpan(ctx, "GET")
+		h.t.FinishHTTPAPIRequest(ctx, span, "GET", c.route, c.status, time.Millisecond)
+	}
+	rm := h.collect(t)
+	m := findMetric(rm, "foks.http.api.duration")
+	require.NotNil(t, m)
+	routes := map[string]bool{}
+	for _, dp := range m.Data.(metricdata.Histogram[float64]).DataPoints {
+		r, _ := dp.Attributes.Value("http.route")
+		routes[r.AsString()] = true
+	}
+	require.Equal(t, map[string]bool{"/api/v1/ping": true, "unmatched": true}, routes)
+	h.assertPrivate(t)
 }

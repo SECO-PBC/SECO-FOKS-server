@@ -170,6 +170,22 @@ equals `h`, so that shape cannot arise. If it could, every admit would fail.
 cubic finding on #21. Real but cosmetic — same error type, one word apart, in a
 subsystem unrelated to anything we are proposing. Not worth the review cost.
 
+**`/api/v1` bearer tokens (API sessions).** Branch `feat/api-sessions`
+(2026-11-18). Short-lived, scoped JWTs (HS256, `golang-jwt/jwt/v5`) are minted
+over the User RPC and signed with a host challenge key; the web server has a
+JSON `/api/v1` surface that accepts them. Intended first for opt-in client
+analytics, and only ever for non-sensitive endpoints: tokens can't be revoked.
+Design and limits in `docs/api-sessions.md`. The change adds:
+
+- `foks_users` **p13** (`challenge_type` value `api_session`);
+- `lib.ApiToken`, `lib.ApiScope` and `lib.ApiSession` (`proto-src/lib/api.snowp`);
+- rem `User.newApiSession @201` and lcl `Admin.apiSession @200`;
+- the `apps.web.api_session_duration` config key;
+- `server/web/app/api`.
+
+It is generic, with nothing SECO-specific outside the scope names. Local for
+now; offer it upstream if a second consumer appears.
+
 ## Local — deliberately ours forever
 
 | Change | Why |

@@ -1265,6 +1265,24 @@ func (c *UserClientConn) NewWebAdminPanelURL(
 	return *ret, nil
 }
 
+// NewApiSession mints an /api/v1 bearer token for the logged-in user
+// (fork-only; docs/api-sessions.md).
+func (c *UserClientConn) NewApiSession(
+	ctx context.Context,
+	scope proto.ApiScope,
+) (
+	proto.ApiSession,
+	error,
+) {
+	var zed proto.ApiSession
+	m := shared.NewMetaContextConn(ctx, c)
+	ret, err := shared.NewApiSession(m, scope)
+	if err != nil {
+		return zed, err
+	}
+	return *ret, nil
+}
+
 func (c *UserClientConn) CheckURL(
 	ctx context.Context,
 	arg proto.URLString,

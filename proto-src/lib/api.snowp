@@ -1,0 +1,27 @@
+// Copyright (c) 2025 ne43, Inc.
+// Licensed under the MIT License. See LICENSE in the project root for details.
+
+@0x98674936639570cb;
+
+// Fork-only (docs/api-sessions.md): bearer tokens for the web server's
+// /api/v1 HTTPS surface, minted over the authenticated User protocol. A
+// signed JWT (HS256), verified without any per-token server state.
+typedef ApiToken = Text;
+
+// What an ApiToken may be used for. Each /api/v1 route requires exactly one
+// scope, and a token is good only for the scope it was minted with.
+enum ApiScope {
+    Ping @0;
+    ClientAnalytics @1;
+}
+
+// What newApiSession returns. Deliberately minimal: no absolute expiry (a
+// client must not compare the server's clock with its own; it schedules
+// re-mints from `lifetime`) and no echo of the requested scope (the caller
+// knows it, and an echo is one more value that could disagree).
+struct ApiSession {
+    token @0 : ApiToken;
+    baseURL @1 : URLString;
+    // How long the token lives, measured on the server.
+    lifetime @2 : DurationMilli;
+}

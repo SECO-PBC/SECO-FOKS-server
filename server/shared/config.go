@@ -512,6 +512,10 @@ type WebConfigger interface {
 	GetExternalPort() proto.Port // Port of the internet-side of a load-balancer; will revert to GetPort() if 0
 	SessionParam() string
 	SessionDuration() time.Duration
+	// ApiSessionDuration is the lifetime of an /api/v1 bearer token
+	// (fork-only; docs/api-sessions.md). A negative configured value is an
+	// error; zero selects the default.
+	ApiSessionDuration() (time.Duration, error)
 	DebugDelay() time.Duration // Delay for debugging sppiners purposes
 	OAuth2() OAuth2Configger
 }
@@ -521,9 +525,14 @@ type DefaultWebConfig struct{}
 func (d DefaultWebConfig) UseTLS() bool                   { return true }
 func (d DefaultWebConfig) SessionParam() string           { return "s" }
 func (d DefaultWebConfig) SessionDuration() time.Duration { return time.Hour * time.Duration(24*30) }
-func (d DefaultWebConfig) DebugDelay() time.Duration      { return time.Duration(0) }
-func (d DefaultWebConfig) GetExternalPort() proto.Port    { return proto.Port(0) }
-func (d DefaultWebConfig) OAuth2() OAuth2Configger        { return DefaultOAuthConfig{} }
+func (d DefaultWebConfig) ApiSessionDuration() (time.Duration, error) {
+	// Short, because a token can't be revoked: an hour bounds how long a
+	// revoked device or deleted account keeps an analytics token working.
+	return time.Hour, nil
+}
+func (d DefaultWebConfig) DebugDelay() time.Duration   { return time.Duration(0) }
+func (d DefaultWebConfig) GetExternalPort() proto.Port { return proto.Port(0) }
+func (d DefaultWebConfig) OAuth2() OAuth2Configger     { return DefaultOAuthConfig{} }
 
 type DefaultOAuthConfig struct{}
 

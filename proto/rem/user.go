@@ -3061,6 +3061,45 @@ func (n *NewInviteCodeArg) Decode(dec rpc.Decoder) error {
 
 func (n *NewInviteCodeArg) Bytes() []byte { return nil }
 
+type NewApiSessionArg struct {
+	Scope lib.ApiScope
+}
+type NewApiSessionArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Scope   *lib.ApiScopeInternal__
+}
+
+func (n NewApiSessionArgInternal__) Import() NewApiSessionArg {
+	return NewApiSessionArg{
+		Scope: (func(x *lib.ApiScopeInternal__) (ret lib.ApiScope) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(n.Scope),
+	}
+}
+func (n NewApiSessionArg) Export() *NewApiSessionArgInternal__ {
+	return &NewApiSessionArgInternal__{
+		Scope: n.Scope.Export(),
+	}
+}
+func (n *NewApiSessionArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(n.Export())
+}
+
+func (n *NewApiSessionArg) Decode(dec rpc.Decoder) error {
+	var tmp NewApiSessionArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*n = tmp.Import()
+	return nil
+}
+
+func (n *NewApiSessionArg) Bytes() []byte { return nil }
+
 type UserInterface interface {
 	Ping(context.Context) (lib.UID, error)
 	SetPassphrase(context.Context, SetPassphraseArg) error
@@ -3092,6 +3131,7 @@ type UserInterface interface {
 	GetYubiManagementKey(context.Context, lib.YubiID) (YubiEncryptedManagementKey, error)
 	GetAllYubiManagementKeys(context.Context) ([]YubiEncryptedManagementKey, error)
 	NewInviteCode(context.Context) (InviteCode, error)
+	NewApiSession(context.Context, lib.ApiScope) (lib.ApiSession, error)
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h lib.Header) error
 	MakeResHeader() lib.Header
@@ -3806,6 +3846,30 @@ func (c UserClient) NewInviteCode(ctx context.Context) (res InviteCode, err erro
 	}
 	var tmp rpc.DataWrap[lib.Header, InviteCodeInternal__]
 	err = c.Cli.Call2(ctx, rpc.NewMethodV2(UserProtocolID, 200, "User.newInviteCode"), warg, &tmp, 0*time.Millisecond, userErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	res = tmp.Data.Import()
+	return
+}
+func (c UserClient) NewApiSession(ctx context.Context, scope lib.ApiScope) (res lib.ApiSession, err error) {
+	arg := NewApiSessionArg{
+		Scope: scope,
+	}
+	warg := &rpc.DataWrap[lib.Header, *NewApiSessionArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, lib.ApiSessionInternal__]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(UserProtocolID, 201, "User.newApiSession"), warg, &tmp, 0*time.Millisecond, userErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
 	if err != nil {
 		return
 	}
@@ -4683,6 +4747,35 @@ func UserProtocol(i UserInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "newInviteCode",
+			},
+			201: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *NewApiSessionArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *NewApiSessionArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *NewApiSessionArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						tmp, err := i.NewApiSession(ctx, (typedArg.Import()).Scope)
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[lib.Header, *lib.ApiSessionInternal__]{
+							Data:   tmp.Export(),
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "newApiSession",
 			},
 		},
 		WrapError: UserMakeGenericErrorWrapper(i.ErrorWrapper()),

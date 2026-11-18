@@ -271,4 +271,10 @@ protocol User
     // so upstream can keep appending after @29 without colliding.
     newInviteCode @200 (
     ) -> InviteCode;
+
+    // Mint a short-lived bearer token for the web server's /api/v1 surface
+    // (docs/api-sessions.md). Fork-only.
+    newApiSession @201 (
+        scope @0 : lib.ApiScope
+    ) -> lib.ApiSession;
 }

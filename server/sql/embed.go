@@ -74,6 +74,9 @@ var usersPatch11 string
 //go:embed patches/foks_users/p12.sql
 var usersPatch12 string
 
+//go:embed patches/foks_users/p13.sql
+var usersPatch13 string
+
 //go:embed patches/foks_server_config/p1.sql
 var serverConfigPatch1 string
 
@@ -139,6 +142,7 @@ var Patches = map[string]map[int]string{
 		10: usersPatch10,
 		11: usersPatch11,
 		12: usersPatch12,
+		13: usersPatch13,
 	},
 	"foks_server_config": {
 		1: serverConfigPatch1,

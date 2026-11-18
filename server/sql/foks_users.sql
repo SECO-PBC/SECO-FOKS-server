@@ -397,7 +397,7 @@ CREATE TABLE passphrase_boxes (
     PRIMARY KEY(short_host_id, uid, ppgen)
 );
 
-CREATE TYPE challenge_type AS ENUM('login', 'user_lookup', 'subkey_box', 'team_vo_bearer_token', 'csrf_protect');
+CREATE TYPE challenge_type AS ENUM('login', 'user_lookup', 'subkey_box', 'team_vo_bearer_token', 'csrf_protect', 'api_session'); -- api_session: p13, fork-only
 
 CREATE TABLE challenge_keys (
     short_host_id SMALLINT NOT NULL,
@@ -1096,3 +1096,4 @@ INSERT INTO schema_patches (id, ctime) VALUES (9, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (10, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (11, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (12, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (13, NOW());

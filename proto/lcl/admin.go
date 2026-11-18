@@ -81,9 +81,49 @@ func (c *CheckLinkArg) Decode(dec rpc.Decoder) error {
 
 func (c *CheckLinkArg) Bytes() []byte { return nil }
 
+type ApiSessionArg struct {
+	Scope lib.ApiScope
+}
+type ApiSessionArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Scope   *lib.ApiScopeInternal__
+}
+
+func (a ApiSessionArgInternal__) Import() ApiSessionArg {
+	return ApiSessionArg{
+		Scope: (func(x *lib.ApiScopeInternal__) (ret lib.ApiScope) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(a.Scope),
+	}
+}
+func (a ApiSessionArg) Export() *ApiSessionArgInternal__ {
+	return &ApiSessionArgInternal__{
+		Scope: a.Scope.Export(),
+	}
+}
+func (a *ApiSessionArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(a.Export())
+}
+
+func (a *ApiSessionArg) Decode(dec rpc.Decoder) error {
+	var tmp ApiSessionArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*a = tmp.Import()
+	return nil
+}
+
+func (a *ApiSessionArg) Bytes() []byte { return nil }
+
 type AdminInterface interface {
 	WebAdminPanelLink(context.Context) (lib.URLString, error)
 	CheckLink(context.Context, lib.URLString) error
+	ApiSession(context.Context, lib.ApiScope) (lib.ApiSession, error)
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h Header) error
 	MakeResHeader() Header
@@ -174,6 +214,30 @@ func (c AdminClient) CheckLink(ctx context.Context, url lib.URLString) (err erro
 	}
 	return
 }
+func (c AdminClient) ApiSession(ctx context.Context, scope lib.ApiScope) (res lib.ApiSession, err error) {
+	arg := ApiSessionArg{
+		Scope: scope,
+	}
+	warg := &rpc.DataWrap[Header, *ApiSessionArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[Header, lib.ApiSessionInternal__]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(AdminProtocolID, 200, "Admin.apiSession"), warg, &tmp, 0*time.Millisecond, adminErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	res = tmp.Data.Import()
+	return
+}
 func AdminProtocol(i AdminInterface) rpc.ProtocolV2 {
 	return rpc.ProtocolV2{
 		Name: "Admin",
@@ -234,6 +298,35 @@ func AdminProtocol(i AdminInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "checkLink",
+			},
+			200: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[Header, *ApiSessionArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[Header, *ApiSessionArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[Header, *ApiSessionArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						tmp, err := i.ApiSession(ctx, (typedArg.Import()).Scope)
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[Header, *lib.ApiSessionInternal__]{
+							Data:   tmp.Export(),
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "apiSession",
 			},
 		},
 		WrapError: AdminMakeGenericErrorWrapper(i.ErrorWrapper()),

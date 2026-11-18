@@ -9,6 +9,7 @@ import (
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-foks/server/shared"
 	"github.com/foks-proj/go-foks/server/web/app/admin"
+	"github.com/foks-proj/go-foks/server/web/app/api"
 	"github.com/foks-proj/go-foks/server/web/app/oauth2"
 	"github.com/go-chi/chi/v5"
 )
@@ -44,6 +45,10 @@ func (a *WebServer) InitRouter(m shared.MetaContext, mux *chi.Mux) error {
 		mux.Get(ocfg.Callback().String(), oauth2.CallbackHandler(m.G()))
 		admin.InitRouter(m.G(), "/admin", scfg, mux)
 	})
+
+	// Fork-only (docs/api-sessions.md): the bearer-authenticated JSON API.
+	// Outside the group above so it gets JSON, not the HTML/CSP middleware.
+	api.InitRouter(m.G(), mux)
 	return nil
 }
 
