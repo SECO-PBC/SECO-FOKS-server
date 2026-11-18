@@ -9,15 +9,23 @@ import (
 
 	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
+	"golang.org/x/time/rate"
 )
 
 const (
 	// A client flushes analytics every minute or so; a few requests a second
 	// with a burst of 30 is far above honest use and caps a runaway loop.
 	defaultRatePerSec = 2.0
-	defaultBurst      = 30.0
+	defaultBurst      = 30
 
-	// limiterIdle is how long an unused bucket is kept. A full bucket after
+	// Failed bearer checks per client IP. Charged only when a token is
+	// refused, and checked BEFORE the database lookup, so a flood of made-up
+	// tokens is turned away without touching the pool. Honest clients almost
+	// never fail, so the budget can be small.
+	failRatePerSec = 1.0
+	failBurst      = 20
+
+	// limiterIdle is how long an unused limiter is kept. A full bucket after
 	// this long is indistinguishable from a fresh one, so dropping it is free.
 	limiterIdle = 10 * time.Minute
 )
@@ -31,66 +39,57 @@ type rateKey struct {
 // a uid or token string can't be used as the per-IP key by mistake.
 type clientAddr string
 
-const (
-	// Failed bearer checks per client IP. Charged only when a token is
-	// refused, and checked BEFORE the database lookup, so a flood of made-up
-	// tokens is turned away without touching the pool. Honest clients almost
-	// never fail, so the budget can be small.
-	failRatePerSec = 1.0
-	failBurst      = 20.0
-)
-
-type bucket struct {
-	tokens float64
-	last   time.Time
+type keyedEntry struct {
+	lim  *rate.Limiter
+	last time.Time
 }
 
-// rateLimiter is a per-user token bucket, in memory. Per process is enough
-// while one web server serves a host; behind several, each enforces its own
-// share, which is still a bound.
+// rateLimiter is one golang.org/x/time/rate token bucket per key, in memory,
+// with idle keys swept. Per process is enough while one web server serves a
+// host; behind several, each enforces its own share, which is still a bound.
+// Every method takes the time from `now`, so tests can drive the clock.
 type rateLimiter[K comparable] struct {
 	sync.Mutex
-	rate    float64
-	burst   float64
+	rate    rate.Limit
+	burst   int
 	now     func() time.Time
-	buckets map[K]*bucket
+	entries map[K]*keyedEntry
 	sweep   time.Time
 }
 
-func newRateLimiter[K comparable](rate, burst float64, now func() time.Time) *rateLimiter[K] {
+func newRateLimiter[K comparable](perSec float64, burst int, now func() time.Time) *rateLimiter[K] {
 	return &rateLimiter[K]{
-		rate:    rate,
+		rate:    rate.Limit(perSec),
 		burst:   burst,
 		now:     now,
-		buckets: make(map[K]*bucket),
+		entries: make(map[K]*keyedEntry),
 		sweep:   now(),
 	}
 }
 
-// refill brings k's bucket up to date and returns it, sweeping idle buckets
-// now and then. Callers hold the lock.
-func (l *rateLimiter[K]) refill(k K) *bucket {
-	now := l.now()
+// get returns k's limiter, creating it full, and sweeps idle keys now and
+// then. Callers hold the lock.
+func (l *rateLimiter[K]) get(k K, now time.Time) *rate.Limiter {
 	if now.Sub(l.sweep) > limiterIdle {
-		for key, b := range l.buckets {
-			if now.Sub(b.last) > limiterIdle {
-				delete(l.buckets, key)
+		for key, e := range l.entries {
+			if now.Sub(e.last) > limiterIdle {
+				delete(l.entries, key)
 			}
 		}
 		l.sweep = now
 	}
-	b, ok := l.buckets[k]
+	e, ok := l.entries[k]
 	if !ok {
-		b = &bucket{tokens: l.burst, last: now}
-		l.buckets[k] = b
+		e = &keyedEntry{lim: rate.NewLimiter(l.rate, l.burst)}
+		l.entries[k] = e
 	}
-	b.tokens = min(l.burst, b.tokens+now.Sub(b.last).Seconds()*l.rate)
-	b.last = now
-	return b
+	e.last = now
+	return e.lim
 }
 
-func (l *rateLimiter[K]) wait(b *bucket) time.Duration {
-	return time.Duration((1 - b.tokens) / l.rate * float64(time.Second))
+// untilToken is how long until lim has a whole token again.
+func (l *rateLimiter[K]) untilToken(lim *rate.Limiter, now time.Time) time.Duration {
+	return time.Duration((1 - lim.TokensAt(now)) / float64(l.rate) * float64(time.Second))
 }
 
 // allow takes one token for k. When none is left it reports how long until
@@ -98,30 +97,35 @@ func (l *rateLimiter[K]) wait(b *bucket) time.Duration {
 func (l *rateLimiter[K]) allow(k K) (time.Duration, bool) {
 	l.Lock()
 	defer l.Unlock()
-	b := l.refill(k)
-	if b.tokens < 1 {
-		return l.wait(b), false
+	now := l.now()
+	lim := l.get(k, now)
+	if lim.AllowN(now, 1) {
+		return 0, true
 	}
-	b.tokens--
-	return 0, true
+	return l.untilToken(lim, now), false
 }
 
 // check reports whether k has a token left, without taking it.
 func (l *rateLimiter[K]) check(k K) (time.Duration, bool) {
 	l.Lock()
 	defer l.Unlock()
-	b := l.refill(k)
-	if b.tokens < 1 {
-		return l.wait(b), false
+	now := l.now()
+	lim := l.get(k, now)
+	if lim.TokensAt(now) >= 1 {
+		return 0, true
 	}
-	return 0, true
+	return l.untilToken(lim, now), false
 }
 
-// charge takes a token from k, going below zero if need be, so a client that
-// keeps failing while blocked stays blocked.
+// charge takes a token from k even when none is left, so a client that keeps
+// failing while blocked stays blocked. The debt stops at -burst, so a
+// blocked client is never shut out longer than two bursts' worth of refill.
 func (l *rateLimiter[K]) charge(k K) {
 	l.Lock()
 	defer l.Unlock()
-	b := l.refill(k)
-	b.tokens = max(b.tokens-1, -l.burst)
+	now := l.now()
+	lim := l.get(k, now)
+	if lim.TokensAt(now) > -float64(l.burst) {
+		lim.ReserveN(now, 1)
+	}
 }

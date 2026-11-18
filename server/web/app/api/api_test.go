@@ -103,7 +103,7 @@ func TestRateLimiter(t *testing.T) {
 	now = now.Add(limiterIdle + time.Minute)
 	_, ok = l.allow(b)
 	require.True(t, ok)
-	require.Len(t, l.buckets, 1)
+	require.Len(t, l.entries, 1)
 }
 
 func TestFailGate(t *testing.T) {
