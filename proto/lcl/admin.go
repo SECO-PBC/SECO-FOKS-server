@@ -81,49 +81,9 @@ func (c *CheckLinkArg) Decode(dec rpc.Decoder) error {
 
 func (c *CheckLinkArg) Bytes() []byte { return nil }
 
-type ReportClientAnalyticsArg struct {
-	Batch lib.ClientAnalyticsBatch
-}
-type ReportClientAnalyticsArgInternal__ struct {
-	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Batch   *lib.ClientAnalyticsBatchInternal__
-}
-
-func (r ReportClientAnalyticsArgInternal__) Import() ReportClientAnalyticsArg {
-	return ReportClientAnalyticsArg{
-		Batch: (func(x *lib.ClientAnalyticsBatchInternal__) (ret lib.ClientAnalyticsBatch) {
-			if x == nil {
-				return ret
-			}
-			return x.Import()
-		})(r.Batch),
-	}
-}
-func (r ReportClientAnalyticsArg) Export() *ReportClientAnalyticsArgInternal__ {
-	return &ReportClientAnalyticsArgInternal__{
-		Batch: r.Batch.Export(),
-	}
-}
-func (r *ReportClientAnalyticsArg) Encode(enc rpc.Encoder) error {
-	return enc.Encode(r.Export())
-}
-
-func (r *ReportClientAnalyticsArg) Decode(dec rpc.Decoder) error {
-	var tmp ReportClientAnalyticsArgInternal__
-	err := dec.Decode(&tmp)
-	if err != nil {
-		return err
-	}
-	*r = tmp.Import()
-	return nil
-}
-
-func (r *ReportClientAnalyticsArg) Bytes() []byte { return nil }
-
 type AdminInterface interface {
 	WebAdminPanelLink(context.Context) (lib.URLString, error)
 	CheckLink(context.Context, lib.URLString) error
-	ReportClientAnalytics(context.Context, lib.ClientAnalyticsBatch) error
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h Header) error
 	MakeResHeader() Header
@@ -214,29 +174,6 @@ func (c AdminClient) CheckLink(ctx context.Context, url lib.URLString) (err erro
 	}
 	return
 }
-func (c AdminClient) ReportClientAnalytics(ctx context.Context, batch lib.ClientAnalyticsBatch) (err error) {
-	arg := ReportClientAnalyticsArg{
-		Batch: batch,
-	}
-	warg := &rpc.DataWrap[Header, *ReportClientAnalyticsArgInternal__]{
-		Data: arg.Export(),
-	}
-	if c.MakeArgHeader != nil {
-		warg.Header = c.MakeArgHeader()
-	}
-	var tmp rpc.DataWrap[Header, interface{}]
-	err = c.Cli.Call2(ctx, rpc.NewMethodV2(AdminProtocolID, 200, "Admin.reportClientAnalytics"), warg, &tmp, 0*time.Millisecond, adminErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
-	if err != nil {
-		return
-	}
-	if c.CheckResHeader != nil {
-		err = c.CheckResHeader(ctx, tmp.Header)
-		if err != nil {
-			return
-		}
-	}
-	return
-}
 func AdminProtocol(i AdminInterface) rpc.ProtocolV2 {
 	return rpc.ProtocolV2{
 		Name: "Admin",
@@ -297,34 +234,6 @@ func AdminProtocol(i AdminInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "checkLink",
-			},
-			200: {
-				ServeHandlerDescription: rpc.ServeHandlerDescription{
-					MakeArg: func() interface{} {
-						var ret rpc.DataWrap[Header, *ReportClientAnalyticsArgInternal__]
-						return &ret
-					},
-					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
-						typedWrappedArg, ok := args.(*rpc.DataWrap[Header, *ReportClientAnalyticsArgInternal__])
-						if !ok {
-							err := rpc.NewTypeError((*rpc.DataWrap[Header, *ReportClientAnalyticsArgInternal__])(nil), args)
-							return nil, err
-						}
-						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
-							return nil, err
-						}
-						typedArg := typedWrappedArg.Data
-						err := i.ReportClientAnalytics(ctx, (typedArg.Import()).Batch)
-						if err != nil {
-							return nil, err
-						}
-						ret := rpc.DataWrap[Header, interface{}]{
-							Header: i.MakeResHeader(),
-						}
-						return &ret, nil
-					},
-				},
-				Name: "reportClientAnalytics",
 			},
 		},
 		WrapError: AdminMakeGenericErrorWrapper(i.ErrorWrapper()),

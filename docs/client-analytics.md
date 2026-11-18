@@ -13,18 +13,31 @@ user server turns them into `seco.client.*` metrics.
 - `ClientLatencyMetric` and `ClientPlatform` are **enums**, numbered from 1 so
   the zero value is never valid. A metric the server doesn't know can't be
   sent as a name; the only way to add one is a proto change.
-- rem `User.reportClientAnalytics @201`; the agent forwards lcl
-  `Admin.reportClientAnalytics @200` to it.
+- rem `User.reportClientAnalytics @201`. The SECO bridge calls it directly on
+  the active user's User client; there is no agent-protocol (lcl) method.
+- The batch limits live in `proto/lib/analytics_extras.go`
+  (`MaxClientLatencySamples`, `MaxClientLatencyMs`), shared with the bridge,
+  which splits and filters batches so a valid client never hits them.
 
 ## What the server does (`shared.RecordClientAnalytics`)
 
-- Refuses the whole batch for an unknown platform, more than 512 samples, or
-  over the per-user rate (one batch per 5s, burst 10, in memory).
-- Drops and counts individual samples that name an unknown metric (a newer
-  client talking to an older server) or exceed 10 minutes, so version skew
-  shows in `seco.client.latency.dropped` instead of failing clients.
+- Refuses the whole batch only when it has more than `MaxClientLatencySamples`
+  samples or its sender is over the per-user rate (one batch per 5s, burst
+  10, in memory on the GlobalContext). Both answers are marked expected in
+  the RPC telemetry, so they don't count as server errors.
+- A platform it doesn't know (a newer client, or unset) is recorded under the
+  `unknown` platform tag rather than refused.
+- Drops and counts individual samples with no metric (`invalid`), a metric it
+  doesn't know (`unknown_metric`, a newer client) or a value over
+  `MaxClientLatencyMs` (`out_of_range`), compared as integers.
 - Records the rest in `seco.client.latency` (milliseconds), tagged only with
   `client.metric` and `client.platform`.
+
+The tag strings (`send_ack`, `ios`, ...) are spelled out in
+`telemetry_client.go`, not taken from the proto's Go identifiers, so renaming
+an enum member can't silently rename a Datadog series. Its helpers take the
+proto enums and a typed drop reason, never strings, and
+`TestClientTelemetryTags` fails if an enum member has no tag.
 
 ## Privacy
 
@@ -39,11 +52,12 @@ any other and doesn't try.
 ## Adding a metric
 
 1. Add it to `ClientLatencyMetric` (or a new enum, for a new kind of
-   measurement) and regenerate.
-2. Tag a fork release and bump the pin in SECO-FOKS, then add the name to
-   the app's TS union (a parity test there compares the two).
+   measurement), regenerate, and give it a tag in `clientMetricTag`.
+2. Tag a fork release and bump the pin in SECO-FOKS, then run `go generate`
+   in its `foks-gomobile` to regenerate the app's TS types from the proto.
 3. Deploy the server before shipping a client that sends it; until then the
-   server drops it as `unknown_metric`.
+   server drops it as `unknown_metric`. A new platform is recorded as
+   `unknown` until then.
 
 ## Why RPC and not HTTP
 

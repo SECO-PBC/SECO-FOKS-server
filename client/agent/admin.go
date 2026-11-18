@@ -33,24 +33,6 @@ func (c *AgentConn) WebAdminPanelLink(
 	return ret, nil
 }
 
-// ReportClientAnalytics forwards an opt-in analytics batch to the active
-// user's home server (fork-only; docs/client-analytics.md).
-func (c *AgentConn) ReportClientAnalytics(
-	ctx context.Context,
-	batch proto.ClientAnalyticsBatch,
-) error {
-	m := c.MetaContext(ctx)
-	au, err := m.ActiveConnectedUser(nil)
-	if err != nil {
-		return err
-	}
-	usrv, err := au.UserClient(m)
-	if err != nil {
-		return err
-	}
-	return usrv.ReportClientAnalytics(m.Ctx(), batch)
-}
-
 func (c *AgentConn) CheckLink(
 	ctx context.Context,
 	url proto.URLString,

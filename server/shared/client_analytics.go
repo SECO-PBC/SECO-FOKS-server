@@ -15,17 +15,9 @@ import (
 // Fork-only (docs/client-analytics.md): opt-in client analytics, reported over
 // the authenticated User protocol and turned into seco.client.* metrics. The
 // sender is known (it's an authenticated RPC) but never recorded: metrics are
-// tagged only with the metric and platform enums.
+// tagged only with fixed strings chosen in telemetry_client.go.
 
 const (
-	// maxClientLatencySamples bounds one batch. A client flushes about once
-	// a minute; this is far above what a minute of honest use produces.
-	maxClientLatencySamples = 512
-
-	// maxClientLatency drops absurd values (a suspended app, a wrong clock)
-	// instead of letting them skew the distribution.
-	maxClientLatency = 10 * time.Minute
-
 	// Per-user batch rate: one every 5s, burst 10. Honest clients send one a
 	// minute; this caps a runaway loop without a table or a background job.
 	clientAnalyticsEvery = 5 * time.Second
@@ -37,47 +29,50 @@ type clientAnalyticsKey struct {
 	uid  proto.UID
 }
 
-// clientAnalyticsLimiters holds one limiter per user who has ever reported,
-// for the life of the process: a few hundred bytes per user, bounded by the
+// clientAnalyticsLimiters holds one limiter per user who has reported, for the
+// life of the GlobalContext: a few hundred bytes per user, bounded by the
 // number of users.
-var clientAnalyticsLimiters sync.Map // clientAnalyticsKey -> *rate.Limiter
+type clientAnalyticsLimiters struct {
+	m sync.Map // clientAnalyticsKey -> *rate.Limiter
+}
 
-func clientAnalyticsAllow(m MetaContext) bool {
-	k := clientAnalyticsKey{shid: m.ShortHostID(), uid: m.UID()}
-	lim, _ := clientAnalyticsLimiters.LoadOrStore(k,
-		rate.NewLimiter(rate.Every(clientAnalyticsEvery), clientAnalyticsBurst))
+func (l *clientAnalyticsLimiters) allow(k clientAnalyticsKey) bool {
+	lim, ok := l.m.Load(k)
+	if !ok {
+		lim, _ = l.m.LoadOrStore(k,
+			rate.NewLimiter(rate.Every(clientAnalyticsEvery), clientAnalyticsBurst))
+	}
 	return lim.(*rate.Limiter).Allow()
 }
 
-// RecordClientAnalytics validates a batch and records it. A malformed batch
-// (unknown platform, too many samples) is refused whole. A sample naming a
-// metric this server doesn't know -- a newer client -- or an out-of-range
-// value is dropped and counted, so version skew shows up in the metrics
-// instead of failing the client.
+// RecordClientAnalytics validates a batch and records it.
+//
+// The batch is refused whole only when it's too big or its sender is over
+// their rate. Anything a newer client could legitimately send that this
+// server doesn't know -- a platform or a metric -- is recorded under a fixed
+// "unknown" tag or dropped and counted, so version skew shows up in the
+// metrics instead of failing the client.
 func RecordClientAnalytics(m MetaContext, batch proto.ClientAnalyticsBatch) error {
 	if m.UID().IsZero() {
 		return core.AuthError{}
 	}
-	platform, ok := proto.ClientPlatformRevMap[batch.Platform]
-	if !ok {
-		return core.BadArgsError("unknown client platform")
-	}
-	if len(batch.Latencies) > maxClientLatencySamples {
+	if len(batch.Latencies) > proto.MaxClientLatencySamples {
 		return core.BadArgsError("too many latency samples")
 	}
-	if !clientAnalyticsAllow(m) {
+	if !m.G().clientAnalytics.allow(clientAnalyticsKey{shid: m.ShortHostID(), uid: m.UID()}) {
 		return core.RateLimitError{}
 	}
 	t := m.G().Telemetry()
 	for _, s := range batch.Latencies {
-		metric, ok := proto.ClientLatencyMetricRevMap[s.Metric]
 		switch {
-		case !ok:
-			t.ClientLatencyDropped(m.Ctx(), "unknown_metric")
-		case time.Duration(s.Ms)*time.Millisecond > maxClientLatency:
-			t.ClientLatencyDropped(m.Ctx(), "out_of_range")
+		case s.Metric == 0:
+			t.ClientLatencyDropped(m.Ctx(), clientDropInvalid)
+		case !s.Metric.IsKnown():
+			t.ClientLatencyDropped(m.Ctx(), clientDropUnknownMetric)
+		case s.Ms > proto.MaxClientLatencyMs:
+			t.ClientLatencyDropped(m.Ctx(), clientDropOutOfRange)
 		default:
-			t.RecordClientLatency(m.Ctx(), metric, platform, float64(s.Ms))
+			t.RecordClientLatency(m.Ctx(), s.Metric, batch.Platform, s.Ms)
 		}
 	}
 	return nil

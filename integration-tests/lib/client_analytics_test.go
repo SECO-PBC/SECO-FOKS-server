@@ -30,7 +30,14 @@ func TestReportClientAnalytics(t *testing.T) {
 	require.NoError(t, err)
 
 	// Refusals cross the wire as their status, not as a generic failure.
-	err = ucli.ReportClientAnalytics(m.Ctx(), proto.ClientAnalyticsBatch{})
+	tooMany := make([]proto.ClientLatencySample, proto.MaxClientLatencySamples+1)
+	for i := range tooMany {
+		tooMany[i] = proto.ClientLatencySample{Metric: proto.ClientLatencyMetric_SendAck, Ms: 1}
+	}
+	err = ucli.ReportClientAnalytics(m.Ctx(), proto.ClientAnalyticsBatch{
+		Platform:  proto.ClientPlatform_Ios,
+		Latencies: tooMany,
+	})
 	require.Error(t, err)
 	require.IsType(t, core.BadArgsError(""), err)
 }

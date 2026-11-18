@@ -127,6 +127,12 @@ var expectedRPCErrors = map[string]map[string]bool{
 	"KVStore.kvCacheCheck": {
 		"KV_STALE_CACHE_ERROR": true,
 	},
+	// Fork-only (docs/client-analytics.md): a client over its rate, or a
+	// batch the bridge should have split, is the client's problem.
+	"User.reportClientAnalytics": {
+		"RATE_LIMIT_ERROR": true,
+		"BAD_ARGS_ERROR":   true,
+	},
 }
 
 // statusCodeName maps an error to its proto status code name, a small
