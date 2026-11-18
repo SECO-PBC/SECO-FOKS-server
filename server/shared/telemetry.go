@@ -133,7 +133,7 @@ func newInstruments(mt metric.Meter) (*instruments, error) {
 	}
 	ret := &instruments{
 		rpcDuration: f64h("foks.rpc.server.duration", "ms", "Server-side RPC handler latency"),
-		rpcErrors:   ctr("foks.rpc.server.errors", "RPCs that returned an error, by status code"),
+		rpcErrors:   ctr("foks.rpc.server.errors", "RPCs that returned an error, by status code (expected answers such as kvGet KV_NOENT_ERROR excluded)"),
 		rpcActive:   udc("foks.rpc.server.active", "RPC handlers currently running"),
 		rpcConns:    udc("foks.rpc.server.connections", "Open client RPC connections"),
 

@@ -59,6 +59,8 @@ func (t *Telemetry) wrapRPC(
 	methodOpt := metric.WithAttributes(methodAttr)
 	okOpt := metric.WithAttributes(methodAttr, attribute.String("outcome", "ok"))
 	errOutcome := attribute.String("outcome", "error")
+	expectedOpt := metric.WithAttributes(methodAttr, attribute.String("outcome", "expected"))
+	expected := expectedRPCErrors[method]
 	inst := t.inst
 
 	return func(ctx context.Context, arg interface{}) (ret interface{}, err error) {
@@ -88,8 +90,8 @@ func (t *Telemetry) wrapRPC(
 			code := statusCodeName(err)
 			// Only the status code: raw error strings can echo user data.
 			span.SetAttributes(attribute.String("error.code", code))
-			if expectedRPCErrors[code] {
-				inst.rpcDuration.Record(ctx, elapsed, okOpt)
+			if expected[code] {
+				inst.rpcDuration.Record(ctx, elapsed, expectedOpt)
 			} else {
 				inst.rpcDuration.Record(ctx, elapsed, metric.WithAttributes(methodAttr, errOutcome))
 				inst.rpcErrors.Add(ctx, 1, metric.WithAttributes(methodAttr, attribute.String("error.code", code)))
@@ -101,17 +103,30 @@ func (t *Telemetry) wrapRPC(
 	}
 }
 
-// expectedRPCErrors are status codes that answer the request rather than
-// report a failure: "no such key" from kvGet, "your cache is stale" from
-// kvCacheCheck. Their spans keep error.code but are not marked as errors,
-// so they don't inflate APM error rates or fill Datadog's error retention
-// filter (on staging they were ~50k indexed spans an hour, nearly all of
-// the indexed-span bill). In the foks.rpc.server.* metrics they count as
-// outcome=ok and are left out of foks.rpc.server.errors: on staging they
-// were ~99% of that counter, which hid the real failures.
-var expectedRPCErrors = map[string]bool{
-	"KV_NOENT_ERROR":       true,
-	"KV_STALE_CACHE_ERROR": true,
+// expectedRPCErrors maps a method to the status codes that answer the
+// request rather than report a failure: "no such key" or "your cache is
+// stale" from a kvGet, "your cache is stale" from kvCacheCheck. The same
+// codes stay real errors on other methods: KV_STALE_CACHE_ERROR on a write
+// (it comes from the version-vector check every KV request runs) means the
+// write was rejected, and KV_NOENT_ERROR on e.g. kvGetEncryptedChunk means
+// data is missing.
+//
+// Expected answers keep error.code on their spans but are not marked as
+// errors, so they don't inflate APM error rates or fill Datadog's error
+// retention filter (on staging they were ~50k indexed spans an hour, nearly
+// all of the indexed-span bill). In the metrics they are recorded as
+// outcome=expected and left out of foks.rpc.server.errors: on staging they
+// were ~99% of that counter, which hid the real failures. A separate
+// outcome keeps their rate visible and keeps fast misses out of the
+// outcome=ok latency distribution.
+var expectedRPCErrors = map[string]map[string]bool{
+	"KVStore.kvGet": {
+		"KV_NOENT_ERROR":       true,
+		"KV_STALE_CACHE_ERROR": true,
+	},
+	"KVStore.kvCacheCheck": {
+		"KV_STALE_CACHE_ERROR": true,
+	},
 }
 
 // statusCodeName maps an error to its proto status code name, a small
