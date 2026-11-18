@@ -1084,6 +1084,25 @@ CREATE TABLE social_invite_msgs (
 );
 
 
+/*
+ * p13 (fork-only; docs/api-sessions.md): bearer tokens for the web server's
+ * /api/v1 HTTPS surface. Separate from user_web_sessions so an API token can
+ * never open the admin panel and an admin cookie can never call /api.
+ */
+CREATE TABLE user_api_sessions (
+    short_host_id SMALLINT NOT NULL,
+    uid BYTEA NOT NULL,
+    token_hash BYTEA NOT NULL,   -- SHA-256 of the bearer token; the token itself is never stored
+    scope SMALLINT NOT NULL,     -- proto lib.ApiScope
+    ctime TIMESTAMP NOT NULL,
+    etime TIMESTAMP NOT NULL,
+    active BOOLEAN NOT NULL,
+    PRIMARY KEY(token_hash)
+);
+CREATE INDEX user_api_sessions_uid_idx ON user_api_sessions(short_host_id, uid, ctime);
+CREATE INDEX user_api_sessions_etime_idx ON user_api_sessions(etime);
+
+
 INSERT INTO schema_patches (id, ctime) VALUES (1, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (2, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (3, NOW());
@@ -1096,3 +1115,4 @@ INSERT INTO schema_patches (id, ctime) VALUES (9, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (10, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (11, NOW());
 INSERT INTO schema_patches (id, ctime) VALUES (12, NOW());
+INSERT INTO schema_patches (id, ctime) VALUES (13, NOW());

@@ -512,6 +512,9 @@ type WebConfigger interface {
 	GetExternalPort() proto.Port // Port of the internet-side of a load-balancer; will revert to GetPort() if 0
 	SessionParam() string
 	SessionDuration() time.Duration
+	// ApiSessionDuration is the lifetime of an /api/v1 bearer token
+	// (fork-only; docs/api-sessions.md).
+	ApiSessionDuration() time.Duration
 	DebugDelay() time.Duration // Delay for debugging sppiners purposes
 	OAuth2() OAuth2Configger
 }
@@ -521,9 +524,12 @@ type DefaultWebConfig struct{}
 func (d DefaultWebConfig) UseTLS() bool                   { return true }
 func (d DefaultWebConfig) SessionParam() string           { return "s" }
 func (d DefaultWebConfig) SessionDuration() time.Duration { return time.Hour * time.Duration(24*30) }
-func (d DefaultWebConfig) DebugDelay() time.Duration      { return time.Duration(0) }
-func (d DefaultWebConfig) GetExternalPort() proto.Port    { return proto.Port(0) }
-func (d DefaultWebConfig) OAuth2() OAuth2Configger        { return DefaultOAuthConfig{} }
+func (d DefaultWebConfig) ApiSessionDuration() time.Duration {
+	return 24 * time.Hour
+}
+func (d DefaultWebConfig) DebugDelay() time.Duration   { return time.Duration(0) }
+func (d DefaultWebConfig) GetExternalPort() proto.Port { return proto.Port(0) }
+func (d DefaultWebConfig) OAuth2() OAuth2Configger     { return DefaultOAuthConfig{} }
 
 type DefaultOAuthConfig struct{}
 

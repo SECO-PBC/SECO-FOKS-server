@@ -1,0 +1,22 @@
+// Copyright (c) 2025 ne43, Inc.
+// Licensed under the MIT License. See LICENSE in the project root for details.
+
+@0x98674936639570cb;
+
+// Fork-only (docs/api-sessions.md): bearer tokens for the web server's
+// /api/v1 HTTPS surface, minted over the authenticated User protocol.
+typedef ApiToken = Blob(32);
+
+// What an ApiToken may be used for. Each /api/v1 route requires exactly one
+// scope, and a token is good only for the scope it was minted with.
+enum ApiScope {
+    Ping @0;
+    ClientAnalytics @1;
+}
+
+struct ApiSession {
+    token @0 : ApiToken;
+    scope @1 : ApiScope;
+    baseURL @2 : URLString;
+    expires @3 : Time;
+}

@@ -173,13 +173,14 @@ type GlobalServiceJSON struct {
 }
 
 type WebConfigJSON struct {
-	UseTLS_          bool              `json:"use_tls"`
-	ExternalPort_    proto.Port        `json:"external_port"` /* external port might differ from the port we're listening on */
-	SessionParam_    string            `json:"session_param"`
-	SessionDuration_ core.Duration     `json:"session_duration"`
-	StaticDir_       string            `json:"static_dir"`
-	DebugDelay_      core.Duration     `json:"debug_delay"`
-	OAuth2_          *OAuth2ConfigJSON `json:"oauth2"`
+	UseTLS_             bool              `json:"use_tls"`
+	ExternalPort_       proto.Port        `json:"external_port"` /* external port might differ from the port we're listening on */
+	SessionParam_       string            `json:"session_param"`
+	SessionDuration_    core.Duration     `json:"session_duration"`
+	ApiSessionDuration_ core.Duration     `json:"api_session_duration"`
+	StaticDir_          string            `json:"static_dir"`
+	DebugDelay_         core.Duration     `json:"debug_delay"`
+	OAuth2_             *OAuth2ConfigJSON `json:"oauth2"`
 }
 
 type AutocertServiceConfig struct {
@@ -829,6 +830,13 @@ func (w *WebConfigJSON) SessionDuration() time.Duration {
 		return (DefaultWebConfig{}).SessionDuration()
 	}
 	return w.SessionDuration_.Duration
+}
+
+func (w *WebConfigJSON) ApiSessionDuration() time.Duration {
+	if w == nil || w.ApiSessionDuration_.Duration == 0 {
+		return (DefaultWebConfig{}).ApiSessionDuration()
+	}
+	return w.ApiSessionDuration_.Duration
 }
 
 func (w *WebConfigJSON) UseTLS() bool {

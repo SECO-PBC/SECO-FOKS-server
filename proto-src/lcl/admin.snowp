@@ -16,4 +16,11 @@ protocol Admin
         url @0 : lib.URLString
     );
 
+    // Fork-only (docs/api-sessions.md): mint a bearer token for the home
+    // server's /api/v1 HTTPS surface. Numbered from @200 like other fork
+    // additions so upstream can keep appending.
+    apiSession @200 (
+        scope @0 : lib.ApiScope
+    ) -> lib.ApiSession;
+
 }

@@ -33,6 +33,28 @@ func (c *AgentConn) WebAdminPanelLink(
 	return ret, nil
 }
 
+// ApiSession mints an /api/v1 bearer token on the active user's home server
+// (fork-only; docs/api-sessions.md).
+func (c *AgentConn) ApiSession(
+	ctx context.Context,
+	scope proto.ApiScope,
+) (
+	proto.ApiSession,
+	error,
+) {
+	var zed proto.ApiSession
+	m := c.MetaContext(ctx)
+	au, err := m.ActiveConnectedUser(nil)
+	if err != nil {
+		return zed, err
+	}
+	usrv, err := au.UserClient(m)
+	if err != nil {
+		return zed, err
+	}
+	return usrv.NewApiSession(m.Ctx(), scope)
+}
+
 func (c *AgentConn) CheckLink(
 	ctx context.Context,
 	url proto.URLString,

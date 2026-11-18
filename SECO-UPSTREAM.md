@@ -170,6 +170,21 @@ equals `h`, so that shape cannot arise. If it could, every admit would fail.
 cubic finding on #21. Real but cosmetic — same error type, one word apart, in a
 subsystem unrelated to anything we are proposing. Not worth the review cost.
 
+**`/api/v1` bearer tokens (API sessions).** Branch `feat/api-sessions`
+(2026-11-18). Short-lived, scoped, hashed bearer tokens are minted over the
+User RPC, and the web server has a JSON `/api/v1` surface that accepts them.
+SECO uses it for opt-in client analytics; design in `docs/api-sessions.md`.
+The change adds:
+
+- `foks_users` **p13** (`user_api_sessions`);
+- `lib.ApiToken`, `lib.ApiScope` and `lib.ApiSession` (`proto-src/lib/api.snowp`);
+- rem `User.newApiSession @201` and lcl `Admin.apiSession @200`;
+- the `apps.web.api_session_duration` config key;
+- `server/web/app/api`.
+
+It is generic, with nothing SECO-specific outside the scope names. Local for
+now; offer it upstream if a second consumer appears.
+
 ## Local — deliberately ours forever
 
 | Change | Why |

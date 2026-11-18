@@ -58,9 +58,11 @@ func (s *UserServer) Setup(m shared.MetaContext) error {
 
 // RunBackgroundLoops starts the GC of expired team VO bearer tokens. The user
 // server is one of the two that mint them (reg is the other) and runs on every
-// deployment, so one cleaner covers both.
+// deployment, so one cleaner covers both. It also GCs expired /api/v1 bearer
+// tokens, which only the user server mints (fork-only; docs/api-sessions.md).
 func (s *UserServer) RunBackgroundLoops(m shared.MetaContext, _ chan<- error) error {
 	go shared.RunVOBearerTokenGC(m)
+	go shared.RunApiSessionGC(m)
 	return nil
 }
 
@@ -1259,6 +1261,24 @@ func (c *UserClientConn) NewWebAdminPanelURL(
 	var zed proto.URLString
 	m := shared.NewMetaContextConn(ctx, c)
 	ret, err := shared.NewWebAdminPanelURL(m)
+	if err != nil {
+		return zed, err
+	}
+	return *ret, nil
+}
+
+// NewApiSession mints an /api/v1 bearer token for the logged-in user
+// (fork-only; docs/api-sessions.md).
+func (c *UserClientConn) NewApiSession(
+	ctx context.Context,
+	scope proto.ApiScope,
+) (
+	proto.ApiSession,
+	error,
+) {
+	var zed proto.ApiSession
+	m := shared.NewMetaContextConn(ctx, c)
+	ret, err := shared.NewApiSession(m, scope)
 	if err != nil {
 		return zed, err
 	}
