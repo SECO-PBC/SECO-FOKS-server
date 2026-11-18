@@ -22,11 +22,17 @@ import (
 // can never open the admin panel and an admin cookie can never call /api.
 
 const (
-	// maxActiveApiSessions caps live tokens per user. Clients cache a token
-	// for its lifetime, so a well-behaved one holds about one per scope;
-	// minting past the cap deactivates the oldest, which bounds the table
-	// against a client stuck in a mint loop.
-	maxActiveApiSessions = 10
+	// maxApiSessionsPerScope caps live tokens per user and scope. apiFetch
+	// caches a token per scope for its lifetime, so each running client holds
+	// one; ten covers a user's devices and restarts. Minting past the cap
+	// DELETES the oldest others (never the one being minted), so the table
+	// stays bounded however a client misbehaves.
+	maxApiSessionsPerScope = 10
+
+	// maxApiMintsPerMinute throttles newApiSession per user and scope. An
+	// honest client mints about once a day per scope; a client stuck in a
+	// mint-then-401 loop is refused here instead of costing a write each time.
+	maxApiMintsPerMinute = 5
 
 	apiSessionGCStartDelay   = 7 * time.Minute
 	apiSessionGCInterval     = time.Hour
@@ -49,6 +55,7 @@ func (ApiSessionNotFoundError) Error() string { return "API session not found" }
 type ApiSessionAuth struct {
 	ShortHostID core.ShortHostID
 	UID         proto.UID
+	Expires     time.Time
 }
 
 // NewApiSession mints a bearer token for the user and host in m, good for
@@ -82,64 +89,65 @@ func NewApiSession(
 		return nil, err
 	}
 	dur := wcfg.ApiSessionDuration()
-
-	db, err := m.Db(DbTypeUsers)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Release()
-
-	tx, err := db.Begin(m.Ctx())
-	if err != nil {
-		return nil, err
-	}
-	// A no-op (pgx.ErrTxClosed) once Commit has run.
-	defer func() { _ = tx.Rollback(m.Ctx()) }()
+	shid := int(m.ShortHostID())
+	uidDB := uid.ExportToDB()
 
 	var etime time.Time
-	err = tx.QueryRow(
-		m.Ctx(),
-		`INSERT INTO user_api_sessions
-		   (short_host_id, uid, token_hash, scope, ctime, etime, active)
-		 VALUES($1, $2, $3, $4, NOW(), NOW() + $5, true)
-		 RETURNING etime`,
-		int(m.ShortHostID()),
-		uid.ExportToDB(),
-		tok.Hash(),
-		int(scope),
-		dur,
-	).Scan(&etime)
-	if err != nil {
-		return nil, err
-	}
-
-	// Keep only the newest maxActiveApiSessions live tokens for this user.
-	_, err = tx.Exec(
-		m.Ctx(),
-		`UPDATE user_api_sessions SET active = false
-		 WHERE short_host_id = $1 AND uid = $2 AND active = true
-		   AND token_hash NOT IN (
-		     SELECT token_hash FROM user_api_sessions
-		     WHERE short_host_id = $1 AND uid = $2 AND active = true
-		     ORDER BY ctime DESC
-		     LIMIT $3)`,
-		int(m.ShortHostID()),
-		uid.ExportToDB(),
-		maxActiveApiSessions,
-	)
-	if err != nil {
-		return nil, err
-	}
-	err = tx.Commit(m.Ctx())
+	err = RetryTxUserDB(m, "NewApiSession", func(m MetaContext, tx pgx.Tx) error {
+		var recent int
+		err := tx.QueryRow(
+			m.Ctx(),
+			`SELECT COUNT(*) FROM user_api_sessions
+			 WHERE short_host_id = $1 AND uid = $2 AND scope = $3
+			   AND ctime > NOW() - INTERVAL '1 minute'`,
+			shid, uidDB, int(scope),
+		).Scan(&recent)
+		if err != nil {
+			return err
+		}
+		if recent >= maxApiMintsPerMinute {
+			return core.RateLimitError{}
+		}
+		err = tx.QueryRow(
+			m.Ctx(),
+			`INSERT INTO user_api_sessions
+			   (short_host_id, uid, token_hash, scope, ctime, etime, active)
+			 VALUES($1, $2, $3, $4, NOW(), NOW() + $5, true)
+			 RETURNING etime`,
+			shid, uidDB, tok.Hash(), int(scope), dur,
+		).Scan(&etime)
+		if err != nil {
+			return err
+		}
+		// Keep the new token plus the newest maxApiSessionsPerScope-1 others.
+		// The new one is excluded by hash, not by ctime: NOW() is the
+		// transaction's start, so a slow concurrent mint could otherwise
+		// look oldest and retire the token it is about to return.
+		_, err = tx.Exec(
+			m.Ctx(),
+			`DELETE FROM user_api_sessions
+			 WHERE short_host_id = $1 AND uid = $2 AND scope = $3
+			   AND token_hash <> $4
+			   AND token_hash NOT IN (
+			     SELECT token_hash FROM user_api_sessions
+			     WHERE short_host_id = $1 AND uid = $2 AND scope = $3
+			       AND token_hash <> $4
+			     ORDER BY ctime DESC
+			     LIMIT $5)`,
+			shid, uidDB, int(scope), tok.Hash(), maxApiSessionsPerScope-1,
+		)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	return &proto.ApiSession{
-		Token:   tok,
-		Scope:   scope,
-		BaseURL: baseURL,
-		Expires: proto.ExportTime(etime),
+		Token:    tok,
+		Scope:    scope,
+		BaseURL:  baseURL,
+		Expires:  proto.ExportTime(etime),
+		Lifetime: proto.ExportDurationMilli(dur),
 	}, nil
 }
 
@@ -161,9 +169,10 @@ func CheckApiSession(
 	defer db.Release()
 	var shid int
 	var uidRaw []byte
+	var etime time.Time
 	err = db.QueryRow(
 		m.Ctx(),
-		`SELECT s.short_host_id, s.uid
+		`SELECT s.short_host_id, s.uid, s.etime
 		 FROM user_api_sessions AS s
 		 JOIN users AS u USING(short_host_id, uid)
 		 JOIN names AS n USING(short_host_id, name_ascii)
@@ -172,7 +181,7 @@ func CheckApiSession(
 		   AND n.state = 'in_use'`,
 		tok.Hash(),
 		int(scope),
-	).Scan(&shid, &uidRaw)
+	).Scan(&shid, &uidRaw, &etime)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ApiSessionNotFoundError{}
 	}
@@ -187,6 +196,7 @@ func CheckApiSession(
 	return &ApiSessionAuth{
 		ShortHostID: core.ShortHostID(shid),
 		UID:         uid,
+		Expires:     etime,
 	}, nil
 }
 

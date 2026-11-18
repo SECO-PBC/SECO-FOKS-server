@@ -15,5 +15,5 @@ CREATE TABLE user_api_sessions (
     active BOOLEAN NOT NULL,
     PRIMARY KEY(token_hash)
 );
-CREATE INDEX user_api_sessions_uid_idx ON user_api_sessions(short_host_id, uid, ctime);
+CREATE INDEX user_api_sessions_uid_idx ON user_api_sessions(short_host_id, uid, scope, ctime);
 CREATE INDEX user_api_sessions_etime_idx ON user_api_sessions(etime);

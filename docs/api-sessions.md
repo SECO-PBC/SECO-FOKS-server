@@ -30,8 +30,9 @@ in their own table.
 - `scope` is a `lib.ApiScope`. A token works only on routes that require its
   scope.
 - The lifetime is `apps.web.api_session_duration`, 24h by default.
-- A user has at most 10 active tokens. Minting past that cap deactivates the
-  oldest ones.
+- A user has at most 10 tokens per scope. Minting past that cap deletes the
+  oldest others (never the new one), and a user may mint at most 5 tokens
+  per scope per minute.
 - The user server garbage-collects rows more than an hour past `etime`
   (`shared.RunApiSessionGC`).
 - This is a separate table from `user_web_sessions`. An API token can never
@@ -43,19 +44,35 @@ in their own table.
 through these middlewares, in order:
 
 1. **Telemetry.** Records a span and `foks.http.api.duration`, tagged only with
-   the chi route pattern, a normalized method and the status class. It never
-   records a uid, token or raw path, and unmatched paths are tagged
-   `unmatched`.
-2. **CORS** with `Access-Control-Allow-Origin: *`. This is safe because auth is
-   a bearer header and never a cookie. It is needed because the desktop
-   renderer is a `file://` page (Origin `null`).
+   the route pattern, a normalized method and the status class. Unknown paths
+   are labelled `unmatched` and CORS preflights `preflight`. It never records
+   a uid, token or raw path.
+2. **CORS** with `Access-Control-Allow-Origin: *`, exposing `Retry-After` and
+   `WWW-Authenticate` to scripts. This is safe because auth is a bearer header
+   and never a cookie. It is needed because the desktop renderer is a
+   `file://` page (Origin `null`).
 3. **Body limit** of 64 KiB.
-4. **`RequireScope(scope)`** on each route. It answers every refusal with the
-   same 401 (`WWW-Authenticate: Bearer`), whatever the reason. It also
-   rate-limits each user, in memory, with a token bucket of 2/s and a burst of
-   30; over the limit it answers 429 with `Retry-After`.
+4. **`RequireScope(scope)`** on each route:
+   - A token verified in the last 30s (and not yet expired) is served from an
+     in-memory cache, without a database lookup. So a deleted or expired
+     token can keep working for up to 30s.
+   - Otherwise the client IP must be under its budget of *refused* tokens
+     (1/s, burst 20) before the database is asked. A flood of made-up tokens
+     gets 429s without touching the connection pool. Only refusals spend this
+     budget, and the IP is the TCP peer; forwarding headers are ignored.
+   - Every refusal is the same 401 (`WWW-Authenticate: Bearer`), whatever the
+     reason.
+   - A client that hangs up mid-lookup is recorded as 499, not 500.
+   - Each user is rate-limited with a token bucket of 2/s and a burst of 30;
+     over the limit it gets 429 with `Retry-After`.
 
 Errors are JSON: `{"error": "<code>"}`.
+
+## Known gaps
+
+- Revoking a device does not revoke the API tokens it minted; they live out
+  their lifetime (24h by default). Fine for `Ping` and analytics. Fix before
+  adding any scope that reads or changes user data.
 
 ## Adding a route
 

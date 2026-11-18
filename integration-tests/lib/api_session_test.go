@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-foks/server/shared"
 	"github.com/stretchr/testify/require"
@@ -115,15 +116,44 @@ func TestApiSessionPing(t *testing.T) {
 	require.Contains(t, res.Header.Get("Access-Control-Allow-Headers"), "Authorization")
 }
 
+// backdateApiSessions moves the user's tokens a couple of minutes into the
+// past, so the mint throttle (5 per scope per minute) doesn't trip while a
+// test mints a batch; their relative order is kept.
+func backdateApiSessions(t *testing.T, m shared.MetaContext, uid proto.UID) {
+	db, err := m.G().Db(m.Ctx(), shared.DbTypeUsers)
+	require.NoError(t, err)
+	defer db.Release()
+	_, err = db.Exec(m.Ctx(),
+		`UPDATE user_api_sessions SET ctime = ctime - INTERVAL '2 minutes'
+		 WHERE short_host_id = $1 AND uid = $2`,
+		int(m.G().ShortHostID()), uid.ExportToDB(),
+	)
+	require.NoError(t, err)
+}
+
 func TestApiSessionScopeExpiryAndCap(t *testing.T) {
 	m := testMetaContext()
 	tu := GenerateNewTestUser(t)
 	ucli, closeFn := tu.newUserCertAndClient(t, m.Ctx())
 	defer closeFn()
 
+	db, err := m.G().Db(m.Ctx(), shared.DbTypeUsers)
+	require.NoError(t, err)
+	defer db.Release()
+	rowExists := func(tok proto.ApiToken) bool {
+		var n int
+		err := db.QueryRow(m.Ctx(),
+			`SELECT COUNT(*) FROM user_api_sessions WHERE token_hash = $1`,
+			tok.Hash(),
+		).Scan(&n)
+		require.NoError(t, err)
+		return n == 1
+	}
+
 	// A token is good only for the scope it was minted with.
 	analytics, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_ClientAnalytics)
 	require.NoError(t, err)
+	require.Equal(t, 24*time.Hour, analytics.Lifetime.Import())
 	res := apiPing(t, analytics.BaseURL, "Bearer "+analytics.Token.String())
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 
@@ -131,15 +161,10 @@ func TestApiSessionScopeExpiryAndCap(t *testing.T) {
 	_, err = ucli.NewApiSession(m.Ctx(), proto.ApiScope(99))
 	require.Error(t, err)
 
-	db, err := m.G().Db(m.Ctx(), shared.DbTypeUsers)
-	require.NoError(t, err)
-	defer db.Release()
-
-	// Expired tokens are refused.
+	// Expired tokens are refused. (Not pinged before expiring: a verified
+	// token is cached for up to 30s, by design.)
 	exp, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
 	require.NoError(t, err)
-	res = apiPing(t, exp.BaseURL, "Bearer "+exp.Token.String())
-	require.Equal(t, http.StatusNoContent, res.StatusCode)
 	_, err = db.Exec(m.Ctx(),
 		`UPDATE user_api_sessions SET etime = NOW() - INTERVAL '1 minute' WHERE token_hash = $1`,
 		exp.Token.Hash(),
@@ -148,55 +173,112 @@ func TestApiSessionScopeExpiryAndCap(t *testing.T) {
 	res = apiPing(t, exp.BaseURL, "Bearer "+exp.Token.String())
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 
-	// Minting past the cap retires the oldest live token.
+	// Minting past the per-scope cap deletes the oldest others; the other
+	// scope's token is untouched.
+	backdateApiSessions(t, m, tu.uid)
 	first, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
 	require.NoError(t, err)
-	res = apiPing(t, first.BaseURL, "Bearer "+first.Token.String())
-	require.Equal(t, http.StatusNoContent, res.StatusCode)
 	var last proto.ApiSession
-	for range 10 {
-		// ctime is NOW() per transaction; keep them strictly ordered.
+	for i := range 10 {
+		if i%4 == 0 {
+			backdateApiSessions(t, m, tu.uid)
+		}
 		time.Sleep(2 * time.Millisecond)
 		last, err = ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
 		require.NoError(t, err)
 	}
+	require.False(t, rowExists(first.Token))
+	require.False(t, rowExists(exp.Token))
+	require.True(t, rowExists(analytics.Token))
 	res = apiPing(t, first.BaseURL, "Bearer "+first.Token.String())
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 	res = apiPing(t, last.BaseURL, "Bearer "+last.Token.String())
 	require.Equal(t, http.StatusNoContent, res.StatusCode)
 
-	var nActive int
+	var nPing int
 	err = db.QueryRow(m.Ctx(),
 		`SELECT COUNT(*) FROM user_api_sessions
-		 WHERE short_host_id = $1 AND uid = $2 AND active = true`,
-		int(m.G().ShortHostID()), tu.uid.ExportToDB(),
-	).Scan(&nActive)
+		 WHERE short_host_id = $1 AND uid = $2 AND scope = $3`,
+		int(m.G().ShortHostID()), tu.uid.ExportToDB(), int(proto.ApiScope_Ping),
+	).Scan(&nPing)
 	require.NoError(t, err)
-	require.Equal(t, 10, nActive)
+	require.Equal(t, 10, nPing)
 
-	// GC removes expired rows and leaves live ones.
-	_, err = shared.DeleteExpiredApiSessions(m, time.Hour, 1000000)
-	require.NoError(t, err)
-	var n int
-	err = db.QueryRow(m.Ctx(),
-		`SELECT COUNT(*) FROM user_api_sessions WHERE token_hash = $1`,
-		exp.Token.Hash(),
-	).Scan(&n)
-	require.NoError(t, err)
-	require.Equal(t, 1, n, "expired a minute ago is inside the GC margin")
+	// GC removes rows past etime + margin, and leaves the rest.
 	_, err = db.Exec(m.Ctx(),
-		`UPDATE user_api_sessions SET etime = NOW() - INTERVAL '2 hours' WHERE token_hash = $1`,
-		exp.Token.Hash(),
+		`UPDATE user_api_sessions SET etime = NOW() - INTERVAL '1 minute' WHERE token_hash = $1`,
+		analytics.Token.Hash(),
 	)
 	require.NoError(t, err)
 	_, err = shared.DeleteExpiredApiSessions(m, time.Hour, 1000000)
 	require.NoError(t, err)
-	err = db.QueryRow(m.Ctx(),
-		`SELECT COUNT(*) FROM user_api_sessions WHERE token_hash = $1`,
-		exp.Token.Hash(),
-	).Scan(&n)
+	require.True(t, rowExists(analytics.Token), "expired a minute ago is inside the GC margin")
+	_, err = db.Exec(m.Ctx(),
+		`UPDATE user_api_sessions SET etime = NOW() - INTERVAL '2 hours' WHERE token_hash = $1`,
+		analytics.Token.Hash(),
+	)
 	require.NoError(t, err)
-	require.Equal(t, 0, n)
-	res = apiPing(t, last.BaseURL, "Bearer "+last.Token.String())
+	_, err = shared.DeleteExpiredApiSessions(m, time.Hour, 1000000)
+	require.NoError(t, err)
+	require.False(t, rowExists(analytics.Token))
+	require.True(t, rowExists(last.Token))
+}
+
+func TestApiSessionMintThrottle(t *testing.T) {
+	m := testMetaContext()
+	tu := GenerateNewTestUser(t)
+	ucli, closeFn := tu.newUserCertAndClient(t, m.Ctx())
+	defer closeFn()
+
+	for range 5 {
+		_, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
+		require.NoError(t, err)
+	}
+	_, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
+	require.Error(t, err)
+	require.Equal(t, core.RateLimitError{}, err)
+
+	// The throttle is per scope.
+	_, err = ucli.NewApiSession(m.Ctx(), proto.ApiScope_ClientAnalytics)
+	require.NoError(t, err)
+
+	// And it lifts once the minute has passed.
+	backdateApiSessions(t, m, tu.uid)
+	_, err = ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
+	require.NoError(t, err)
+}
+
+// Runs last among the API tests: it exhausts 127.0.0.1's budget of refused
+// tokens, which would turn later uncached lookups from this IP into 429s.
+func TestApiSessionZFailGate(t *testing.T) {
+	m := testMetaContext()
+	tu := GenerateNewTestUser(t)
+	ucli, closeFn := tu.newUserCertAndClient(t, m.Ctx())
+	defer closeFn()
+
+	good, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
+	require.NoError(t, err)
+	bearer := "Bearer " + good.Token.String()
+	res := apiPing(t, good.BaseURL, bearer)
+	require.Equal(t, http.StatusNoContent, res.StatusCode)
+
+	var stranger proto.ApiToken
+	stranger[1] = 2
+	got429 := false
+	for range 40 {
+		res = apiPing(t, good.BaseURL, "Bearer "+stranger.String())
+		if res.StatusCode == http.StatusTooManyRequests {
+			got429 = true
+			require.NotEmpty(t, res.Header.Get("Retry-After"))
+			require.Contains(t, res.Header.Get("Access-Control-Expose-Headers"), "Retry-After")
+			break
+		}
+		require.Equal(t, http.StatusUnauthorized, res.StatusCode)
+	}
+	require.True(t, got429, "a flood of refused tokens is throttled before the DB")
+
+	// A token verified moments ago is served from the cache, so it still
+	// works while its IP is blocked for unknown tokens.
+	res = apiPing(t, good.BaseURL, bearer)
 	require.Equal(t, http.StatusNoContent, res.StatusCode)
 }

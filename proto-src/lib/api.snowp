@@ -19,4 +19,8 @@ struct ApiSession {
     scope @1 : ApiScope;
     baseURL @2 : URLString;
     expires @3 : Time;
+    // How long the token lives, measured on the server. Clients schedule
+    // re-mints from this and their own clock, never by comparing `expires`
+    // with their clock, which may be skewed.
+    lifetime @4 : DurationMilli;
 }

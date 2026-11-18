@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -42,7 +43,9 @@ func AuthFromContext(ctx context.Context) *shared.ApiSessionAuth {
 
 type api struct {
 	g       *shared.GlobalContext
-	limiter *rateLimiter
+	limiter *rateLimiter[rateKey] // per user, every authenticated request
+	fails   *rateLimiter[string]  // per client IP, refused tokens only
+	cache   *authCache
 }
 
 // InitRouter mounts /api/v1 on mux. It must not sit under the HTML/CSP
@@ -50,7 +53,9 @@ type api struct {
 func InitRouter(g *shared.GlobalContext, mux chi.Router) {
 	a := &api{
 		g:       g,
-		limiter: newRateLimiter(defaultRatePerSec, defaultBurst, time.Now),
+		limiter: newRateLimiter[rateKey](defaultRatePerSec, defaultBurst, time.Now),
+		fails:   newRateLimiter[string](failRatePerSec, failBurst, time.Now),
+		cache:   newAuthCache(time.Now),
 	}
 	mux.Route(Prefix, func(r chi.Router) {
 		r.Use(a.telemetry, cors, limitBody)
@@ -71,36 +76,87 @@ func ping(w http.ResponseWriter, _ *http.Request) {
 
 // RequireScope authenticates the bearer token for scope and rate-limits its
 // user. Every refusal is the same 401, whatever the reason.
+//
+// The database is consulted only for a token not verified in the last
+// authCacheTTL, and only while the client's IP is under its budget of
+// refused tokens -- so neither a flood of made-up tokens nor a runaway client
+// over its per-user limit costs a query per request.
 func (a *api) RequireScope(scope proto.ApiScope) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := clientIP(r)
 			tok, ok := bearerToken(r)
 			if !ok {
-				unauthorized(w)
+				a.refuse(w, ip)
 				return
 			}
-			m := shared.NewMetaContext(r.Context(), a.g)
-			auth, err := shared.CheckApiSession(m, *tok, scope)
-			if errors.As(err, &shared.ApiSessionNotFoundError{}) {
-				unauthorized(w)
-				return
-			}
-			if err != nil {
-				// No uid or token in the log line: only the failure.
-				m.Warnw("api.RequireScope", "err", err)
-				writeErr(w, http.StatusInternalServerError, "internal")
-				return
+			key := authCacheKey(tok.Hash())
+			ck := cacheKeyFor(key, scope)
+			auth, hit := a.cache.get(ck)
+			if !hit {
+				if wait, ok := a.fails.check(ip); !ok {
+					tooMany(w, wait)
+					return
+				}
+				m := shared.NewMetaContext(r.Context(), a.g)
+				var err error
+				auth, err = shared.CheckApiSession(m, *tok, scope)
+				switch {
+				case errors.As(err, &shared.ApiSessionNotFoundError{}):
+					a.refuse(w, ip)
+					return
+				case err != nil && r.Context().Err() != nil:
+					// The client hung up mid-lookup: not a server fault.
+					w.WriteHeader(statusClientClosed)
+					return
+				case err != nil:
+					// No uid or token in the log line: only the failure.
+					m.Warnw("api.RequireScope", "err", err)
+					writeErr(w, http.StatusInternalServerError, "internal")
+					return
+				}
+				a.cache.put(ck, *auth, auth.Expires)
 			}
 			if wait, ok := a.limiter.allow(rateKey{shid: auth.ShortHostID, uid: auth.UID}); !ok {
-				secs := max(1, int((wait+time.Second-1)/time.Second))
-				w.Header().Set("Retry-After", strconv.Itoa(secs))
-				writeErr(w, http.StatusTooManyRequests, "rate_limited")
+				tooMany(w, wait)
 				return
 			}
 			ctx := context.WithValue(r.Context(), ctxKey{}, auth)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// statusClientClosed is nginx's 499: the client went away before the answer.
+// Recorded as 4xx, so hang-ups never read as server errors.
+const statusClientClosed = 499
+
+// cacheKeyFor folds the scope into the token hash, so a token cached for one
+// scope never authenticates another.
+func cacheKeyFor(h authCacheKey, scope proto.ApiScope) authCacheKey {
+	h[0] ^= byte(scope)
+	return h
+}
+
+func (a *api) refuse(w http.ResponseWriter, ip string) {
+	a.fails.charge(ip)
+	unauthorized(w)
+}
+
+// clientIP is the TCP peer. Forwarding headers are ignored: the web server
+// faces the internet directly, and a client could set them to anything.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func tooMany(w http.ResponseWriter, wait time.Duration) {
+	secs := max(1, int((wait+time.Second-1)/time.Second))
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	writeErr(w, http.StatusTooManyRequests, "rate_limited")
 }
 
 func bearerToken(r *http.Request) (*proto.ApiToken, bool) {
@@ -131,6 +187,8 @@ func cors(next http.Handler) http.Handler {
 		h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		h.Set("Access-Control-Max-Age", "600")
+		// Not CORS-safelisted, so a renderer can't read them unless exposed.
+		h.Set("Access-Control-Expose-Headers", "Retry-After, WWW-Authenticate")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -161,12 +219,18 @@ func (a *api) telemetry(next http.Handler) http.Handler {
 			if status == 0 {
 				status = http.StatusOK
 			}
-			route := ""
-			if rc := chi.RouteContext(r.Context()); rc != nil {
-				route = rc.RoutePattern()
-			}
-			if r.Method == http.MethodOptions {
-				route = Prefix + "/*"
+			// Fixed labels for the two cases chi would both report as the
+			// mount pattern "/api/v1/*": unknown paths and CORS preflights.
+			var route string
+			switch {
+			case r.Method == http.MethodOptions:
+				route = "preflight"
+			case status == http.StatusNotFound:
+				route = "unmatched"
+			default:
+				if rc := chi.RouteContext(r.Context()); rc != nil {
+					route = rc.RoutePattern()
+				}
 			}
 			t.FinishHTTPAPIRequest(ctx, span, method, route, status, time.Since(start))
 		}()

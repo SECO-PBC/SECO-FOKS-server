@@ -27,6 +27,15 @@ type rateKey struct {
 	uid  proto.UID
 }
 
+const (
+	// Failed bearer checks per client IP. Charged only when a token is
+	// refused, and checked BEFORE the database lookup, so a flood of made-up
+	// tokens is turned away without touching the pool. Honest clients almost
+	// never fail, so the budget can be small.
+	failRatePerSec = 1.0
+	failBurst      = 20.0
+)
+
 type bucket struct {
 	tokens float64
 	last   time.Time
@@ -35,30 +44,28 @@ type bucket struct {
 // rateLimiter is a per-user token bucket, in memory. Per process is enough
 // while one web server serves a host; behind several, each enforces its own
 // share, which is still a bound.
-type rateLimiter struct {
+type rateLimiter[K comparable] struct {
 	sync.Mutex
 	rate    float64
 	burst   float64
 	now     func() time.Time
-	buckets map[rateKey]*bucket
+	buckets map[K]*bucket
 	sweep   time.Time
 }
 
-func newRateLimiter(rate, burst float64, now func() time.Time) *rateLimiter {
-	return &rateLimiter{
+func newRateLimiter[K comparable](rate, burst float64, now func() time.Time) *rateLimiter[K] {
+	return &rateLimiter[K]{
 		rate:    rate,
 		burst:   burst,
 		now:     now,
-		buckets: make(map[rateKey]*bucket),
+		buckets: make(map[K]*bucket),
 		sweep:   now(),
 	}
 }
 
-// allow takes one token for k. When none is left it reports how long until
-// one will be.
-func (l *rateLimiter) allow(k rateKey) (time.Duration, bool) {
-	l.Lock()
-	defer l.Unlock()
+// refill brings k's bucket up to date and returns it, sweeping idle buckets
+// now and then. Callers hold the lock.
+func (l *rateLimiter[K]) refill(k K) *bucket {
 	now := l.now()
 	if now.Sub(l.sweep) > limiterIdle {
 		for key, b := range l.buckets {
@@ -75,10 +82,42 @@ func (l *rateLimiter) allow(k rateKey) (time.Duration, bool) {
 	}
 	b.tokens = min(l.burst, b.tokens+now.Sub(b.last).Seconds()*l.rate)
 	b.last = now
+	return b
+}
+
+func (l *rateLimiter[K]) wait(b *bucket) time.Duration {
+	return time.Duration((1 - b.tokens) / l.rate * float64(time.Second))
+}
+
+// allow takes one token for k. When none is left it reports how long until
+// one will be.
+func (l *rateLimiter[K]) allow(k K) (time.Duration, bool) {
+	l.Lock()
+	defer l.Unlock()
+	b := l.refill(k)
 	if b.tokens < 1 {
-		need := (1 - b.tokens) / l.rate
-		return time.Duration(need * float64(time.Second)), false
+		return l.wait(b), false
 	}
 	b.tokens--
 	return 0, true
+}
+
+// check reports whether k has a token left, without taking it.
+func (l *rateLimiter[K]) check(k K) (time.Duration, bool) {
+	l.Lock()
+	defer l.Unlock()
+	b := l.refill(k)
+	if b.tokens < 1 {
+		return l.wait(b), false
+	}
+	return 0, true
+}
+
+// charge takes a token from k, going below zero if need be, so a client that
+// keeps failing while blocked stays blocked.
+func (l *rateLimiter[K]) charge(k K) {
+	l.Lock()
+	defer l.Unlock()
+	b := l.refill(k)
+	b.tokens = max(b.tokens-1, -l.burst)
 }
