@@ -16,4 +16,11 @@ protocol Admin
         url @0 : lib.URLString
     );
 
+    // Fork-only (docs/client-analytics.md): forward an opt-in analytics
+    // batch to the active user's home server. Numbered from @200 like other
+    // fork additions so upstream can keep appending.
+    reportClientAnalytics @200 (
+        batch @0 : lib.ClientAnalyticsBatch
+    );
+
 }

@@ -47,6 +47,11 @@ var allowedTelemetryKeys = map[attribute.Key]bool{
 	"status":                  true,
 	"result":                  true,
 	"rt.fanout.members":       true,
+	// seco.client.* (telemetry_client.go): proto enum names and fixed drop
+	// reasons only.
+	"client.metric":   true,
+	"client.platform": true,
+	"reason":          true,
 }
 
 // A stand-in for user data that must never reach telemetry.

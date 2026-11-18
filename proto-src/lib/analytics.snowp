@@ -1,0 +1,35 @@
+// Copyright (c) 2025 ne43, Inc.
+// Licensed under the MIT License. See LICENSE in the project root for details.
+
+@0xe154b974b7d7628a;
+
+// Fork-only (docs/client-analytics.md): opt-in client analytics, reported over
+// the authenticated User protocol. Every name is an enum, so a metric the
+// server doesn't know can't be expressed on the wire; adding one is a proto
+// change. Never add a dimension that identifies a user, team, channel or
+// device: the batch's sender is known, but nothing about them is recorded.
+
+// A client-side latency, measured in milliseconds.
+enum ClientLatencyMetric {
+    SendAck @1;         // composer tap -> server acknowledged the send
+    RecvRender @2;      // server insert -> message rendered on a recipient
+    DaemonReply @3;     // DM to the daemon sent -> its reply rendered
+    ColdStart @4;       // process start -> first conversation list rows
+    ChannelOpen @5;     // channel tapped -> first messages rendered
+}
+
+enum ClientPlatform {
+    Ios @1;
+    Android @2;
+    Desktop @3;
+}
+
+struct ClientLatencySample {
+    metric @0 : ClientLatencyMetric;
+    ms @1 : Uint;
+}
+
+struct ClientAnalyticsBatch {
+    platform @0 : ClientPlatform;
+    latencies @1 : List(ClientLatencySample);
+}

@@ -1,0 +1,36 @@
+// Copyright (c) 2025 ne43, Inc.
+// Licensed under the MIT License. See LICENSE in the project root for details.
+
+package lib
+
+// Fork-only (docs/client-analytics.md): the reportClientAnalytics RPC end to
+// end. Validation and recording are unit-tested in server/shared.
+
+import (
+	"testing"
+
+	"github.com/foks-proj/go-foks/lib/core"
+	proto "github.com/foks-proj/go-foks/proto/lib"
+	"github.com/stretchr/testify/require"
+)
+
+func TestReportClientAnalytics(t *testing.T) {
+	m := testMetaContext()
+	tu := GenerateNewTestUser(t)
+	ucli, closeFn := tu.newUserCertAndClient(t, m.Ctx())
+	defer closeFn()
+
+	err := ucli.ReportClientAnalytics(m.Ctx(), proto.ClientAnalyticsBatch{
+		Platform: proto.ClientPlatform_Ios,
+		Latencies: []proto.ClientLatencySample{
+			{Metric: proto.ClientLatencyMetric_SendAck, Ms: 140},
+			{Metric: proto.ClientLatencyMetric_ChannelOpen, Ms: 600},
+		},
+	})
+	require.NoError(t, err)
+
+	// Refusals cross the wire as their status, not as a generic failure.
+	err = ucli.ReportClientAnalytics(m.Ctx(), proto.ClientAnalyticsBatch{})
+	require.Error(t, err)
+	require.IsType(t, core.BadArgsError(""), err)
+}

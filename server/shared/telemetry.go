@@ -107,6 +107,9 @@ type instruments struct {
 	rtFanoutMembers metric.Int64Histogram
 	rtPollDuration  metric.Float64Histogram
 	rtReconcile     metric.Int64Counter
+
+	clientLatency        metric.Float64Histogram
+	clientLatencyDropped metric.Int64Counter
 }
 
 func newInstruments(mt metric.Meter) (*instruments, error) {
@@ -148,6 +151,9 @@ func newInstruments(mt metric.Meter) (*instruments, error) {
 		rtFanoutMembers: i64h("foks.rt.fanout.members", "{member}", "Inboxes bumped and woken per write"),
 		rtPollDuration:  f64h("foks.rt.poll.duration", "ms", "rtPollInbox wait, by outcome"),
 		rtReconcile:     ctr("foks.rt.reconcile", "Late-join fan-in checks, by which tier answered"),
+
+		clientLatency:        f64h("seco.client.latency", "ms", "Opt-in client-measured latency, by metric and platform"),
+		clientLatencyDropped: ctr("seco.client.latency.dropped", "Client latency samples refused, by reason"),
 	}
 	return ret, errors.Join(errs...)
 }
