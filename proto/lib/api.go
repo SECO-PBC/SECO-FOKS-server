@@ -69,17 +69,13 @@ func (a ApiScope) Export() *ApiScopeInternal__ {
 
 type ApiSession struct {
 	Token    ApiToken
-	Scope    ApiScope
 	BaseURL  URLString
-	Expires  Time
 	Lifetime DurationMilli
 }
 type ApiSessionInternal__ struct {
 	_struct  struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
 	Token    *ApiTokenInternal__
-	Scope    *ApiScopeInternal__
 	BaseURL  *URLStringInternal__
-	Expires  *TimeInternal__
 	Lifetime *DurationMilliInternal__
 }
 
@@ -91,24 +87,12 @@ func (a ApiSessionInternal__) Import() ApiSession {
 			}
 			return x.Import()
 		})(a.Token),
-		Scope: (func(x *ApiScopeInternal__) (ret ApiScope) {
-			if x == nil {
-				return ret
-			}
-			return x.Import()
-		})(a.Scope),
 		BaseURL: (func(x *URLStringInternal__) (ret URLString) {
 			if x == nil {
 				return ret
 			}
 			return x.Import()
 		})(a.BaseURL),
-		Expires: (func(x *TimeInternal__) (ret Time) {
-			if x == nil {
-				return ret
-			}
-			return x.Import()
-		})(a.Expires),
 		Lifetime: (func(x *DurationMilliInternal__) (ret DurationMilli) {
 			if x == nil {
 				return ret
@@ -120,9 +104,7 @@ func (a ApiSessionInternal__) Import() ApiSession {
 func (a ApiSession) Export() *ApiSessionInternal__ {
 	return &ApiSessionInternal__{
 		Token:    a.Token.Export(),
-		Scope:    a.Scope.Export(),
 		BaseURL:  a.BaseURL.Export(),
-		Expires:  a.Expires.Export(),
 		Lifetime: a.Lifetime.Export(),
 	}
 }

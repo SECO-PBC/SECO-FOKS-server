@@ -88,11 +88,14 @@ func NewApiSession(
 	if err != nil {
 		return nil, err
 	}
-	dur := wcfg.ApiSessionDuration()
+	dur, err := wcfg.ApiSessionDuration()
+	if err != nil {
+		return nil, err
+	}
 	shid := int(m.ShortHostID())
 	uidDB := uid.ExportToDB()
+	hash := tok.Hash()
 
-	var etime time.Time
 	err = RetryTxUserDB(m, "NewApiSession", func(m MetaContext, tx pgx.Tx) error {
 		var recent int
 		err := tx.QueryRow(
@@ -108,14 +111,13 @@ func NewApiSession(
 		if recent >= maxApiMintsPerMinute {
 			return core.RateLimitError{}
 		}
-		err = tx.QueryRow(
+		_, err = tx.Exec(
 			m.Ctx(),
 			`INSERT INTO user_api_sessions
 			   (short_host_id, uid, token_hash, scope, ctime, etime, active)
-			 VALUES($1, $2, $3, $4, NOW(), NOW() + $5, true)
-			 RETURNING etime`,
-			shid, uidDB, tok.Hash(), int(scope), dur,
-		).Scan(&etime)
+			 VALUES($1, $2, $3, $4, NOW(), NOW() + $5, true)`,
+			shid, uidDB, hash.ExportToDB(), int(scope), dur,
+		)
 		if err != nil {
 			return err
 		}
@@ -134,7 +136,7 @@ func NewApiSession(
 			       AND token_hash <> $4
 			     ORDER BY ctime DESC
 			     LIMIT $5)`,
-			shid, uidDB, int(scope), tok.Hash(), maxApiSessionsPerScope-1,
+			shid, uidDB, int(scope), hash.ExportToDB(), maxApiSessionsPerScope-1,
 		)
 		return err
 	})
@@ -144,19 +146,17 @@ func NewApiSession(
 
 	return &proto.ApiSession{
 		Token:    tok,
-		Scope:    scope,
 		BaseURL:  baseURL,
-		Expires:  proto.ExportTime(etime),
 		Lifetime: proto.ExportDurationMilli(dur),
 	}, nil
 }
 
-// CheckApiSession resolves a bearer token to its user, provided it is active,
-// unexpired, minted for scope, and its user is still in use. Any failure to
-// match is ApiSessionNotFoundError.
+// CheckApiSession resolves a token (by its hash) to its user, provided it is
+// active, unexpired, minted for scope, and its user is still in use. Any
+// failure to match is ApiSessionNotFoundError.
 func CheckApiSession(
 	m MetaContext,
-	tok proto.ApiToken,
+	hash proto.ApiTokenHash,
 	scope proto.ApiScope,
 ) (
 	*ApiSessionAuth,
@@ -179,7 +179,7 @@ func CheckApiSession(
 		 WHERE s.token_hash = $1 AND s.scope = $2
 		   AND s.active = true AND s.etime > NOW()
 		   AND n.state = 'in_use'`,
-		tok.Hash(),
+		hash.ExportToDB(),
 		int(scope),
 	).Scan(&shid, &uidRaw, &etime)
 	if errors.Is(err, pgx.ErrNoRows) {

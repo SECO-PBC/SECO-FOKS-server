@@ -18,12 +18,25 @@ const ApiTokenPrefix = "foksapi_"
 
 var ErrBadApiToken = errors.New("malformed API token")
 
-// String encodes the token as it travels in an Authorization header.
+// String is REDACTED. fmt, zap and error wrapping call String implicitly, so
+// it must never yield the credential: printing a token, or an ApiSession
+// with %+v, shows only that a token was there. Use Bearer for the real value.
 func (a ApiToken) String() string {
+	return ApiTokenPrefix + "<redacted>"
+}
+
+// GoString redacts %#v too.
+func (a ApiToken) GoString() string {
+	return a.String()
+}
+
+// Bearer encodes the token as it travels in an Authorization header. This
+// is the secret: call it only to hand the token to its owner.
+func (a ApiToken) Bearer() string {
 	return ApiTokenPrefix + B62Encode(a[:])
 }
 
-// ParseApiToken decodes a token produced by ApiToken.String.
+// ParseApiToken decodes a token produced by ApiToken.Bearer.
 func ParseApiToken(s string) (*ApiToken, error) {
 	rest, ok := strings.CutPrefix(s, ApiTokenPrefix)
 	if !ok {
@@ -41,10 +54,17 @@ func ParseApiToken(s string) (*ApiToken, error) {
 	return &ret, nil
 }
 
-// Hash is what the server stores and looks tokens up by; the token itself is
-// never written down.
-func (a ApiToken) Hash() []byte {
-	h := sha256.Sum256(a[:])
+// ApiTokenHash is the SHA-256 of an ApiToken: what the server stores and looks
+// tokens up by. A distinct type, so a token can't be passed where its hash is
+// expected (cache keys, the helpers that take a hash). SQL parameters are
+// `any` and can't be protected this way: always pass Hash().ExportToDB().
+type ApiTokenHash [sha256.Size]byte
+
+func (a ApiToken) Hash() ApiTokenHash {
+	return sha256.Sum256(a[:])
+}
+
+func (h ApiTokenHash) ExportToDB() []byte {
 	return h[:]
 }
 

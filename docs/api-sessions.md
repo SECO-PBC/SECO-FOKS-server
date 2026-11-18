@@ -16,12 +16,18 @@ in their own table.
 
 1. The app calls lcl `Admin.apiSession(scope)`. The agent forwards it to rem
    `User.newApiSession(scope)` on the user's home server.
-2. The server returns `lib.ApiSession{token, scope, baseURL, expires}`.
+2. The server returns `lib.ApiSession{token, baseURL, lifetime}`.
    `baseURL` comes from the same logic as admin-panel links (`adminBaseURL`),
-   so clients need no config for where the API lives.
+   so clients need no config for where the API lives. There is deliberately
+   no absolute expiry: a client schedules re-mints from `lifetime` and its own
+   clock, so a skewed device clock can't make it re-mint on every call.
 3. The client sends `Authorization: Bearer foksapi_<base62>` to
    `<baseURL>/api/v1/...`. It keeps the token in memory, mints again shortly
-   before `expires`, and mints again once on a 401.
+   before it expires, and mints again once on a 401.
+
+In Go, `ApiToken.String()` is redacted, so formatting a token or a session
+never prints the credential; `ApiToken.Bearer()` is the real encoding. A
+token's SHA-256 has its own type, `ApiTokenHash`.
 
 ## Storage
 
@@ -29,7 +35,8 @@ in their own table.
   `token_hash = SHA-256(token)`. The token itself is never stored.
 - `scope` is a `lib.ApiScope`. A token works only on routes that require its
   scope.
-- The lifetime is `apps.web.api_session_duration`, 24h by default.
+- The lifetime is `apps.web.api_session_duration`, 24h by default. A value
+  below zero is a config error.
 - A user has at most 10 tokens per scope. Minting past that cap deletes the
   oldest others (never the new one), and a user may mint at most 5 tokens
   per scope per minute.
@@ -52,7 +59,7 @@ through these middlewares, in order:
    and never a cookie. It is needed because the desktop renderer is a
    `file://` page (Origin `null`).
 3. **Body limit** of 64 KiB.
-4. **`RequireScope(scope)`** on each route:
+4. **`route(scope, handler)`** wraps each route:
    - A token verified in the last 30s (and not yet expired) is served from an
      in-memory cache, without a database lookup. So a deleted or expired
      token can keep working for up to 30s.
@@ -78,7 +85,9 @@ Errors are JSON: `{"error": "<code>"}`.
 
 1. Add a scope to `ApiScope` in `proto-src/lib/api.snowp` and regenerate.
    Clients mint per scope.
-2. Register the route in `api.InitRouter` with `a.RequireScope(scope)`. Read
-   the caller with `api.AuthFromContext(ctx)`.
+2. Register it in `api.InitRouter` as `a.route(scope, h)`. Handlers have the
+   type `authedHandler` and receive the verified caller as a
+   `shared.ApiSessionAuth` value, so a handler can't be mounted without a
+   scope check or find its caller missing.
 3. Never put the uid, or anything derived from the request body, into
    telemetry attributes.

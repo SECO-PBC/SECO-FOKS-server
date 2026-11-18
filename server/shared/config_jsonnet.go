@@ -832,11 +832,14 @@ func (w *WebConfigJSON) SessionDuration() time.Duration {
 	return w.SessionDuration_.Duration
 }
 
-func (w *WebConfigJSON) ApiSessionDuration() time.Duration {
+func (w *WebConfigJSON) ApiSessionDuration() (time.Duration, error) {
 	if w == nil || w.ApiSessionDuration_.Duration == 0 {
 		return (DefaultWebConfig{}).ApiSessionDuration()
 	}
-	return w.ApiSessionDuration_.Duration
+	if w.ApiSessionDuration_.Duration < 0 {
+		return 0, core.ConfigError("apps.web.api_session_duration must be positive")
+	}
+	return w.ApiSessionDuration_.Duration, nil
 }
 
 func (w *WebConfigJSON) UseTLS() bool {

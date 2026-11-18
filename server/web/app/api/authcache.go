@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-foks/server/shared"
 )
 
@@ -22,7 +23,12 @@ const (
 	authCacheMax = 10000
 )
 
-type authCacheKey [32]byte
+// authCacheKey is a token hash AND the scope it was checked for: a token
+// verified for one scope is a different key for any other, by construction.
+type authCacheKey struct {
+	hash  proto.ApiTokenHash
+	scope proto.ApiScope
+}
 
 type authCacheEntry struct {
 	auth  shared.ApiSessionAuth
@@ -43,23 +49,24 @@ func newAuthCache(now func() time.Time) *authCache {
 	return &authCache{now: now, entries: make(map[authCacheKey]authCacheEntry)}
 }
 
-func (c *authCache) get(k authCacheKey) (*shared.ApiSessionAuth, bool) {
+func (c *authCache) get(k authCacheKey) (shared.ApiSessionAuth, bool) {
 	c.Lock()
 	defer c.Unlock()
 	e, ok := c.entries[k]
 	if !ok {
-		return nil, false
+		return shared.ApiSessionAuth{}, false
 	}
 	if !c.now().Before(e.until) {
 		delete(c.entries, k)
-		return nil, false
+		return shared.ApiSessionAuth{}, false
 	}
-	return &e.auth, true
+	return e.auth, true
 }
 
 // put caches auth until authCacheTTL from now or the token's expiry,
 // whichever is first.
-func (c *authCache) put(k authCacheKey, auth shared.ApiSessionAuth, expires time.Time) {
+func (c *authCache) put(k authCacheKey, auth shared.ApiSessionAuth) {
+	expires := auth.Expires
 	c.Lock()
 	defer c.Unlock()
 	if len(c.entries) >= authCacheMax {

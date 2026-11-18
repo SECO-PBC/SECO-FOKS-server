@@ -10,7 +10,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -33,18 +32,15 @@ const (
 	maxBodyBytes = 64 << 10
 )
 
-type ctxKey struct{}
-
-// AuthFromContext returns the bearer token's user, set by RequireScope.
-func AuthFromContext(ctx context.Context) *shared.ApiSessionAuth {
-	ret, _ := ctx.Value(ctxKey{}).(*shared.ApiSessionAuth)
-	return ret
-}
+// authedHandler is the only shape an /api/v1 handler takes. It receives the
+// verified caller as a value, so there is no handler that can run without a
+// scope check or find its caller missing.
+type authedHandler func(w http.ResponseWriter, r *http.Request, auth shared.ApiSessionAuth)
 
 type api struct {
 	g       *shared.GlobalContext
-	limiter *rateLimiter[rateKey] // per user, every authenticated request
-	fails   *rateLimiter[string]  // per client IP, refused tokens only
+	limiter *rateLimiter[rateKey]    // per user, every authenticated request
+	fails   *rateLimiter[clientAddr] // per client IP, refused tokens only
 	cache   *authCache
 }
 
@@ -54,12 +50,12 @@ func InitRouter(g *shared.GlobalContext, mux chi.Router) {
 	a := &api{
 		g:       g,
 		limiter: newRateLimiter[rateKey](defaultRatePerSec, defaultBurst, time.Now),
-		fails:   newRateLimiter[string](failRatePerSec, failBurst, time.Now),
+		fails:   newRateLimiter[clientAddr](failRatePerSec, failBurst, time.Now),
 		cache:   newAuthCache(time.Now),
 	}
 	mux.Route(Prefix, func(r chi.Router) {
 		r.Use(a.telemetry, cors, limitBody)
-		r.With(a.RequireScope(proto.ApiScope_Ping)).Get("/ping", ping)
+		r.Get("/ping", a.route(proto.ApiScope_Ping, ping))
 		r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
 			writeErr(w, http.StatusNotFound, "not_found")
 		})
@@ -70,60 +66,56 @@ func InitRouter(g *shared.GlobalContext, mux chi.Router) {
 }
 
 // ping proves the stack end to end: a 204 means the token was good.
-func ping(w http.ResponseWriter, _ *http.Request) {
+func ping(w http.ResponseWriter, _ *http.Request, _ shared.ApiSessionAuth) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// RequireScope authenticates the bearer token for scope and rate-limits its
-// user. Every refusal is the same 401, whatever the reason.
+// route authenticates the bearer token for scope, rate-limits its user, and
+// only then calls h. Every refusal is the same 401, whatever the reason.
 //
 // The database is consulted only for a token not verified in the last
 // authCacheTTL, and only while the client's IP is under its budget of
 // refused tokens -- so neither a flood of made-up tokens nor a runaway client
 // over its per-user limit costs a query per request.
-func (a *api) RequireScope(scope proto.ApiScope) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := clientIP(r)
-			tok, ok := bearerToken(r)
-			if !ok {
-				a.refuse(w, ip)
-				return
-			}
-			key := authCacheKey(tok.Hash())
-			ck := cacheKeyFor(key, scope)
-			auth, hit := a.cache.get(ck)
-			if !hit {
-				if wait, ok := a.fails.check(ip); !ok {
-					tooMany(w, wait)
-					return
-				}
-				m := shared.NewMetaContext(r.Context(), a.g)
-				var err error
-				auth, err = shared.CheckApiSession(m, *tok, scope)
-				switch {
-				case errors.As(err, &shared.ApiSessionNotFoundError{}):
-					a.refuse(w, ip)
-					return
-				case err != nil && r.Context().Err() != nil:
-					// The client hung up mid-lookup: not a server fault.
-					w.WriteHeader(statusClientClosed)
-					return
-				case err != nil:
-					// No uid or token in the log line: only the failure.
-					m.Warnw("api.RequireScope", "err", err)
-					writeErr(w, http.StatusInternalServerError, "internal")
-					return
-				}
-				a.cache.put(ck, *auth, auth.Expires)
-			}
-			if wait, ok := a.limiter.allow(rateKey{shid: auth.ShortHostID, uid: auth.UID}); !ok {
+func (a *api) route(scope proto.ApiScope, h authedHandler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		tok, ok := bearerToken(r)
+		if !ok {
+			a.refuse(w, ip)
+			return
+		}
+		key := authCacheKey{hash: tok.Hash(), scope: scope}
+		auth, hit := a.cache.get(key)
+		if !hit {
+			if wait, ok := a.fails.check(ip); !ok {
 				tooMany(w, wait)
 				return
 			}
-			ctx := context.WithValue(r.Context(), ctxKey{}, auth)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
+			m := shared.NewMetaContext(r.Context(), a.g)
+			found, err := shared.CheckApiSession(m, key.hash, scope)
+			switch {
+			case errors.As(err, &shared.ApiSessionNotFoundError{}):
+				a.refuse(w, ip)
+				return
+			case err != nil && r.Context().Err() != nil:
+				// The client hung up mid-lookup: not a server fault.
+				w.WriteHeader(statusClientClosed)
+				return
+			case err != nil:
+				// No uid or token in the log line: only the failure.
+				m.Warnw("api.route", "err", err)
+				writeErr(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			auth = *found
+			a.cache.put(key, auth)
+		}
+		if wait, ok := a.limiter.allow(rateKey{shid: auth.ShortHostID, uid: auth.UID}); !ok {
+			tooMany(w, wait)
+			return
+		}
+		h(w, r, auth)
 	}
 }
 
@@ -131,26 +123,19 @@ func (a *api) RequireScope(scope proto.ApiScope) func(http.Handler) http.Handler
 // Recorded as 4xx, so hang-ups never read as server errors.
 const statusClientClosed = 499
 
-// cacheKeyFor folds the scope into the token hash, so a token cached for one
-// scope never authenticates another.
-func cacheKeyFor(h authCacheKey, scope proto.ApiScope) authCacheKey {
-	h[0] ^= byte(scope)
-	return h
-}
-
-func (a *api) refuse(w http.ResponseWriter, ip string) {
+func (a *api) refuse(w http.ResponseWriter, ip clientAddr) {
 	a.fails.charge(ip)
 	unauthorized(w)
 }
 
 // clientIP is the TCP peer. Forwarding headers are ignored: the web server
 // faces the internet directly, and a client could set them to anything.
-func clientIP(r *http.Request) string {
+func clientIP(r *http.Request) clientAddr {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		return clientAddr(r.RemoteAddr)
 	}
-	return host
+	return clientAddr(host)
 }
 
 func tooMany(w http.ResponseWriter, wait time.Duration) {

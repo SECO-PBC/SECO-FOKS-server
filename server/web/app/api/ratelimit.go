@@ -27,6 +27,10 @@ type rateKey struct {
 	uid  proto.UID
 }
 
+// clientAddr is a client's IP as the TCP peer reports it; a distinct type so
+// a uid or token string can't be used as the per-IP key by mistake.
+type clientAddr string
+
 const (
 	// Failed bearer checks per client IP. Charged only when a token is
 	// refused, and checked BEFORE the database lookup, so a flood of made-up

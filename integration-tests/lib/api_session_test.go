@@ -48,20 +48,17 @@ func TestApiSessionPing(t *testing.T) {
 
 	sess, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
 	require.NoError(t, err)
-	require.Equal(t, proto.ApiScope_Ping, sess.Scope)
 	require.NotEmpty(t, sess.BaseURL)
-	ttl := time.Until(sess.Expires.Import())
-	require.Greater(t, ttl, 23*time.Hour)
-	require.Less(t, ttl, 25*time.Hour)
+	require.Equal(t, 24*time.Hour, sess.Lifetime.Import())
 
-	bearer := "Bearer " + sess.Token.String()
+	bearer := "Bearer " + sess.Token.Bearer()
 
 	res := apiPing(t, sess.BaseURL, bearer)
 	require.Equal(t, http.StatusNoContent, res.StatusCode)
 	require.Equal(t, "*", res.Header.Get("Access-Control-Allow-Origin"))
 
 	// The scheme is case-insensitive.
-	res = apiPing(t, sess.BaseURL, "bearer "+sess.Token.String())
+	res = apiPing(t, sess.BaseURL, "bearer "+sess.Token.Bearer())
 	require.Equal(t, http.StatusNoContent, res.StatusCode)
 
 	// Every refusal is the same 401.
@@ -70,7 +67,7 @@ func TestApiSessionPing(t *testing.T) {
 		"Bearer",
 		"Bearer foksapi_",
 		"Bearer garbage",
-		"Basic " + sess.Token.String(),
+		"Basic " + sess.Token.Bearer(),
 	} {
 		res = apiPing(t, sess.BaseURL, bad)
 		require.Equal(t, http.StatusUnauthorized, res.StatusCode, "auth %q", bad)
@@ -80,7 +77,7 @@ func TestApiSessionPing(t *testing.T) {
 	// A well-formed token the server never minted.
 	var stranger proto.ApiToken
 	stranger[0] = 1
-	res = apiPing(t, sess.BaseURL, "Bearer "+stranger.String())
+	res = apiPing(t, sess.BaseURL, "Bearer "+stranger.Bearer())
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 
 	// An admin-panel web session is not an API token.
@@ -144,7 +141,7 @@ func TestApiSessionScopeExpiryAndCap(t *testing.T) {
 		var n int
 		err := db.QueryRow(m.Ctx(),
 			`SELECT COUNT(*) FROM user_api_sessions WHERE token_hash = $1`,
-			tok.Hash(),
+			tok.Hash().ExportToDB(),
 		).Scan(&n)
 		require.NoError(t, err)
 		return n == 1
@@ -154,7 +151,7 @@ func TestApiSessionScopeExpiryAndCap(t *testing.T) {
 	analytics, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_ClientAnalytics)
 	require.NoError(t, err)
 	require.Equal(t, 24*time.Hour, analytics.Lifetime.Import())
-	res := apiPing(t, analytics.BaseURL, "Bearer "+analytics.Token.String())
+	res := apiPing(t, analytics.BaseURL, "Bearer "+analytics.Token.Bearer())
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 
 	// Unknown scopes are refused at mint time.
@@ -167,10 +164,10 @@ func TestApiSessionScopeExpiryAndCap(t *testing.T) {
 	require.NoError(t, err)
 	_, err = db.Exec(m.Ctx(),
 		`UPDATE user_api_sessions SET etime = NOW() - INTERVAL '1 minute' WHERE token_hash = $1`,
-		exp.Token.Hash(),
+		exp.Token.Hash().ExportToDB(),
 	)
 	require.NoError(t, err)
-	res = apiPing(t, exp.BaseURL, "Bearer "+exp.Token.String())
+	res = apiPing(t, exp.BaseURL, "Bearer "+exp.Token.Bearer())
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 
 	// Minting past the per-scope cap deletes the oldest others; the other
@@ -190,9 +187,9 @@ func TestApiSessionScopeExpiryAndCap(t *testing.T) {
 	require.False(t, rowExists(first.Token))
 	require.False(t, rowExists(exp.Token))
 	require.True(t, rowExists(analytics.Token))
-	res = apiPing(t, first.BaseURL, "Bearer "+first.Token.String())
+	res = apiPing(t, first.BaseURL, "Bearer "+first.Token.Bearer())
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
-	res = apiPing(t, last.BaseURL, "Bearer "+last.Token.String())
+	res = apiPing(t, last.BaseURL, "Bearer "+last.Token.Bearer())
 	require.Equal(t, http.StatusNoContent, res.StatusCode)
 
 	var nPing int
@@ -207,7 +204,7 @@ func TestApiSessionScopeExpiryAndCap(t *testing.T) {
 	// GC removes rows past etime + margin, and leaves the rest.
 	_, err = db.Exec(m.Ctx(),
 		`UPDATE user_api_sessions SET etime = NOW() - INTERVAL '1 minute' WHERE token_hash = $1`,
-		analytics.Token.Hash(),
+		analytics.Token.Hash().ExportToDB(),
 	)
 	require.NoError(t, err)
 	_, err = shared.DeleteExpiredApiSessions(m, time.Hour, 1000000)
@@ -215,7 +212,7 @@ func TestApiSessionScopeExpiryAndCap(t *testing.T) {
 	require.True(t, rowExists(analytics.Token), "expired a minute ago is inside the GC margin")
 	_, err = db.Exec(m.Ctx(),
 		`UPDATE user_api_sessions SET etime = NOW() - INTERVAL '2 hours' WHERE token_hash = $1`,
-		analytics.Token.Hash(),
+		analytics.Token.Hash().ExportToDB(),
 	)
 	require.NoError(t, err)
 	_, err = shared.DeleteExpiredApiSessions(m, time.Hour, 1000000)
@@ -258,7 +255,7 @@ func TestApiSessionZFailGate(t *testing.T) {
 
 	good, err := ucli.NewApiSession(m.Ctx(), proto.ApiScope_Ping)
 	require.NoError(t, err)
-	bearer := "Bearer " + good.Token.String()
+	bearer := "Bearer " + good.Token.Bearer()
 	res := apiPing(t, good.BaseURL, bearer)
 	require.Equal(t, http.StatusNoContent, res.StatusCode)
 
@@ -266,7 +263,7 @@ func TestApiSessionZFailGate(t *testing.T) {
 	stranger[1] = 2
 	got429 := false
 	for range 40 {
-		res = apiPing(t, good.BaseURL, "Bearer "+stranger.String())
+		res = apiPing(t, good.BaseURL, "Bearer "+stranger.Bearer())
 		if res.StatusCode == http.StatusTooManyRequests {
 			got429 = true
 			require.NotEmpty(t, res.Header.Get("Retry-After"))

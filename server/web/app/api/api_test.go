@@ -4,6 +4,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -21,14 +22,34 @@ func TestApiTokenRoundTrip(t *testing.T) {
 	var rnd proto.ApiToken
 	require.NoError(t, core.RandomFill(rnd[:]))
 	for _, tok := range []proto.ApiToken{zero, lead, rnd} {
-		s := tok.String()
+		s := tok.Bearer()
 		got, err := proto.ParseApiToken(s)
 		require.NoError(t, err, s)
 		require.Equal(t, tok, *got)
 	}
-	for _, bad := range []string{"", "foksapi_", "foksapi_!!", rnd.String()[len(proto.ApiTokenPrefix):], rnd.String() + "A"} {
+	for _, bad := range []string{"", "foksapi_", "foksapi_!!", rnd.Bearer()[len(proto.ApiTokenPrefix):], rnd.Bearer() + "A"} {
 		_, err := proto.ParseApiToken(bad)
 		require.Error(t, err, bad)
+	}
+}
+
+// Formatting a token -- or a session holding one -- never yields the secret;
+// only Bearer does.
+func TestApiTokenRedacted(t *testing.T) {
+	var tok proto.ApiToken
+	require.NoError(t, core.RandomFill(tok[:]))
+	secret := tok.Bearer()[len(proto.ApiTokenPrefix):]
+	sess := proto.ApiSession{Token: tok, BaseURL: "https://h"}
+	for _, out := range []string{
+		tok.String(),
+		fmt.Sprintf("%v", tok),
+		fmt.Sprint(tok),
+		fmt.Sprintf("%#v", tok),
+		fmt.Sprintf("%v", sess),
+		fmt.Sprintf("%+v", sess),
+		fmt.Sprintf("%#v", sess),
+	} {
+		require.NotContains(t, out, secret, out)
 	}
 }
 
@@ -37,13 +58,13 @@ func TestBearerToken(t *testing.T) {
 	require.NoError(t, core.RandomFill(tok[:]))
 	r, _ := http.NewRequest(http.MethodGet, "/", nil)
 	for hdr, ok := range map[string]bool{
-		"Bearer " + tok.String():     true,
-		"BEARER " + tok.String():     true,
-		"Bearer  " + tok.String():    true,
-		"Basic " + tok.String():      false,
+		"Bearer " + tok.Bearer():     true,
+		"BEARER " + tok.Bearer():     true,
+		"Bearer  " + tok.Bearer():    true,
+		"Basic " + tok.Bearer():      false,
 		"Bearer":                     false,
-		tok.String():                 false,
-		"Bearer " + tok.String()[1:]: false,
+		tok.Bearer():                 false,
+		"Bearer " + tok.Bearer()[1:]: false,
 	} {
 		r.Header.Set("Authorization", hdr)
 		got, gotOK := bearerToken(r)
@@ -87,7 +108,7 @@ func TestRateLimiter(t *testing.T) {
 
 func TestFailGate(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	l := newRateLimiter[string](1, 2, func() time.Time { return now })
+	l := newRateLimiter[clientAddr](1, 2, func() time.Time { return now })
 
 	// check never spends; only refusals (charge) do.
 	for range 5 {
@@ -118,30 +139,33 @@ func TestFailGate(t *testing.T) {
 func TestAuthCache(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	c := newAuthCache(func() time.Time { return now })
-	auth := shared.ApiSessionAuth{ShortHostID: 1, UID: proto.UID{9}}
-	var h authCacheKey
-	h[5] = 7
+	auth := shared.ApiSessionAuth{ShortHostID: 1, UID: proto.UID{9}, Expires: now.Add(time.Hour)}
+	var tok proto.ApiToken
+	tok[5] = 7
+	k := authCacheKey{hash: tok.Hash(), scope: proto.ApiScope_Ping}
 
-	_, ok := c.get(h)
+	_, ok := c.get(k)
 	require.False(t, ok)
-	c.put(h, auth, now.Add(time.Hour))
-	got, ok := c.get(h)
+	c.put(k, auth)
+	got, ok := c.get(k)
 	require.True(t, ok)
 	require.Equal(t, auth.UID, got.UID)
 
+	// The same token checked for another scope is another key.
+	_, ok = c.get(authCacheKey{hash: tok.Hash(), scope: proto.ApiScope_ClientAnalytics})
+	require.False(t, ok)
+
 	// Trusted for authCacheTTL at most...
 	now = now.Add(authCacheTTL)
-	_, ok = c.get(h)
+	_, ok = c.get(k)
 	require.False(t, ok)
 
 	// ...and never past the token's own expiry.
-	c.put(h, auth, now.Add(time.Second))
+	auth.Expires = now.Add(time.Second)
+	c.put(k, auth)
 	now = now.Add(time.Second)
-	_, ok = c.get(h)
+	_, ok = c.get(k)
 	require.False(t, ok)
-
-	// A token cached for one scope is a different key for another.
-	require.NotEqual(t, cacheKeyFor(h, proto.ApiScope_Ping), cacheKeyFor(h, proto.ApiScope_ClientAnalytics))
 }
 
 func TestNormMethod(t *testing.T) {
