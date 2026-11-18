@@ -209,8 +209,9 @@ func TestInstrumentProtocol(t *testing.T) {
 	h.assertPrivate(t)
 }
 
-// Expected "answer" codes keep error.code and count as errors in metrics,
-// but their spans aren't marked as errors.
+// Expected answers (per method) keep error.code on the span, but neither the
+// span nor the metrics treat them as errors. The same codes on other methods,
+// and other codes on the exempt methods, are still errors.
 func TestInstrumentProtocolExpectedErrors(t *testing.T) {
 	h := newTelemetryHarness(t, false)
 	noent := func(ctx context.Context, arg interface{}) (interface{}, error) {
@@ -219,30 +220,83 @@ func TestInstrumentProtocolExpectedErrors(t *testing.T) {
 	stale := func(ctx context.Context, arg interface{}) (interface{}, error) {
 		return nil, core.KVStaleCacheError{}
 	}
-	p := InstrumentProtocol(h.g, testProtocol(noent, stale))
-	for _, m := range p.Methods {
-		_, err := m.Handler(context.Background(), nil)
+	perm := func(ctx context.Context, arg interface{}) (interface{}, error) {
+		return nil, core.KVPermssionError{}
+	}
+	type call struct {
+		method string
+		h      func(ctx context.Context, arg interface{}) (interface{}, error)
+	}
+	calls := []call{
+		{"kvGet", noent},               // expected
+		{"kvGet", stale},               // expected
+		{"kvCacheCheck", stale},        // expected
+		{"kvGet", perm},                // real error on an exempt method
+		{"kvCacheCheck", noent},        // code not exempt for this method
+		{"kvPut", stale},               // rejected write
+		{"kvGetEncryptedChunk", noent}, // missing data
+	}
+	methods := map[rpc.Position]rpc.ServeHandlerDescriptionV2{}
+	for i, c := range calls {
+		methods[rpc.Position(i)] = rpc.ServeHandlerDescriptionV2{
+			Name: c.method, ServeHandlerDescription: rpc.ServeHandlerDescription{Handler: c.h},
+		}
+	}
+	p := InstrumentProtocol(h.g, rpc.ProtocolV2{Name: "KVStore", Methods: methods})
+	for i := range calls {
+		_, err := p.Methods[rpc.Position(i)].Handler(context.Background(), nil)
 		require.Error(t, err)
 	}
 
+	type key struct{ method, code string }
 	ended := h.spans.Ended()
-	require.Len(t, ended, 2)
-	got := map[string]codes.Code{}
+	require.Len(t, ended, len(calls))
+	gotSpans := map[key]codes.Code{}
 	for _, sp := range ended {
-		got[spanAttr(sp, "error.code").AsString()] = sp.Status().Code
+		gotSpans[key{sp.Name(), spanAttr(sp, "error.code").AsString()}] = sp.Status().Code
 	}
-	require.Equal(t, map[string]codes.Code{
-		"KV_NOENT_ERROR":       codes.Unset,
-		"KV_STALE_CACHE_ERROR": codes.Unset,
-	}, got)
+	require.Equal(t, map[key]codes.Code{
+		{"KVStore.kvGet", "KV_NOENT_ERROR"}:               codes.Unset,
+		{"KVStore.kvGet", "KV_STALE_CACHE_ERROR"}:         codes.Unset,
+		{"KVStore.kvCacheCheck", "KV_STALE_CACHE_ERROR"}:  codes.Unset,
+		{"KVStore.kvGet", "KV_PERM_ERROR"}:                codes.Error,
+		{"KVStore.kvCacheCheck", "KV_NOENT_ERROR"}:        codes.Error,
+		{"KVStore.kvPut", "KV_STALE_CACHE_ERROR"}:         codes.Error,
+		{"KVStore.kvGetEncryptedChunk", "KV_NOENT_ERROR"}: codes.Error,
+	}, gotSpans)
 
-	errs := findMetric(h.collect(t), "foks.rpc.server.errors")
-	require.NotNil(t, errs)
-	var n int64
-	for _, dp := range errs.Data.(metricdata.Sum[int64]).DataPoints {
-		n += dp.Value
+	rm := h.collect(t)
+	dur := findMetric(rm, "foks.rpc.server.duration")
+	require.NotNil(t, dur)
+	outcomes := map[key]uint64{}
+	for _, dp := range dur.Data.(metricdata.Histogram[float64]).DataPoints {
+		m, _ := dp.Attributes.Value("rpc.method")
+		o, _ := dp.Attributes.Value("outcome")
+		outcomes[key{m.AsString(), o.AsString()}] += dp.Count
 	}
-	require.Equal(t, int64(2), n)
+	require.Equal(t, map[key]uint64{
+		{"KVStore.kvGet", "expected"}:            2,
+		{"KVStore.kvCacheCheck", "expected"}:     1,
+		{"KVStore.kvGet", "error"}:               1,
+		{"KVStore.kvCacheCheck", "error"}:        1,
+		{"KVStore.kvPut", "error"}:               1,
+		{"KVStore.kvGetEncryptedChunk", "error"}: 1,
+	}, outcomes)
+
+	errs := findMetric(rm, "foks.rpc.server.errors")
+	require.NotNil(t, errs)
+	gotErrs := map[key]int64{}
+	for _, dp := range errs.Data.(metricdata.Sum[int64]).DataPoints {
+		m, _ := dp.Attributes.Value("rpc.method")
+		c, _ := dp.Attributes.Value("error.code")
+		gotErrs[key{m.AsString(), c.AsString()}] += dp.Value
+	}
+	require.Equal(t, map[key]int64{
+		{"KVStore.kvGet", "KV_PERM_ERROR"}:                1,
+		{"KVStore.kvCacheCheck", "KV_NOENT_ERROR"}:        1,
+		{"KVStore.kvPut", "KV_STALE_CACHE_ERROR"}:         1,
+		{"KVStore.kvGetEncryptedChunk", "KV_NOENT_ERROR"}: 1,
+	}, gotErrs)
 	h.assertPrivate(t)
 }
 
