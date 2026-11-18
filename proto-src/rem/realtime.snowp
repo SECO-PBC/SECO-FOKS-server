@@ -30,6 +30,13 @@ struct RTSendArg {
     // because their kind lives in the sealed body. An old server drops the
     // extra positional field and pushes as before.
     noPush @4 : Bool;
+    // FORK-ONLY (reaction-push-to-author). The one member to push: the
+    // server writes a push_outbox row only for this member, and only when
+    // they are a recipient anyway (a member, not the sender, not muted).
+    // The SECO app sets it on a reaction, for the author of the message it
+    // reacts to. Absent: every recipient, as before. An old server drops the
+    // extra positional field and pushes every recipient.
+    pushTo @5 : Option(lib.UID);
 }
 
 struct RTSendRes {

@@ -350,6 +350,11 @@ struct RTOutboxEntry {
     // drained later stays silent; a row written before the field decodes it
     // false and pushes, as it would have.
     noPush @5 : Bool;
+    // FORK-ONLY (reaction-push-to-author): the one member the send pushes
+    // (rem.RTSendArg.pushTo). Kept with the row so a send queued offline
+    // still pushes only them; a row written before the field decodes it
+    // absent and pushes every recipient, as it would have.
+    pushTo @6 : Option(lib.UID);
 }
 
 struct RTOutboxIndexEntry {

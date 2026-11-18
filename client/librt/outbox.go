@@ -172,7 +172,7 @@ func (d *Minder) dbPutOutboxIndex(m MetaContext, idx *lcl.RTOutboxIndex) error {
 func (d *Minder) enqueueOutbox(
 	m MetaContext,
 	msgCached proto.RTMsgCached,
-	noPush bool,
+	push sendPush,
 ) (
 	hasEarlier bool,
 	err error,
@@ -209,7 +209,8 @@ func (d *Minder) enqueueOutbox(
 		Msg:    msgCached,
 		State:  lcl.RTOutboxState_Queued,
 		Ord:    idx.NextOrd,
-		NoPush: noPush,
+		NoPush: push.noPush,
+		PushTo: push.pushTo,
 	}
 	idx.Entries = append(idx.Entries, lcl.RTOutboxIndexEntry{
 		MsgID: msgCached.Md.Md.MsgID,
@@ -342,8 +343,8 @@ func (d *Minder) setOutboxState(
 
 // attemptSend issues the rtSend RPC for a sealed message. Everything the wire
 // call needs travels inside the stored RTMsgCached, so the drain never has to
-// re-resolve teams or channels, except noPush (fork-only), which the outbox
-// row keeps beside it (RTOutboxEntry.NoPush).
+// re-resolve teams or channels, except who to push (fork-only), which the
+// outbox row keeps beside it (RTOutboxEntry.NoPush and PushTo).
 //
 // The one exception: when the server refuses the box as sealed under an old
 // key generation (the team rekeyed since this client cached it, or since the
@@ -352,12 +353,12 @@ func (d *Minder) setOutboxState(
 func (d *Minder) attemptSend(
 	m MetaContext,
 	msgCached *proto.RTMsgCached,
-	noPush bool,
+	push sendPush,
 ) (
 	*rem.RTSendRes,
 	error,
 ) {
-	res, err := d.sendRPC(m, msgCached, noPush)
+	res, err := d.sendRPC(m, msgCached, push)
 	if !core.IsRTStaleKeyGenError(err) {
 		return res, err
 	}
@@ -365,7 +366,7 @@ func (d *Minder) attemptSend(
 	if err != nil {
 		return nil, err
 	}
-	return d.sendRPC(m, msgCached, noPush)
+	return d.sendRPC(m, msgCached, push)
 }
 
 // resealAtNewestGen reloads the team cm was sent into and re-seals cm's body
@@ -435,7 +436,7 @@ func (d *Minder) resealAtNewestGen(m MetaContext, cm *proto.RTMsgCached) error {
 func (d *Minder) sendRPC(
 	m MetaContext,
 	msgCached *proto.RTMsgCached,
-	noPush bool,
+	push sendPush,
 ) (
 	*rem.RTSendRes,
 	error,
@@ -444,7 +445,8 @@ func (d *Minder) sendRPC(
 		Md:     msgCached.Md.Md,
 		Mw:     msgCached.Mw,
 		Chid:   msgCached.Md.Chid.Short(),
-		NoPush: noPush,
+		NoPush: push.noPush,
+		PushTo: push.pushTo,
 	}
 	if d.testHooks != nil && d.testHooks.SendRPC != nil {
 		return d.testHooks.SendRPC(m, arg)
@@ -629,7 +631,7 @@ func (d *Minder) drainChannelRows(
 			continue
 		}
 
-		ack, err := d.attemptSend(m, &entry.Msg, entry.NoPush)
+		ack, err := d.attemptSend(m, &entry.Msg, sendPush{noPush: entry.NoPush, pushTo: entry.PushTo})
 		if err != nil {
 			if core.IsTransportError(err) {
 				_ = d.setOutboxState(m, msgID, lcl.RTOutboxState_Queued, err)
