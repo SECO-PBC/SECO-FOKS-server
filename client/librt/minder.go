@@ -1087,17 +1087,59 @@ type ThreadReadResult struct {
 	// server round trip when the channel-set cache is stale.
 	Chid proto.RTChannelID
 	// Source is where the messages came from (fork-only,
-	// docs/client-analytics.md). Every return sets it; zero is never valid.
+	// docs/client-analytics.md). Set by the constructors below; zero is
+	// never valid.
 	Source lcl.RTThreadReadSource
 }
 
-// readSource is Warm when the local cache supplied part of a read that also
-// called the server, Cold when it supplied nothing.
-func readSource(cached []ThreadMessage) lcl.RTThreadReadSource {
+// The only constructors of ThreadReadResult (TestThreadReadResultConstructors
+// keeps it that way): each states where the messages came from, so a new
+// return path can't leave Source at its zero value.
+
+// cachedRead: everything came from the local cache; no server call.
+func cachedRead(msgs []ThreadMessage, chid proto.RTChannelID) *ThreadReadResult {
+	return &ThreadReadResult{Msgs: msgs, Chid: chid, Source: lcl.RTThreadReadSource_Cached}
+}
+
+// emptyRead: nothing to read (a window before seq 1); no server call.
+func emptyRead() *ThreadReadResult {
+	return &ThreadReadResult{Final: true, Source: lcl.RTThreadReadSource_Cached}
+}
+
+// serverRead: a read that called the server. Warm if the local cache
+// supplied any of the returned messages, Cold if all came from the server.
+func serverRead(
+	msgs []ThreadMessage,
+	cached []ThreadMessage,
+	chid proto.RTChannelID,
+	final bool,
+) *ThreadReadResult {
+	src := lcl.RTThreadReadSource_Cold
 	if len(cached) > 0 {
-		return lcl.RTThreadReadSource_Warm
+		fromCache := make(map[proto.RTMsgSeq]bool, len(cached))
+		for i := range cached {
+			fromCache[cached[i].Seq] = true
+		}
+		for i := range msgs {
+			if fromCache[msgs[i].Seq] {
+				src = lcl.RTThreadReadSource_Warm
+				break
+			}
+		}
 	}
-	return lcl.RTThreadReadSource_Cold
+	return &ThreadReadResult{Msgs: msgs, Final: final, Chid: chid, Source: src}
+}
+
+// staleRead: a server call failed, so (part of) the page is served from the
+// cache, flagged stale (docs/rt_offline.md, D4).
+func staleRead(msgs []ThreadMessage, chid proto.RTChannelID, err error) *ThreadReadResult {
+	return &ThreadReadResult{
+		Msgs:         msgs,
+		Stale:        true,
+		TransportErr: err,
+		Chid:         chid,
+		Source:       lcl.RTThreadReadSource_Offline,
+	}
 }
 
 // SendTestHooks lets tests perturb a send to exercise server-side validation.
@@ -2086,11 +2128,7 @@ func (d *Minder) GetThreadBookended(
 		// We had everything in cache! Cached messages were validated when they
 		// were first ingested, so by the trust model we don't re-verify here.
 		if len(holes) == 0 && start == cachedStart && end == cachedEnd {
-			return &ThreadReadResult{
-				Msgs:   cached,
-				Chid:   irr.ch.Id,
-				Source: lcl.RTThreadReadSource_Cached,
-			}, nil
+			return cachedRead(cached, irr.ch.Id), nil
 		}
 
 		if start != cachedStart {
@@ -2130,13 +2168,7 @@ func (d *Minder) GetThreadBookended(
 		// but the cache has part of the range -- serve it, flagged stale,
 		// holes and truncated edges included. An empty cache still errors.
 		if core.IsTransportError(err) && len(cached) > 0 {
-			return &ThreadReadResult{
-				Msgs:         cached,
-				Stale:        true,
-				Source:       lcl.RTThreadReadSource_Offline,
-				TransportErr: err,
-				Chid:         irr.ch.Id,
-			}, nil
+			return staleRead(cached, irr.ch.Id, err), nil
 		}
 		return nil, err
 	}
@@ -2180,7 +2212,7 @@ func (d *Minder) GetThreadBookended(
 		(inc > 0 && core.Last(ret).Seq < end) ||
 		(inc < 0 && core.Last(ret).Seq > end)
 
-	return &ThreadReadResult{Msgs: ret, Final: isFinal, Chid: irr.ch.Id, Source: readSource(cached)}, nil
+	return serverRead(ret, cached, irr.ch.Id, isFinal), nil
 }
 
 // GetThreadPage fetches up to num messages, newest-first, ending just before the
@@ -2224,7 +2256,7 @@ func (d *Minder) GetThreadPage(
 	// the beginning once the window reaches seq 1.
 	hi := int(before) - 1
 	if hi < 1 {
-		return &ThreadReadResult{Final: true, Source: lcl.RTThreadReadSource_Cached}, nil
+		return emptyRead(), nil
 	}
 	lo := hi - int(num) + 1
 	if lo < 1 {
@@ -2421,13 +2453,7 @@ func (d *Minder) GetThreadRecentMsgs(
 		// flagged stale. An empty cache still errors.
 		if core.IsTransportError(err) && len(cached) > 0 {
 			end := min(int(num), len(cached))
-			return &ThreadReadResult{
-				Msgs:         cached[0:end],
-				Stale:        true,
-				Source:       lcl.RTThreadReadSource_Offline,
-				TransportErr: err,
-				Chid:         irr.ch.Id,
-			}, nil
+			return staleRead(cached[0:end], irr.ch.Id, err), nil
 		}
 		return nil, err
 	}
@@ -2447,7 +2473,7 @@ func (d *Minder) GetThreadRecentMsgs(
 
 	// All of the fresh messages fill up the window, so can just return here.
 	if len(freshPlain) >= int(num) {
-		return &ThreadReadResult{Msgs: freshPlain, Chid: irr.ch.Id, Source: readSource(cached)}, nil
+		return serverRead(freshPlain, cached, irr.ch.Id, false), nil
 	}
 
 	// in order, but with holes
@@ -2458,7 +2484,7 @@ func (d *Minder) GetThreadRecentMsgs(
 	}
 	if len(holes) == 0 {
 		end := min(int(num), len(combined))
-		return &ThreadReadResult{Msgs: combined[0:end], Chid: irr.ch.Id, Source: readSource(cached)}, nil
+		return serverRead(combined[0:end], cached, irr.ch.Id, false), nil
 	}
 
 	d.serverThreadReads.Add(1)
@@ -2478,13 +2504,7 @@ func (d *Minder) GetThreadRecentMsgs(
 		// Degraded fill: what we have, ordered but holey, flagged stale.
 		if core.IsTransportError(err) {
 			end := min(int(num), len(combined))
-			return &ThreadReadResult{
-				Msgs:         combined[0:end],
-				Stale:        true,
-				Source:       lcl.RTThreadReadSource_Offline,
-				TransportErr: err,
-				Chid:         irr.ch.Id,
-			}, nil
+			return staleRead(combined[0:end], irr.ch.Id, err), nil
 		}
 		return nil, err
 	}
@@ -2511,7 +2531,7 @@ func (d *Minder) GetThreadRecentMsgs(
 	ret := merge(combined, fillerPlain, inc)
 	// Trim to the requested window, matching the no-holes path above.
 	end := min(int(num), len(ret))
-	return &ThreadReadResult{Msgs: ret[0:end], Chid: irr.ch.Id, Source: readSource(cached)}, nil
+	return serverRead(ret[0:end], cached, irr.ch.Id, false), nil
 }
 
 func (d *Minder) decodeMsgs(

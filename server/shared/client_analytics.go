@@ -59,11 +59,12 @@ func RecordClientAnalytics(m MetaContext, batch proto.ClientAnalyticsBatch) erro
 	if len(batch.Latencies) > proto.MaxClientLatencySamples {
 		return core.BadArgsError("too many latency samples")
 	}
-	if !m.G().clientAnalytics.allow(clientAnalyticsKey{shid: m.ShortHostID(), uid: m.UID()}) {
+	who := clientAnalyticsKey{shid: m.ShortHostID(), uid: m.UID()}
+	if !m.G().clientAnalytics.allow(who) {
 		return core.RateLimitError{}
 	}
 	t := m.G().Telemetry()
-	version := m.G().clientVersions.tag(batch.AppVersion, m.G().Clock().Now())
+	version := m.G().clientVersions.tag(batch.AppVersion, who, m.G().Clock())
 	for _, s := range batch.Latencies {
 		switch {
 		case s.Metric == 0:

@@ -167,9 +167,9 @@ struct RTPendingMsgView {
 // chat opening. Numbered from 1: the zero value is never valid.
 enum RTThreadReadSource {
     Cached @1;  // all from the local cache; no server call
-    Warm @2;    // a server call; the local cache supplied part of the page
-    Cold @3;    // a server call; nothing in the local cache
-    Offline @4; // the server was unreachable; served (partly) from the cache
+    Warm @2;    // a server call; the local cache supplied some of the page
+    Cold @3;    // a server call; all of the page came from the server
+    Offline @4; // a server call failed; served (partly) from the cache, stale
 }
 
 struct RTThreadView {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	proto "github.com/foks-proj/go-foks/proto/lib"
+	"github.com/keybase/clockwork"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -108,18 +109,27 @@ const (
 	// A handful of versions per platform are live at once.
 	clientVersionTagCap    = 32
 	clientVersionTagWindow = time.Hour
+	// A user may introduce at most this many new versions per window (a
+	// real client has one; two covers an upgrade mid-window), so one client
+	// can't fill the cap and push every real release into "other".
+	clientVersionsPerUser = 2
 )
 
 // clientVersionTags is the bounded set of app versions tagged in the current
 // window. It resets every window (Datadog counts series per hour), so a
 // release made after the set filled up gets its own tag within the hour.
 type clientVersionTags struct {
-	mu    sync.Mutex
-	start time.Time
-	seen  map[proto.ClientAppVersion]clientVersionTag
+	mu         sync.Mutex
+	start      time.Time
+	seen       map[proto.ClientAppVersion]clientVersionTag
+	introduced map[clientAnalyticsKey]int
 }
 
-func (c *clientVersionTags) tag(v proto.ClientAppVersion, now time.Time) clientVersionTag {
+func (c *clientVersionTags) tag(
+	v proto.ClientAppVersion,
+	who clientAnalyticsKey,
+	clock clockwork.Clock,
+) clientVersionTag {
 	switch {
 	case v.IsZero():
 		return clientVersionUnknown
@@ -128,18 +138,23 @@ func (c *clientVersionTags) tag(v proto.ClientAppVersion, now time.Time) clientV
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Read under the lock, so concurrent callers see the clock in order and
+	// one with an older reading can't reset a window another just opened.
+	now := clock.Now()
 	if c.seen == nil || now.Sub(c.start) >= clientVersionTagWindow || now.Before(c.start) {
 		c.seen = make(map[proto.ClientAppVersion]clientVersionTag, clientVersionTagCap)
+		c.introduced = make(map[clientAnalyticsKey]int)
 		c.start = now
 	}
 	if tag, ok := c.seen[v]; ok {
 		return tag
 	}
-	if len(c.seen) >= clientVersionTagCap {
+	if len(c.seen) >= clientVersionTagCap || c.introduced[who] >= clientVersionsPerUser {
 		return clientVersionOther
 	}
 	tag := clientVersionTag(fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch))
 	c.seen[v] = tag
+	c.introduced[who]++
 	return tag
 }
 

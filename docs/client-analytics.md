@@ -48,7 +48,8 @@ call".
 
 `client.app_version` is the one tag the server can't list in advance, so it
 is bounded instead (`clientVersionTags`): `major.minor.patch` for at most 32
-distinct versions per hour per server, then `other`; `unknown` for 0.0.0 (a
+distinct versions per hour per server, then `other`, and no user may introduce
+more than two of them per hour, so one client can't fill the set; `unknown` for 0.0.0 (a
 client that didn't know its version) and `invalid` for a part over
 `MaxClientAppVersionPart`. A modified client can't add Datadog series beyond
 that cap. The set resets every hour, so a new release gets its own tag even if

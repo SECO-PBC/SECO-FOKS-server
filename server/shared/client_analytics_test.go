@@ -14,6 +14,7 @@ import (
 
 	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
+	"github.com/keybase/clockwork"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -253,35 +254,42 @@ func TestClientTelemetryTags(t *testing.T) {
 func TestClientVersionTags(t *testing.T) {
 	var c clientVersionTags
 	t0 := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	clock := clockwork.NewFakeClockAt(t0)
 	v := func(major, minor, patch uint64) proto.ClientAppVersion {
 		return proto.ClientAppVersion{Major: major, Minor: minor, Patch: patch}
 	}
+	user := func(i int) clientAnalyticsKey { return clientAnalyticsKey{uid: proto.UID{0x01, byte(i)}} }
+	alice := user(0)
 	max := proto.MaxClientAppVersionPart
 
-	require.Equal(t, clientVersionUnknown, c.tag(v(0, 0, 0), t0))
-	require.Equal(t, clientVersionTag("2.3.3"), c.tag(v(2, 3, 3), t0))
-	require.Equal(t, clientVersionTag("0.0.1"), c.tag(v(0, 0, 1), t0))
-	require.Equal(t, clientVersionTag("9999.9999.9999"), c.tag(v(max, max, max), t0))
+	require.Equal(t, clientVersionUnknown, c.tag(v(0, 0, 0), alice, clock))
+	require.Equal(t, clientVersionTag("2.3.3"), c.tag(v(2, 3, 3), alice, clock))
+	require.Equal(t, clientVersionTag("9999.9999.9999"), c.tag(v(max, max, max), user(1), clock))
 	for _, bad := range []proto.ClientAppVersion{v(max+1, 0, 0), v(1, max+1, 0), v(1, 0, max+1), v(math.MaxUint64, 0, 0)} {
-		require.Equal(t, clientVersionInvalid, c.tag(bad, t0))
+		require.Equal(t, clientVersionInvalid, c.tag(bad, user(2), clock))
 	}
 
-	// Fill to the cap: past it, new versions are "other", known ones keep
-	// their tag. Unknown and invalid never take a slot.
-	for i := range uint64(clientVersionTagCap) {
-		c.tag(v(1, 0, i), t0)
+	// One user introduces at most clientVersionsPerUser versions a window;
+	// a version someone else introduced is theirs to use freely.
+	require.Equal(t, clientVersionTag("2.3.4"), c.tag(v(2, 3, 4), alice, clock))
+	require.Equal(t, clientVersionOther, c.tag(v(2, 3, 5), alice, clock))
+	require.Equal(t, clientVersionTag("9999.9999.9999"), c.tag(v(max, max, max), alice, clock))
+
+	// Fill to the cap from many users: past it, new versions are "other",
+	// known ones keep their tag. Unknown and invalid never take a slot.
+	for i := range clientVersionTagCap {
+		c.tag(v(1, 0, uint64(i)), user(10+i), clock)
 	}
 	require.Len(t, c.seen, clientVersionTagCap)
-	require.Equal(t, clientVersionOther, c.tag(v(7, 7, 7), t0.Add(time.Minute)))
-	require.Equal(t, clientVersionTag("2.3.3"), c.tag(v(2, 3, 3), t0.Add(time.Minute)))
+	clock.Advance(time.Minute)
+	require.Equal(t, clientVersionOther, c.tag(v(7, 7, 7), user(99), clock))
+	require.Equal(t, clientVersionTag("2.3.3"), c.tag(v(2, 3, 3), user(99), clock))
 
-	// A new window starts empty, so a newer release gets its own tag.
-	require.Equal(t, clientVersionTag("7.7.7"), c.tag(v(7, 7, 7), t0.Add(clientVersionTagWindow)))
-	require.Len(t, c.seen, 1)
-
-	// The clock moving back also starts a new window, not a stuck one.
-	require.Equal(t, clientVersionTag("8.0.0"), c.tag(v(8, 0, 0), t0))
-	require.Len(t, c.seen, 1)
+	// A new window starts empty, per-user counts included.
+	clock.Advance(clientVersionTagWindow)
+	require.Equal(t, clientVersionTag("7.7.7"), c.tag(v(7, 7, 7), alice, clock))
+	require.Equal(t, clientVersionTag("7.7.8"), c.tag(v(7, 7, 8), alice, clock))
+	require.Len(t, c.seen, 2)
 
 	for _, tag := range c.seen {
 		require.Regexp(t, versionTagRE, string(tag))
