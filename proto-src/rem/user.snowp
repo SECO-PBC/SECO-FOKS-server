@@ -271,4 +271,9 @@ protocol User
     // so upstream can keep appending after @29 without colliding.
     newInviteCode @200 (
     ) -> InviteCode;
+
+    // Opt-in client analytics (docs/client-analytics.md). Fork-only.
+    reportClientAnalytics @201 (
+        batch @0 : lib.ClientAnalyticsBatch
+    );
 }

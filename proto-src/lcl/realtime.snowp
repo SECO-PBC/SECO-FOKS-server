@@ -162,11 +162,24 @@ struct RTPendingMsgView {
     state @1 : RTOutboxState;
 }
 
+// FORK-ONLY (docs/client-analytics.md): where a thread read's messages came
+// from, so the app can tell server time from local time when it measures a
+// chat opening. Numbered from 1: the zero value is never valid.
+enum RTThreadReadSource {
+    Cached @1;  // all from the local cache; no server call
+    Warm @2;    // a server call; the local cache supplied some of the page
+    Cold @3;    // a server call; all of the page came from the server
+    Offline @4; // a server call failed; served (partly) from the cache, stale
+}
+
 struct RTThreadView {
     msgs @0 : List(RTMsgView);
     atBeginning @1 : Bool; // page reached the start of the thread; no older messages
     stale @2 : Bool;       // served (partly) from local cache; the server was unreachable
     pending @3 : List(RTPendingMsgView); // viewer's own undelivered messages; head page only
+    // FORK-ONLY (docs/client-analytics.md). @10 leaves upstream room to add
+    // fields after @3 without colliding.
+    readSource @10 : RTThreadReadSource;
 }
 
 protocol RealTime

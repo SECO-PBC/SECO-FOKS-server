@@ -1265,6 +1265,16 @@ func (c *UserClientConn) NewWebAdminPanelURL(
 	return *ret, nil
 }
 
+// ReportClientAnalytics records an opt-in analytics batch (fork-only;
+// docs/client-analytics.md).
+func (c *UserClientConn) ReportClientAnalytics(
+	ctx context.Context,
+	batch proto.ClientAnalyticsBatch,
+) error {
+	m := shared.NewMetaContextConn(ctx, c)
+	return shared.RecordClientAnalytics(m, batch)
+}
+
 func (c *UserClientConn) CheckURL(
 	ctx context.Context,
 	arg proto.URLString,

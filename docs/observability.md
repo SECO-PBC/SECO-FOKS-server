@@ -83,6 +83,8 @@ The resource sets `service.name = foks-<server type>`, e.g. `foks-realtime` or `
 | `foks.rt.pollers.parked` | gauge | — | parked long-polls (realtime only) |
 | `foks.rt.push_outbox.backlog` | gauge | `status` | `queued`/`sending` rows, sampled every 30s (realtime only) |
 | `foks.rt.push_outbox.oldest_age` | gauge, s | — | age of the oldest `queued`/`sending` row; 0 when there are none (use `backlog` to tell an empty queue from a just-queued row). Alert on it exceeding a few minutes. A gap in either gauge means the probe skipped that sample (realtime pool saturated) or failed (logged at Warn once) |
+| `seco.client.latency` | histogram, ms | `client.metric`, `client.platform`, `client.app_version`, `client.source` (channel opens) | opt-in client-measured latency from `reportClientAnalytics` (fork-only; `docs/client-analytics.md`). Platform `unknown` means a client newer than the server; `client.app_version` is `major.minor.patch` for up to 32 versions/hour, then `other`; `client.source` is `memory`/`warm`/`cold`/`offline` |
+| `seco.client.latency.dropped` | counter | `client.drop_reason` | client samples dropped: `invalid` (no metric), `unknown_metric` (client newer than server), `out_of_range` (over 10 min) |
 | Go runtime (`go.*`) | various | — | `contrib/instrumentation/runtime` |
 
 `rtPollInbox` is a long poll (up to 55s), so its `foks.rpc.server.duration` measures wait time, not work. Filter it out of RPC latency views, and use `foks.rt.poll.duration` by `outcome` instead.

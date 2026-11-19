@@ -1306,11 +1306,43 @@ func (r *RTPendingMsgView) Decode(dec rpc.Decoder) error {
 
 func (r *RTPendingMsgView) Bytes() []byte { return nil }
 
+type RTThreadReadSource int
+
+const (
+	RTThreadReadSource_Cached  RTThreadReadSource = 1
+	RTThreadReadSource_Warm    RTThreadReadSource = 2
+	RTThreadReadSource_Cold    RTThreadReadSource = 3
+	RTThreadReadSource_Offline RTThreadReadSource = 4
+)
+
+var RTThreadReadSourceMap = map[string]RTThreadReadSource{
+	"Cached":  1,
+	"Warm":    2,
+	"Cold":    3,
+	"Offline": 4,
+}
+var RTThreadReadSourceRevMap = map[RTThreadReadSource]string{
+	1: "Cached",
+	2: "Warm",
+	3: "Cold",
+	4: "Offline",
+}
+
+type RTThreadReadSourceInternal__ RTThreadReadSource
+
+func (r RTThreadReadSourceInternal__) Import() RTThreadReadSource {
+	return RTThreadReadSource(r)
+}
+func (r RTThreadReadSource) Export() *RTThreadReadSourceInternal__ {
+	return ((*RTThreadReadSourceInternal__)(&r))
+}
+
 type RTThreadView struct {
 	Msgs        []RTMsgView
 	AtBeginning bool
 	Stale       bool
 	Pending     []RTPendingMsgView
+	ReadSource  RTThreadReadSource
 }
 type RTThreadViewInternal__ struct {
 	_struct     struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
@@ -1318,6 +1350,13 @@ type RTThreadViewInternal__ struct {
 	AtBeginning *bool
 	Stale       *bool
 	Pending     *[](*RTPendingMsgViewInternal__)
+	Deprecated4 *struct{}
+	Deprecated5 *struct{}
+	Deprecated6 *struct{}
+	Deprecated7 *struct{}
+	Deprecated8 *struct{}
+	Deprecated9 *struct{}
+	ReadSource  *RTThreadReadSourceInternal__
 }
 
 func (r RTThreadViewInternal__) Import() RTThreadView {
@@ -1370,6 +1409,12 @@ func (r RTThreadViewInternal__) Import() RTThreadView {
 			}
 			return ret
 		})(r.Pending),
+		ReadSource: (func(x *RTThreadReadSourceInternal__) (ret RTThreadReadSource) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.ReadSource),
 	}
 }
 func (r RTThreadView) Export() *RTThreadViewInternal__ {
@@ -1396,6 +1441,7 @@ func (r RTThreadView) Export() *RTThreadViewInternal__ {
 			}
 			return &ret
 		})(r.Pending),
+		ReadSource: r.ReadSource.Export(),
 	}
 }
 func (r *RTThreadView) Encode(enc rpc.Encoder) error {

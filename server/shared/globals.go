@@ -26,14 +26,18 @@ import (
 
 type GlobalContext struct {
 	sync.RWMutex
-	log         *zap.SugaredLogger
-	logCfg      zap.Config
-	cfg         Config
-	dbpools     map[DbType](*pgxpool.Pool)
-	typ         proto.ServerType
-	hostchain   *HostChain
-	didShutdown bool
-	clock       clockwork.Clock
+	// Fork-only (docs/client-analytics.md): per-user report rate, and the
+	// bounded set of app versions used as tags.
+	clientAnalytics clientAnalyticsLimiters
+	clientVersions  clientVersionTags
+	log             *zap.SugaredLogger
+	logCfg          zap.Config
+	cfg             Config
+	dbpools         map[DbType](*pgxpool.Pool)
+	typ             proto.ServerType
+	hostchain       *HostChain
+	didShutdown     bool
+	clock           clockwork.Clock
 
 	// payment interface
 	stripe Striper
