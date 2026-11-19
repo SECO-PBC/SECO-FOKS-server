@@ -117,14 +117,73 @@ func (c *ClientLatencySample) Decode(dec rpc.Decoder) error {
 
 func (c *ClientLatencySample) Bytes() []byte { return nil }
 
+type ClientAppVersion struct {
+	Major uint64
+	Minor uint64
+	Patch uint64
+}
+type ClientAppVersionInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Major   *uint64
+	Minor   *uint64
+	Patch   *uint64
+}
+
+func (c ClientAppVersionInternal__) Import() ClientAppVersion {
+	return ClientAppVersion{
+		Major: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(c.Major),
+		Minor: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(c.Minor),
+		Patch: (func(x *uint64) (ret uint64) {
+			if x == nil {
+				return ret
+			}
+			return *x
+		})(c.Patch),
+	}
+}
+func (c ClientAppVersion) Export() *ClientAppVersionInternal__ {
+	return &ClientAppVersionInternal__{
+		Major: &c.Major,
+		Minor: &c.Minor,
+		Patch: &c.Patch,
+	}
+}
+func (c *ClientAppVersion) Encode(enc rpc.Encoder) error {
+	return enc.Encode(c.Export())
+}
+
+func (c *ClientAppVersion) Decode(dec rpc.Decoder) error {
+	var tmp ClientAppVersionInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*c = tmp.Import()
+	return nil
+}
+
+func (c *ClientAppVersion) Bytes() []byte { return nil }
+
 type ClientAnalyticsBatch struct {
-	Platform  ClientPlatform
-	Latencies []ClientLatencySample
+	Platform   ClientPlatform
+	Latencies  []ClientLatencySample
+	AppVersion ClientAppVersion
 }
 type ClientAnalyticsBatchInternal__ struct {
-	_struct   struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Platform  *ClientPlatformInternal__
-	Latencies *[](*ClientLatencySampleInternal__)
+	_struct    struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Platform   *ClientPlatformInternal__
+	Latencies  *[](*ClientLatencySampleInternal__)
+	AppVersion *ClientAppVersionInternal__
 }
 
 func (c ClientAnalyticsBatchInternal__) Import() ClientAnalyticsBatch {
@@ -153,6 +212,12 @@ func (c ClientAnalyticsBatchInternal__) Import() ClientAnalyticsBatch {
 			}
 			return ret
 		})(c.Latencies),
+		AppVersion: (func(x *ClientAppVersionInternal__) (ret ClientAppVersion) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(c.AppVersion),
 	}
 }
 func (c ClientAnalyticsBatch) Export() *ClientAnalyticsBatchInternal__ {
@@ -168,6 +233,7 @@ func (c ClientAnalyticsBatch) Export() *ClientAnalyticsBatchInternal__ {
 			}
 			return &ret
 		})(c.Latencies),
+		AppVersion: c.AppVersion.Export(),
 	}
 }
 func (c *ClientAnalyticsBatch) Encode(enc rpc.Encoder) error {

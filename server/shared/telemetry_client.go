@@ -5,6 +5,9 @@ package shared
 
 import (
 	"context"
+	"fmt"
+	"sync"
+	"time"
 
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"go.opentelemetry.io/otel/attribute"
@@ -67,10 +70,71 @@ func clientPlatformTag(p proto.ClientPlatform) string {
 	return "unknown"
 }
 
-func (t *Telemetry) RecordClientLatency(ctx context.Context, m proto.ClientLatencyMetric, p proto.ClientPlatform, ms uint64) {
+// clientVersionTag is a client.app_version value. Only clientVersionTags.tag
+// makes one, so every value is either "major.minor.patch" from a valid
+// version or one of the fixed fallbacks below.
+type clientVersionTag string
+
+const (
+	clientVersionUnknown clientVersionTag = "unknown" // 0.0.0: the client didn't know
+	clientVersionInvalid clientVersionTag = "invalid" // a part over MaxClientAppVersionPart
+	clientVersionOther   clientVersionTag = "other"   // over the cap this window
+)
+
+const (
+	// At most this many distinct versions are tagged per window; the rest
+	// are "other". The server can't list valid versions in advance, so this
+	// is what stops a modified client from minting Datadog series: series
+	// per metric stay under (cap + 3) x platforms per hour, whatever is sent.
+	// A handful of versions per platform are live at once.
+	clientVersionTagCap    = 32
+	clientVersionTagWindow = time.Hour
+)
+
+// clientVersionTags is the bounded set of app versions tagged in the current
+// window. It resets every window (Datadog counts series per hour), so a
+// release made after the set filled up gets its own tag within the hour.
+type clientVersionTags struct {
+	mu    sync.Mutex
+	start time.Time
+	seen  map[proto.ClientAppVersion]clientVersionTag
+}
+
+func (c *clientVersionTags) tag(v proto.ClientAppVersion, now time.Time) clientVersionTag {
+	switch {
+	case v.IsZero():
+		return clientVersionUnknown
+	case !v.IsValid():
+		return clientVersionInvalid
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.seen == nil || now.Sub(c.start) >= clientVersionTagWindow || now.Before(c.start) {
+		c.seen = make(map[proto.ClientAppVersion]clientVersionTag, clientVersionTagCap)
+		c.start = now
+	}
+	if tag, ok := c.seen[v]; ok {
+		return tag
+	}
+	if len(c.seen) >= clientVersionTagCap {
+		return clientVersionOther
+	}
+	tag := clientVersionTag(fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch))
+	c.seen[v] = tag
+	return tag
+}
+
+func (t *Telemetry) RecordClientLatency(
+	ctx context.Context,
+	m proto.ClientLatencyMetric,
+	p proto.ClientPlatform,
+	v clientVersionTag,
+	ms uint64,
+) {
 	t.inst.clientLatency.Record(ctx, float64(ms), metric.WithAttributes(
 		attribute.String("client.metric", clientMetricTag(m)),
 		attribute.String("client.platform", clientPlatformTag(p)),
+		attribute.String("client.app_version", string(v)),
 	))
 }
 

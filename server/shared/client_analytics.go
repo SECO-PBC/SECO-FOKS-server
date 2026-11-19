@@ -63,6 +63,7 @@ func RecordClientAnalytics(m MetaContext, batch proto.ClientAnalyticsBatch) erro
 		return core.RateLimitError{}
 	}
 	t := m.G().Telemetry()
+	version := m.G().clientVersions.tag(batch.AppVersion, m.G().Clock().Now())
 	for _, s := range batch.Latencies {
 		switch {
 		case s.Metric == 0:
@@ -72,7 +73,7 @@ func RecordClientAnalytics(m MetaContext, batch proto.ClientAnalyticsBatch) erro
 		case s.Ms > proto.MaxClientLatencyMs:
 			t.ClientLatencyDropped(m.Ctx(), clientDropOutOfRange)
 		default:
-			t.RecordClientLatency(m.Ctx(), s.Metric, batch.Platform, s.Ms)
+			t.RecordClientLatency(m.Ctx(), s.Metric, batch.Platform, version, s.Ms)
 		}
 	}
 	return nil

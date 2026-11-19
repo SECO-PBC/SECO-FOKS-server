@@ -8,15 +8,17 @@ user server turns them into `seco.client.*` metrics.
 
 `proto-src/lib/analytics.snowp`:
 
-- `ClientAnalyticsBatch{platform, latencies}`, where each latency is
-  `{metric, ms}`.
+- `ClientAnalyticsBatch{platform, latencies, appVersion}`, where each latency
+  is `{metric, ms}` and `appVersion` is `{major, minor, patch}` (the release,
+  e.g. 2.3.3; mobile and desktop are versioned separately).
 - `ClientLatencyMetric` and `ClientPlatform` are **enums**, numbered from 1 so
   the zero value is never valid. A metric the server doesn't know can't be
   sent as a name; the only way to add one is a proto change.
 - rem `User.reportClientAnalytics @201`. The SECO bridge calls it directly on
   the active user's User client; there is no agent-protocol (lcl) method.
 - The batch limits live in `proto/lib/analytics_extras.go`
-  (`MaxClientLatencySamples`, `MaxClientLatencyMs`), shared with the bridge,
+  (`MaxClientLatencySamples`, `MaxClientLatencyMs`,
+  `MaxClientAppVersionPart`), shared with the bridge,
   which splits and filters batches so a valid client never hits them.
 
 ## What the server does (`shared.RecordClientAnalytics`)
@@ -31,7 +33,15 @@ user server turns them into `seco.client.*` metrics.
   doesn't know (`unknown_metric`, a newer client) or a value over
   `MaxClientLatencyMs` (`out_of_range`), compared as integers.
 - Records the rest in `seco.client.latency` (milliseconds), tagged only with
-  `client.metric` and `client.platform`.
+  `client.metric`, `client.platform` and `client.app_version`.
+
+`client.app_version` is the one tag the server can't list in advance, so it
+is bounded instead (`clientVersionTags`): `major.minor.patch` for at most 32
+distinct versions per hour per server, then `other`; `unknown` for 0.0.0 (a
+client that didn't know its version) and `invalid` for a part over
+`MaxClientAppVersionPart`. A modified client can't add Datadog series beyond
+that cap. The set resets every hour, so a new release gets its own tag even if
+the set filled up.
 
 The tag strings (`send_ack`, `ios`, ...) are spelled out in
 `telemetry_client.go`, not taken from the proto's Go identifiers, so renaming
@@ -43,7 +53,8 @@ proto enums and a typed drop reason, never strings, and
 
 The RPC is authenticated, so the server knows who sent each batch, but none
 of it is recorded: no uid, team, channel or device in any metric, span or
-log. Tag values come only from enum names. Never add a dimension that could
+log. Tag values come only from enum names, plus the app version, which every
+user of a release shares. Never add a dimension that could
 identify a user, team, channel or device, and never put free text in a batch.
 
 Opting in is a client setting; the server can't tell an opted-in client from

@@ -21,7 +21,8 @@ func TestReportClientAnalytics(t *testing.T) {
 	defer closeFn()
 
 	err := ucli.ReportClientAnalytics(m.Ctx(), proto.ClientAnalyticsBatch{
-		Platform: proto.ClientPlatform_Ios,
+		Platform:   proto.ClientPlatform_Ios,
+		AppVersion: proto.ClientAppVersion{Major: 2, Minor: 3, Patch: 3},
 		Latencies: []proto.ClientLatencySample{
 			{Metric: proto.ClientLatencyMetric_SendAck, Ms: 140},
 			{Metric: proto.ClientLatencyMetric_ChannelOpen, Ms: 600},

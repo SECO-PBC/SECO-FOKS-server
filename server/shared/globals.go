@@ -26,8 +26,10 @@ import (
 
 type GlobalContext struct {
 	sync.RWMutex
-	// Fork-only (docs/client-analytics.md): per-user report rate.
+	// Fork-only (docs/client-analytics.md): per-user report rate, and the
+	// bounded set of app versions used as tags.
 	clientAnalytics clientAnalyticsLimiters
+	clientVersions  clientVersionTags
 	log             *zap.SugaredLogger
 	logCfg          zap.Config
 	cfg             Config

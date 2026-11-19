@@ -29,7 +29,18 @@ struct ClientLatencySample {
     ms @1 : Uint;
 }
 
+// The app's release version (major.minor.patch, e.g. 2.3.3). Mobile and
+// desktop are versioned separately, so it means something only alongside the
+// platform. Every user of a build sends the same value: it identifies a
+// release, not a person.
+struct ClientAppVersion {
+    major @0 : Uint;
+    minor @1 : Uint;
+    patch @2 : Uint;
+}
+
 struct ClientAnalyticsBatch {
     platform @0 : ClientPlatform;
     latencies @1 : List(ClientLatencySample);
+    appVersion @2 : ClientAppVersion;
 }

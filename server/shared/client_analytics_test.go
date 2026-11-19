@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/hex"
 	"math"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
@@ -41,8 +43,15 @@ func clientTagValues() map[string]bool {
 	for _, r := range []clientDropReason{clientDropInvalid, clientDropUnknownMetric, clientDropOutOfRange} {
 		ret[r.tag()] = true
 	}
+	for _, v := range []clientVersionTag{clientVersionUnknown, clientVersionInvalid, clientVersionOther} {
+		ret[string(v)] = true
+	}
 	return ret
 }
+
+// client.app_version is the one tag that isn't from a fixed list: it may
+// also be a dotted version, and nothing else.
+var versionTagRE = regexp.MustCompile(`^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`)
 
 func assertClientTagsClosed(t *testing.T, rm metricdata.ResourceMetrics, uid proto.UID) {
 	allowed := clientTagValues()
@@ -50,7 +59,8 @@ func assertClientTagsClosed(t *testing.T, rm metricdata.ResourceMetrics, uid pro
 	check := func(set attribute.Set) {
 		for _, kv := range set.ToSlice() {
 			v := kv.Value.AsString()
-			require.Truef(t, allowed[v], "%s=%q is not a fixed client tag", kv.Key, v)
+			isVersion := kv.Key == "client.app_version" && versionTagRE.MatchString(v)
+			require.Truef(t, allowed[v] || isVersion, "%s=%q is not a fixed client tag", kv.Key, v)
 			require.NotContains(t, v, uidHex)
 		}
 	}
@@ -71,7 +81,8 @@ func TestRecordClientAnalytics(t *testing.T) {
 	m := analyticsMeta(h, uid)
 
 	err := RecordClientAnalytics(m, proto.ClientAnalyticsBatch{
-		Platform: proto.ClientPlatform_Ios,
+		Platform:   proto.ClientPlatform_Ios,
+		AppVersion: proto.ClientAppVersion{Major: 2, Minor: 3, Patch: 3},
 		Latencies: []proto.ClientLatencySample{
 			sample(proto.ClientLatencyMetric_SendAck, 120),
 			sample(proto.ClientLatencyMetric_SendAck, 80),
@@ -95,6 +106,8 @@ func TestRecordClientAnalytics(t *testing.T) {
 		metric, _ := dp.Attributes.Value("client.metric")
 		platform, _ := dp.Attributes.Value("client.platform")
 		require.Equal(t, "ios", platform.AsString())
+		version, _ := dp.Attributes.Value("client.app_version")
+		require.Equal(t, "2.3.3", version.AsString())
 		counts[metric.AsString()] += dp.Count
 		max, _ := dp.Max.Value()
 		require.LessOrEqual(t, max, float64(proto.MaxClientLatencyMs))
@@ -175,5 +188,43 @@ func TestClientTelemetryTags(t *testing.T) {
 	}
 	for p, name := range proto.ClientPlatformRevMap {
 		require.NotEqualf(t, "unknown", clientPlatformTag(p), "platform %s has no tag", name)
+	}
+}
+
+func TestClientVersionTags(t *testing.T) {
+	var c clientVersionTags
+	t0 := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	v := func(major, minor, patch uint64) proto.ClientAppVersion {
+		return proto.ClientAppVersion{Major: major, Minor: minor, Patch: patch}
+	}
+	max := proto.MaxClientAppVersionPart
+
+	require.Equal(t, clientVersionUnknown, c.tag(v(0, 0, 0), t0))
+	require.Equal(t, clientVersionTag("2.3.3"), c.tag(v(2, 3, 3), t0))
+	require.Equal(t, clientVersionTag("0.0.1"), c.tag(v(0, 0, 1), t0))
+	require.Equal(t, clientVersionTag("9999.9999.9999"), c.tag(v(max, max, max), t0))
+	for _, bad := range []proto.ClientAppVersion{v(max+1, 0, 0), v(1, max+1, 0), v(1, 0, max+1), v(math.MaxUint64, 0, 0)} {
+		require.Equal(t, clientVersionInvalid, c.tag(bad, t0))
+	}
+
+	// Fill to the cap: past it, new versions are "other", known ones keep
+	// their tag. Unknown and invalid never take a slot.
+	for i := range uint64(clientVersionTagCap) {
+		c.tag(v(1, 0, i), t0)
+	}
+	require.Len(t, c.seen, clientVersionTagCap)
+	require.Equal(t, clientVersionOther, c.tag(v(7, 7, 7), t0.Add(time.Minute)))
+	require.Equal(t, clientVersionTag("2.3.3"), c.tag(v(2, 3, 3), t0.Add(time.Minute)))
+
+	// A new window starts empty, so a newer release gets its own tag.
+	require.Equal(t, clientVersionTag("7.7.7"), c.tag(v(7, 7, 7), t0.Add(clientVersionTagWindow)))
+	require.Len(t, c.seen, 1)
+
+	// The clock moving back also starts a new window, not a stuck one.
+	require.Equal(t, clientVersionTag("8.0.0"), c.tag(v(8, 0, 0), t0))
+	require.Len(t, c.seen, 1)
+
+	for _, tag := range c.seen {
+		require.Regexp(t, versionTagRE, string(tag))
 	}
 }
