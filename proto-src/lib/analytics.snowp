@@ -15,7 +15,12 @@ enum ClientLatencyMetric {
     RecvRender @2;      // server insert -> message rendered on a recipient
     DaemonReply @3;     // DM to the daemon sent -> its reply rendered
     ColdStart @4;       // process start -> first conversation list rows
-    ChannelOpen @5;     // channel tapped -> first messages rendered
+    // A chat screen opening -> its first messages shown, split by where the
+    // messages came from (Datadog: client.metric:channel_open, client.source).
+    ChannelOpenMemory @5;  // the app already held them; no read
+    ChannelOpenWarm @6;    // a read: the agent's cache plus the server's newer ones
+    ChannelOpenCold @7;    // a read: nothing cached, all from the server
+    ChannelOpenOffline @8; // a read: server unreachable, the agent's cache only
 }
 
 enum ClientPlatform {

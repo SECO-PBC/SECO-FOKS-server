@@ -10,26 +10,35 @@ import (
 type ClientLatencyMetric int
 
 const (
-	ClientLatencyMetric_SendAck     ClientLatencyMetric = 1
-	ClientLatencyMetric_RecvRender  ClientLatencyMetric = 2
-	ClientLatencyMetric_DaemonReply ClientLatencyMetric = 3
-	ClientLatencyMetric_ColdStart   ClientLatencyMetric = 4
-	ClientLatencyMetric_ChannelOpen ClientLatencyMetric = 5
+	ClientLatencyMetric_SendAck            ClientLatencyMetric = 1
+	ClientLatencyMetric_RecvRender         ClientLatencyMetric = 2
+	ClientLatencyMetric_DaemonReply        ClientLatencyMetric = 3
+	ClientLatencyMetric_ColdStart          ClientLatencyMetric = 4
+	ClientLatencyMetric_ChannelOpenMemory  ClientLatencyMetric = 5
+	ClientLatencyMetric_ChannelOpenWarm    ClientLatencyMetric = 6
+	ClientLatencyMetric_ChannelOpenCold    ClientLatencyMetric = 7
+	ClientLatencyMetric_ChannelOpenOffline ClientLatencyMetric = 8
 )
 
 var ClientLatencyMetricMap = map[string]ClientLatencyMetric{
-	"SendAck":     1,
-	"RecvRender":  2,
-	"DaemonReply": 3,
-	"ColdStart":   4,
-	"ChannelOpen": 5,
+	"SendAck":            1,
+	"RecvRender":         2,
+	"DaemonReply":        3,
+	"ColdStart":          4,
+	"ChannelOpenMemory":  5,
+	"ChannelOpenWarm":    6,
+	"ChannelOpenCold":    7,
+	"ChannelOpenOffline": 8,
 }
 var ClientLatencyMetricRevMap = map[ClientLatencyMetric]string{
 	1: "SendAck",
 	2: "RecvRender",
 	3: "DaemonReply",
 	4: "ColdStart",
-	5: "ChannelOpen",
+	5: "ChannelOpenMemory",
+	6: "ChannelOpenWarm",
+	7: "ChannelOpenCold",
+	8: "ChannelOpenOffline",
 }
 
 type ClientLatencyMetricInternal__ ClientLatencyMetric

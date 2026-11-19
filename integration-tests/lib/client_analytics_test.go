@@ -25,7 +25,7 @@ func TestReportClientAnalytics(t *testing.T) {
 		AppVersion: proto.ClientAppVersion{Major: 2, Minor: 3, Patch: 3},
 		Latencies: []proto.ClientLatencySample{
 			{Metric: proto.ClientLatencyMetric_SendAck, Ms: 140},
-			{Metric: proto.ClientLatencyMetric_ChannelOpen, Ms: 600},
+			{Metric: proto.ClientLatencyMetric_ChannelOpenWarm, Ms: 600},
 		},
 	})
 	require.NoError(t, err)

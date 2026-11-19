@@ -33,7 +33,18 @@ user server turns them into `seco.client.*` metrics.
   doesn't know (`unknown_metric`, a newer client) or a value over
   `MaxClientLatencyMs` (`out_of_range`), compared as integers.
 - Records the rest in `seco.client.latency` (milliseconds), tagged only with
-  `client.metric`, `client.platform` and `client.app_version`.
+  `client.metric`, `client.platform` and `client.app_version`, plus
+  `client.source` on channel opens.
+
+Channel opens are four enum values (`ChannelOpenMemory`, `Warm`, `Cold`,
+`Offline`) recorded as one `client.metric:channel_open` with a fixed
+`client.source` tag (`memory`, `warm`, `cold`, `offline`). Four enum values
+rather than a source field mean a source can't be attached to a metric it
+doesn't apply to. The source comes from the app (`memory`: it already held the
+messages) or from the agent's thread read (`lcl.RTThreadView.readSource`).
+The head page of a thread always calls the server for anything newer, so
+`warm` means "one round trip, the cache supplied the rest", not "no server
+call".
 
 `client.app_version` is the one tag the server can't list in advance, so it
 is bounded instead (`clientVersionTags`): `major.minor.patch` for at most 32

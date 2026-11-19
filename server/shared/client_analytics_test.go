@@ -40,6 +40,11 @@ func clientTagValues() map[string]bool {
 	for p := range proto.ClientPlatformRevMap {
 		ret[clientPlatformTag(p)] = true
 	}
+	for m := range proto.ClientLatencyMetricRevMap {
+		if src, ok := clientSourceTag(m); ok {
+			ret[src] = true
+		}
+	}
 	for _, r := range []clientDropReason{clientDropInvalid, clientDropUnknownMetric, clientDropOutOfRange} {
 		ret[r.tag()] = true
 	}
@@ -127,6 +132,47 @@ func TestRecordClientAnalytics(t *testing.T) {
 	h.assertPrivate(t)
 }
 
+// Channel opens are one metric, split by client.source.
+func TestRecordClientAnalyticsChannelOpenSource(t *testing.T) {
+	h := newTelemetryHarness(t, false)
+	uid := proto.UID{0x01, 0xa5}
+	err := RecordClientAnalytics(analyticsMeta(h, uid), proto.ClientAnalyticsBatch{
+		Platform:   proto.ClientPlatform_Ios,
+		AppVersion: proto.ClientAppVersion{Major: 2, Minor: 4},
+		Latencies: []proto.ClientLatencySample{
+			sample(proto.ClientLatencyMetric_ChannelOpenMemory, 1),
+			sample(proto.ClientLatencyMetric_ChannelOpenWarm, 200),
+			sample(proto.ClientLatencyMetric_ChannelOpenWarm, 300),
+			sample(proto.ClientLatencyMetric_ChannelOpenCold, 900),
+			sample(proto.ClientLatencyMetric_ChannelOpenOffline, 50),
+			sample(proto.ClientLatencyMetric_SendAck, 80),
+		},
+	})
+	require.NoError(t, err)
+	rm := h.collect(t)
+	lat := findMetric(rm, "seco.client.latency")
+	require.NotNil(t, lat)
+	counts := map[string]uint64{}
+	for _, dp := range lat.Data.(metricdata.Histogram[float64]).DataPoints {
+		metric, _ := dp.Attributes.Value("client.metric")
+		src, hasSrc := dp.Attributes.Value("client.source")
+		key := metric.AsString()
+		if hasSrc {
+			key += "/" + src.AsString()
+		}
+		counts[key] += dp.Count
+	}
+	require.Equal(t, map[string]uint64{
+		"channel_open/memory":  1,
+		"channel_open/warm":    2,
+		"channel_open/cold":    1,
+		"channel_open/offline": 1,
+		"send_ack":             1,
+	}, counts)
+	assertClientTagsClosed(t, rm, uid)
+	h.assertPrivate(t)
+}
+
 // A platform this server doesn't know (a newer client) is recorded, not
 // refused, under the fixed "unknown" tag.
 func TestRecordClientAnalyticsUnknownPlatform(t *testing.T) {
@@ -178,13 +224,26 @@ func TestRecordClientAnalyticsRefusals(t *testing.T) {
 // Every enum value has its own fixed tag; a new enum member without one would
 // be recorded as "unknown" and this fails.
 func TestClientTelemetryTags(t *testing.T) {
-	seen := map[string]bool{}
+	// Each enum value is its own series: (client.metric, client.source) is
+	// unique. Several values may share a metric tag only if each has a
+	// source (the channel opens).
+	seen := map[[2]string]bool{}
 	for m, name := range proto.ClientLatencyMetricRevMap {
 		tag := clientMetricTag(m)
 		require.NotEqualf(t, "unknown", tag, "metric %s has no tag", name)
-		require.False(t, seen[tag], "duplicate tag %s", tag)
 		require.Equal(t, strings.ToLower(tag), tag)
-		seen[tag] = true
+		src, _ := clientSourceTag(m)
+		key := [2]string{tag, src}
+		require.Falsef(t, seen[key], "duplicate series %v", key)
+		seen[key] = true
+	}
+	require.True(t, seen[[2]string{"channel_open", "memory"}])
+	for key := range seen {
+		if key[1] == "" {
+			continue
+		}
+		require.Falsef(t, seen[[2]string{key[0], ""}],
+			"%s has some values with a source and one without", key[0])
 	}
 	for p, name := range proto.ClientPlatformRevMap {
 		require.NotEqualf(t, "unknown", clientPlatformTag(p), "platform %s has no tag", name)

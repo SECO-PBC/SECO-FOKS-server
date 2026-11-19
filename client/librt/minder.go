@@ -1086,6 +1086,18 @@ type ThreadReadResult struct {
 	// the pending-message overlay) don't re-resolve -- resolution costs a
 	// server round trip when the channel-set cache is stale.
 	Chid proto.RTChannelID
+	// Source is where the messages came from (fork-only,
+	// docs/client-analytics.md). Every return sets it; zero is never valid.
+	Source lcl.RTThreadReadSource
+}
+
+// readSource is Warm when the local cache supplied part of a read that also
+// called the server, Cold when it supplied nothing.
+func readSource(cached []ThreadMessage) lcl.RTThreadReadSource {
+	if len(cached) > 0 {
+		return lcl.RTThreadReadSource_Warm
+	}
+	return lcl.RTThreadReadSource_Cold
 }
 
 // SendTestHooks lets tests perturb a send to exercise server-side validation.
@@ -2074,7 +2086,11 @@ func (d *Minder) GetThreadBookended(
 		// We had everything in cache! Cached messages were validated when they
 		// were first ingested, so by the trust model we don't re-verify here.
 		if len(holes) == 0 && start == cachedStart && end == cachedEnd {
-			return &ThreadReadResult{Msgs: cached, Chid: irr.ch.Id}, nil
+			return &ThreadReadResult{
+				Msgs:   cached,
+				Chid:   irr.ch.Id,
+				Source: lcl.RTThreadReadSource_Cached,
+			}, nil
 		}
 
 		if start != cachedStart {
@@ -2117,6 +2133,7 @@ func (d *Minder) GetThreadBookended(
 			return &ThreadReadResult{
 				Msgs:         cached,
 				Stale:        true,
+				Source:       lcl.RTThreadReadSource_Offline,
 				TransportErr: err,
 				Chid:         irr.ch.Id,
 			}, nil
@@ -2163,7 +2180,7 @@ func (d *Minder) GetThreadBookended(
 		(inc > 0 && core.Last(ret).Seq < end) ||
 		(inc < 0 && core.Last(ret).Seq > end)
 
-	return &ThreadReadResult{Msgs: ret, Final: isFinal, Chid: irr.ch.Id}, nil
+	return &ThreadReadResult{Msgs: ret, Final: isFinal, Chid: irr.ch.Id, Source: readSource(cached)}, nil
 }
 
 // GetThreadPage fetches up to num messages, newest-first, ending just before the
@@ -2207,7 +2224,7 @@ func (d *Minder) GetThreadPage(
 	// the beginning once the window reaches seq 1.
 	hi := int(before) - 1
 	if hi < 1 {
-		return &ThreadReadResult{Final: true}, nil
+		return &ThreadReadResult{Final: true, Source: lcl.RTThreadReadSource_Cached}, nil
 	}
 	lo := hi - int(num) + 1
 	if lo < 1 {
@@ -2262,7 +2279,7 @@ func (d *Minder) GetThreadView(
 		return nil, err
 	}
 
-	ret := lcl.RTThreadView{AtBeginning: page.Final, Stale: page.Stale}
+	ret := lcl.RTThreadView{AtBeginning: page.Final, Stale: page.Stale, ReadSource: page.Source}
 	for i := range msgs {
 		ret.Msgs = append(ret.Msgs, threadMessageToView(&msgs[i], names))
 	}
@@ -2407,6 +2424,7 @@ func (d *Minder) GetThreadRecentMsgs(
 			return &ThreadReadResult{
 				Msgs:         cached[0:end],
 				Stale:        true,
+				Source:       lcl.RTThreadReadSource_Offline,
 				TransportErr: err,
 				Chid:         irr.ch.Id,
 			}, nil
@@ -2429,7 +2447,7 @@ func (d *Minder) GetThreadRecentMsgs(
 
 	// All of the fresh messages fill up the window, so can just return here.
 	if len(freshPlain) >= int(num) {
-		return &ThreadReadResult{Msgs: freshPlain, Chid: irr.ch.Id}, nil
+		return &ThreadReadResult{Msgs: freshPlain, Chid: irr.ch.Id, Source: readSource(cached)}, nil
 	}
 
 	// in order, but with holes
@@ -2440,7 +2458,7 @@ func (d *Minder) GetThreadRecentMsgs(
 	}
 	if len(holes) == 0 {
 		end := min(int(num), len(combined))
-		return &ThreadReadResult{Msgs: combined[0:end], Chid: irr.ch.Id}, nil
+		return &ThreadReadResult{Msgs: combined[0:end], Chid: irr.ch.Id, Source: readSource(cached)}, nil
 	}
 
 	d.serverThreadReads.Add(1)
@@ -2463,6 +2481,7 @@ func (d *Minder) GetThreadRecentMsgs(
 			return &ThreadReadResult{
 				Msgs:         combined[0:end],
 				Stale:        true,
+				Source:       lcl.RTThreadReadSource_Offline,
 				TransportErr: err,
 				Chid:         irr.ch.Id,
 			}, nil
@@ -2492,7 +2511,7 @@ func (d *Minder) GetThreadRecentMsgs(
 	ret := merge(combined, fillerPlain, inc)
 	// Trim to the requested window, matching the no-holes path above.
 	end := min(int(num), len(ret))
-	return &ThreadReadResult{Msgs: ret[0:end], Chid: irr.ch.Id}, nil
+	return &ThreadReadResult{Msgs: ret[0:end], Chid: irr.ch.Id, Source: readSource(cached)}, nil
 }
 
 func (d *Minder) decodeMsgs(

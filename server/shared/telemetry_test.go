@@ -52,6 +52,7 @@ var allowedTelemetryKeys = map[attribute.Key]bool{
 	"client.platform":    true,
 	"client.drop_reason": true,
 	"client.app_version": true, // a release, bounded by clientVersionTagCap
+	"client.source":      true, // channel opens: memory/warm/cold/offline
 }
 
 // A stand-in for user data that must never reach telemetry.

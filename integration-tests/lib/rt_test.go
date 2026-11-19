@@ -2002,6 +2002,53 @@ func TestRTDegradedReads(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestRTThreadReadSource: every thread read reports where its messages came
+// from, and the view carries it to the app (fork-only,
+// docs/client-analytics.md).
+func TestRTThreadReadSource(t *testing.T) {
+	r := makeRTOutboxTestRig(t)
+	tm := team.WrapNamedPtr(r.fqt)
+	foo := makeChannelSpecifierWithString("foo")
+
+	for _, b := range []string{"one", "two", "three"} {
+		_, err := r.send(t, b)
+		require.NoError(t, err)
+	}
+	msgs := r.thread(t, 1, 3) // prime the cache
+	require.Len(t, msgs, 3)
+
+	// Nothing cached for a new channel: the server supplies all of it.
+	_, err := r.minder.MakeChannel(r.mb, tm, proto.RTAppID_Chat, "bar", "", proto.RolePairOpt{})
+	require.NoError(t, err)
+	res, err := r.minder.GetThreadRecentMsgs(r.mb, tm, proto.RTAppID_Chat,
+		makeChannelSpecifierWithString("bar"), 0)
+	require.NoError(t, err)
+	require.Equal(t, lcl.RTThreadReadSource_Cold, res.Source)
+
+	// The head page always asks the server for anything newer: warm.
+	res, err = r.minder.GetThreadRecentMsgs(r.mb, tm, proto.RTAppID_Chat, foo, 0)
+	require.NoError(t, err)
+	require.Equal(t, lcl.RTThreadReadSource_Warm, res.Source)
+
+	view, err := r.minder.GetThreadView(r.mb, tm, proto.RTAppID_Chat, foo, 0, 0)
+	require.NoError(t, err)
+	require.Equal(t, lcl.RTThreadReadSource_Warm, view.ReadSource)
+
+	// A fully cached history range needs no server call.
+	res, err = r.minder.GetThreadBookended(r.mb, tm, proto.RTAppID_Chat, foo, 1, 3)
+	require.NoError(t, err)
+	require.Equal(t, lcl.RTThreadReadSource_Cached, res.Source)
+
+	// Unreachable server: served from the cache, offline.
+	r.minder.SetTestHooks(&librt.MinderTestHooks{ReadsFail: simTransportErr()})
+	res, err = r.minder.GetThreadBookended(r.mb, tm, proto.RTAppID_Chat, foo, 1, 5)
+	require.NoError(t, err)
+	require.Equal(t, lcl.RTThreadReadSource_Offline, res.Source)
+	res, err = r.minder.GetThreadRecentMsgs(r.mb, tm, proto.RTAppID_Chat, foo, 0)
+	require.NoError(t, err)
+	require.Equal(t, lcl.RTThreadReadSource_Offline, res.Source)
+}
+
 // TestRTReadMarksOfflineQueueAndReplay: a read-through that can't reach the
 // server persists locally (so this device's unread counts move immediately)
 // and replays on the next drain, after which the server agrees. A sender's

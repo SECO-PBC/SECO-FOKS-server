@@ -52,10 +52,29 @@ func clientMetricTag(m proto.ClientLatencyMetric) string {
 		return "daemon_reply"
 	case proto.ClientLatencyMetric_ColdStart:
 		return "cold_start"
-	case proto.ClientLatencyMetric_ChannelOpen:
+	case proto.ClientLatencyMetric_ChannelOpenMemory,
+		proto.ClientLatencyMetric_ChannelOpenWarm,
+		proto.ClientLatencyMetric_ChannelOpenCold,
+		proto.ClientLatencyMetric_ChannelOpenOffline:
 		return "channel_open"
 	}
 	return "unknown"
+}
+
+// clientSourceTag is the client.source tag: where a channel open's messages
+// came from. Only the channel-open metrics have one.
+func clientSourceTag(m proto.ClientLatencyMetric) (string, bool) {
+	switch m {
+	case proto.ClientLatencyMetric_ChannelOpenMemory:
+		return "memory", true
+	case proto.ClientLatencyMetric_ChannelOpenWarm:
+		return "warm", true
+	case proto.ClientLatencyMetric_ChannelOpenCold:
+		return "cold", true
+	case proto.ClientLatencyMetric_ChannelOpenOffline:
+		return "offline", true
+	}
+	return "", false
 }
 
 func clientPlatformTag(p proto.ClientPlatform) string {
@@ -131,11 +150,15 @@ func (t *Telemetry) RecordClientLatency(
 	v clientVersionTag,
 	ms uint64,
 ) {
-	t.inst.clientLatency.Record(ctx, float64(ms), metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("client.metric", clientMetricTag(m)),
 		attribute.String("client.platform", clientPlatformTag(p)),
 		attribute.String("client.app_version", string(v)),
-	))
+	}
+	if src, ok := clientSourceTag(m); ok {
+		attrs = append(attrs, attribute.String("client.source", src))
+	}
+	t.inst.clientLatency.Record(ctx, float64(ms), metric.WithAttributes(attrs...))
 }
 
 func (t *Telemetry) ClientLatencyDropped(ctx context.Context, r clientDropReason) {
