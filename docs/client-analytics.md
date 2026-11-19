@@ -101,3 +101,22 @@ Revisit HTTP when one of these becomes true:
 
 The client keeps transport out of its collector, so switching swaps only how
 batches are sent.
+
+## Future: client spans
+
+Investigate adding proper client-side spans. Today the app sends only
+latency histograms. They show *that* a send, a chat open or a cold start was
+slow, but not *where* the time went. A follow-up should look at:
+
+- **Per-phase spans for the slow flows.** A send would cover tap → bridge
+  call → wait for a bridge worker → Go work → RPC → render. Channel open and
+  cold start would get the same breakdown.
+- **Relaying them the same way.** Typed span names and attributes would go
+  in the analytics batch, under the same consent, rate limit and privacy
+  allowlist. The server would rebuild them as OTel spans with explicit
+  timestamps, adjusted for clock offset, and export them through the
+  existing OTLP pipeline.
+- **Possibly trace context on selected RPCs** (send, daemon reply), so a
+  client span becomes the parent of the server's span for the same request.
+- **Sampling and cost**, for example uploading full traces only for flows
+  over a latency threshold.
