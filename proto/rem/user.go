@@ -3061,6 +3061,45 @@ func (n *NewInviteCodeArg) Decode(dec rpc.Decoder) error {
 
 func (n *NewInviteCodeArg) Bytes() []byte { return nil }
 
+type ReportClientAnalyticsArg struct {
+	Batch lib.ClientAnalyticsBatch
+}
+type ReportClientAnalyticsArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Batch   *lib.ClientAnalyticsBatchInternal__
+}
+
+func (r ReportClientAnalyticsArgInternal__) Import() ReportClientAnalyticsArg {
+	return ReportClientAnalyticsArg{
+		Batch: (func(x *lib.ClientAnalyticsBatchInternal__) (ret lib.ClientAnalyticsBatch) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(r.Batch),
+	}
+}
+func (r ReportClientAnalyticsArg) Export() *ReportClientAnalyticsArgInternal__ {
+	return &ReportClientAnalyticsArgInternal__{
+		Batch: r.Batch.Export(),
+	}
+}
+func (r *ReportClientAnalyticsArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(r.Export())
+}
+
+func (r *ReportClientAnalyticsArg) Decode(dec rpc.Decoder) error {
+	var tmp ReportClientAnalyticsArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*r = tmp.Import()
+	return nil
+}
+
+func (r *ReportClientAnalyticsArg) Bytes() []byte { return nil }
+
 type UserInterface interface {
 	Ping(context.Context) (lib.UID, error)
 	SetPassphrase(context.Context, SetPassphraseArg) error
@@ -3092,6 +3131,7 @@ type UserInterface interface {
 	GetYubiManagementKey(context.Context, lib.YubiID) (YubiEncryptedManagementKey, error)
 	GetAllYubiManagementKeys(context.Context) ([]YubiEncryptedManagementKey, error)
 	NewInviteCode(context.Context) (InviteCode, error)
+	ReportClientAnalytics(context.Context, lib.ClientAnalyticsBatch) error
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h lib.Header) error
 	MakeResHeader() lib.Header
@@ -3816,6 +3856,29 @@ func (c UserClient) NewInviteCode(ctx context.Context) (res InviteCode, err erro
 		}
 	}
 	res = tmp.Data.Import()
+	return
+}
+func (c UserClient) ReportClientAnalytics(ctx context.Context, batch lib.ClientAnalyticsBatch) (err error) {
+	arg := ReportClientAnalyticsArg{
+		Batch: batch,
+	}
+	warg := &rpc.DataWrap[lib.Header, *ReportClientAnalyticsArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, interface{}]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(UserProtocolID, 201, "User.reportClientAnalytics"), warg, &tmp, 0*time.Millisecond, userErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
 	return
 }
 func UserProtocol(i UserInterface) rpc.ProtocolV2 {
@@ -4683,6 +4746,34 @@ func UserProtocol(i UserInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "newInviteCode",
+			},
+			201: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *ReportClientAnalyticsArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *ReportClientAnalyticsArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *ReportClientAnalyticsArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						err := i.ReportClientAnalytics(ctx, (typedArg.Import()).Batch)
+						if err != nil {
+							return nil, err
+						}
+						ret := rpc.DataWrap[lib.Header, interface{}]{
+							Header: i.MakeResHeader(),
+						}
+						return &ret, nil
+					},
+				},
+				Name: "reportClientAnalytics",
 			},
 		},
 		WrapError: UserMakeGenericErrorWrapper(i.ErrorWrapper()),

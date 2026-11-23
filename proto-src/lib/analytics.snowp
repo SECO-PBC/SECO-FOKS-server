@@ -1,0 +1,51 @@
+// Copyright (c) 2025 ne43, Inc.
+// Licensed under the MIT License. See LICENSE in the project root for details.
+
+@0xe154b974b7d7628a;
+
+// Fork-only (docs/client-analytics.md): opt-in client analytics, reported over
+// the authenticated User protocol. Every name is an enum, so a metric the
+// server doesn't know can't be expressed on the wire; adding one is a proto
+// change. Never add a dimension that identifies a user, team, channel or
+// device: the batch's sender is known, but nothing about them is recorded.
+
+// A client-side latency, measured in milliseconds.
+enum ClientLatencyMetric {
+    SendAck @1;         // composer tap -> server acknowledged the send
+    RecvRender @2;      // server insert -> message rendered on a recipient
+    DaemonReply @3;     // DM to the daemon sent -> its reply rendered
+    ColdStart @4;       // app JS start -> first Chats rows (native launch before JS isn't in it)
+    // A chat screen opening -> its first messages shown, split by where the
+    // messages came from (Datadog: client.metric:channel_open, client.source).
+    ChannelOpenMemory @5;  // the app already held them; no read
+    ChannelOpenWarm @6;    // a read: the agent's cache plus the server's newer ones
+    ChannelOpenCold @7;    // a read: all from the server
+    ChannelOpenOffline @8; // a read: a server call failed, the agent's cache only
+}
+
+enum ClientPlatform {
+    Ios @1;
+    Android @2;
+    Desktop @3;
+}
+
+struct ClientLatencySample {
+    metric @0 : ClientLatencyMetric;
+    ms @1 : Uint;
+}
+
+// The app's release version (major.minor.patch, e.g. 2.3.3). Mobile and
+// desktop are versioned separately, so it means something only alongside the
+// platform. Every user of a build sends the same value: it identifies a
+// release, not a person.
+struct ClientAppVersion {
+    major @0 : Uint;
+    minor @1 : Uint;
+    patch @2 : Uint;
+}
+
+struct ClientAnalyticsBatch {
+    platform @0 : ClientPlatform;
+    latencies @1 : List(ClientLatencySample);
+    appVersion @2 : ClientAppVersion;
+}
