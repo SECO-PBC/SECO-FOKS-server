@@ -4,11 +4,14 @@
 package libclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/foks-proj/go-foks/lib/chains"
 	"github.com/foks-proj/go-foks/lib/core"
@@ -35,9 +38,10 @@ type UserContext struct {
 	treeLocMu sync.Mutex
 	treeLocs  map[proto.Seqno]proto.TreeLocation
 
-	userGCli *core.RpcClient
-	regCli   *rem.RegClient
-	mqCli    *rem.MerkleQueryClient
+	userGCli      *core.RpcClient
+	userGCliChain [][]byte // the cert chain userGCli was built with
+	regCli        *rem.RegClient
+	mqCli         *rem.MerkleQueryClient
 
 	// Single-flight unlocking keys
 	unlockKeysMu sync.Mutex
@@ -48,6 +52,15 @@ type UserContext struct {
 	plc *PartyLoaderCache
 
 	apps *Apps
+
+	// A client certificate built from a saved chain stays unconfirmed until a
+	// background fetch from the reg server succeeds (refreshSavedCert).
+	// Guarded by the UserContext lock.
+	savedCertUsed       *tls.Certificate // nil once confirmed, or if none was used
+	savedCertEid        proto.EntityID
+	savedCertRefreshing bool
+	savedCertTriedAt    time.Time
+	prewarmed           bool // connections were pre-warmed for this user once
 }
 
 func (u *UserContext) Eq(u2 *UserContext) bool {
@@ -524,6 +537,18 @@ func (u *UserPrivateKeys) SetCert(c *tls.Certificate) {
 	u.cert = c
 }
 
+// ReplaceCert swaps in next only if old is still the certificate held, so a
+// Clear (or another replacement) in between is not undone.
+func (u *UserPrivateKeys) ReplaceCert(old, next *tls.Certificate) bool {
+	u.Lock()
+	defer u.Unlock()
+	if u.cert != old {
+		return false
+	}
+	u.cert = next
+	return true
+}
+
 func (u *UserPrivateKeys) Clear() {
 	u.Lock()
 	defer u.Unlock()
@@ -573,6 +598,22 @@ func (u *UserContext) loadSubkeyLocked(m MetaContext) (core.EntityPrivate, error
 	u.PrivKeys.SetSubkey(key)
 
 	return key, nil
+}
+
+// ClientCertKeyForTest is the entity ID the client certificate is issued for:
+// the key the saved chain is filed under.
+func (u *UserContext) ClientCertKeyForTest(m MetaContext) (proto.EntityID, error) {
+	u.Lock()
+	defer u.Unlock()
+	key, err := u.pickBestPrivateKeyForCert(m)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := key.EntityPublic()
+	if err != nil {
+		return nil, err
+	}
+	return pub.GetEntityID(), nil
 }
 
 func (u *UserContext) pickBestPrivateKeyForCert(m MetaContext) (core.EntityPrivate, error) {
@@ -648,6 +689,7 @@ func (c *UserContext) ClientCert(m MetaContext) (*tls.Certificate, error) {
 func (c *UserContext) clientCertLocked(m MetaContext) (*tls.Certificate, error) {
 
 	if cert := c.PrivKeys.GetCert(); cert != nil {
+		c.maybeRefreshSavedCertLocked(m, cert)
 		return cert, nil
 	}
 
@@ -678,7 +720,7 @@ func (c *UserContext) clientCertLocked(m MetaContext) (*tls.Certificate, error) 
 			core.NoDefaultHostError{})
 	}
 
-	certChain, fromCache, err := c.fetchClientCertChain(m, eid)
+	certChain, src, err := c.fetchClientCertChain(m, eid)
 	if err != nil {
 		return nil, err
 	}
@@ -688,51 +730,237 @@ func (c *UserContext) clientCertLocked(m MetaContext) (*tls.Certificate, error) 
 		Certificate: certChain,
 	}
 
-	// Memoize only a freshly issued chain. A cache-served chain may have
-	// expired or rotated during the outage; pinning it in memory would keep
-	// presenting it after connectivity returns (every handshake failing,
-	// reading as "still offline") with no path to the refetch that heals it.
-	// Rebuilding from the cached row per use while offline is cheap.
-	if !fromCache {
-		c.PrivKeys.SetCert(cert)
+	switch src {
+	case certFromOfflineCache:
+		// Not memoized. A cache-served chain may have expired or rotated
+		// during the outage; pinning it in memory would keep presenting it
+		// after connectivity returns (every handshake failing, reading as
+		// "still offline") with no path to the refetch that heals it.
+		// Rebuilding from the cached row per use while offline is cheap.
+		return cert, nil
+	case certFromSaved:
+		// Memoized so every client shares it, but unconfirmed until a fetch
+		// from the reg server succeeds; until then it is retried
+		// (maybeRefreshSavedCertLocked).
+		c.savedCertUsed = cert
+		c.savedCertEid = eid
+		c.startSavedCertRefreshLocked(m)
+	case certFromServer:
+	}
+	c.PrivKeys.SetCert(cert)
+
+	// Every user-authenticated service needs this certificate, so start
+	// connecting to all of them now, in parallel, rather than one at a time
+	// as each is first used. Once per user: a cert rebuilt after a lock and
+	// unlock finds its clients already made.
+	if !c.prewarmed {
+		c.prewarmed = true
+		c.homeServer.Prewarm(m, []proto.ServerType{
+			proto.ServerType_User,
+			proto.ServerType_KVStore,
+			proto.ServerType_RealTime,
+		}, cert)
 	}
 	return cert, nil
 }
 
+// certSource says where a client certificate chain came from.
+type certSource int
+
+const (
+	// certFromServer: issued by the reg server just now.
+	certFromServer certSource = iota
+	// certFromSaved: saved by an earlier run and still well within its
+	// validity; used without asking the reg server first.
+	certFromSaved
+	// certFromOfflineCache: the saved chain, served because the reg server
+	// could not be reached.
+	certFromOfflineCache
+)
+
 // fetchClientCertChain gets the cert chain the reg server issued for the
 // given key, caching it in the soft DB (it is derived state: the reg server
 // reissues it on demand, so losing the row costs nothing while online).
-// Offline, the cached chain (public certificate material only; the private
-// key stays in the local keyring) is served instead, so a cold start can
-// still present mTLS credentials -- an expired chain simply fails the TLS
-// handshake, which reads as offline.
+//
+// A saved chain with at least certChainMinRemaining of validity left is used
+// without asking the reg server: client certificates run ten years, and every
+// server re-checks the device key on each connection (authConnection), so a
+// revoked device fails at the handshake whatever certificate it presents.
+// That spares a cold start a reg connection, its vhost select and the call:
+// four round trips. Offline, the cached chain is served whatever its
+// remaining validity -- an expired chain simply fails the TLS handshake,
+// which reads as offline.
 func (c *UserContext) fetchClientCertChain(
 	m MetaContext,
 	eid proto.EntityID,
 ) (
-	chain [][]byte,
-	fromCache bool,
-	err error,
+	[][]byte,
+	certSource,
+	error,
 ) {
 	// Callers hold c's lock (clientCertLocked); touch fields directly rather
 	// than via locking accessors.
 	uid := c.Info.Fqu.Uid
 
+	if saved := usableSavedCertChain(m, uid, eid); saved != nil {
+		return saved, certFromSaved, nil
+	}
+
 	certChain, err := c.fetchClientCertChainFromServer(m, uid, eid)
 	if err == nil {
-		return certChain, false, nil
+		return certChain, certFromServer, nil
 	}
 	if !core.IsTransportError(err) {
-		return nil, false, err
+		return nil, certFromServer, err
 	}
 	var cached lcl.UserCertChain
 	_, derr := m.DbGet(&cached, DbTypeSoft, &uid, lcl.DataType_UserCertChain, eid)
 	if derr != nil || len(cached.Certs) == 0 {
-		return nil, false, err
+		return nil, certFromServer, err
 	}
 	m.Warnw("fetchClientCertChain", "err", err,
 		"note", "server unreachable; using cached cert chain")
-	return cached.Certs, true, nil
+	return cached.Certs, certFromOfflineCache, nil
+}
+
+// certChainMinRemaining is how long a saved chain must still be valid for to
+// be used without asking the reg server first.
+const certChainMinRemaining = 24 * time.Hour
+
+// savedCertRetry is how long after a failed confirmation of a saved chain the
+// next use of the certificate tries again.
+const savedCertRetry = 30 * time.Second
+
+// usableSavedCertChain is the chain saved for this key, if its leaf parses and
+// is valid for at least certChainMinRemaining more.
+func usableSavedCertChain(m MetaContext, uid proto.UID, eid proto.EntityID) [][]byte {
+	var saved lcl.UserCertChain
+	_, err := m.DbGet(&saved, DbTypeSoft, &uid, lcl.DataType_UserCertChain, eid)
+	if err != nil || len(saved.Certs) == 0 {
+		return nil
+	}
+	if !certChainValidFor(saved.Certs, m.G().Now(), certChainMinRemaining) {
+		return nil
+	}
+	return saved.Certs
+}
+
+// certChainValidFor reports that a chain's leaf parses and is still valid d
+// from now. NotBefore is not checked: the reg server stamps it with its own
+// clock, and a device clock running behind would otherwise reject a chain
+// the servers accept.
+func certChainValidFor(chain [][]byte, now time.Time, d time.Duration) bool {
+	if len(chain) == 0 {
+		return false
+	}
+	leaf, err := x509.ParseCertificate(chain[0])
+	if err != nil {
+		return false
+	}
+	return now.Add(d).Before(leaf.NotAfter)
+}
+
+// maybeRefreshSavedCertLocked retries confirming a certificate built from a
+// saved chain, when it is the one in use, unconfirmed, and the last attempt
+// failed at least savedCertRetry ago (offline, say). Caller holds c's lock.
+func (c *UserContext) maybeRefreshSavedCertLocked(m MetaContext, cert *tls.Certificate) {
+	if c.savedCertUsed != cert || c.savedCertRefreshing ||
+		m.G().Now().Sub(c.savedCertTriedAt) < savedCertRetry {
+		return
+	}
+	c.startSavedCertRefreshLocked(m)
+}
+
+func (c *UserContext) startSavedCertRefreshLocked(m MetaContext) {
+	c.savedCertRefreshing = true
+	c.savedCertTriedAt = m.G().Now()
+	go c.refreshSavedCert(m.G(), c.Info.Fqu.Uid, c.savedCertEid, c.savedCertUsed)
+}
+
+// refreshSavedCert fetches the chain from the reg server after a saved one
+// was used, and saves it for the next start. It replaces the certificate in
+// use only when the saved chain stops being good enough (replaceSavedCert),
+// and only if that certificate is still the one held, so a UserLock in the
+// meantime is not undone. Clients notice the replacement by its content and
+// rebuild (UserGCli, and the KV and realtime minders). Never holds c's lock
+// across the network.
+func (c *UserContext) refreshSavedCert(g *GlobalContext, uid proto.UID, eid proto.EntityID, used *tls.Certificate) {
+	m, cancel := NewMetaContextBackground(g).WithContextTimeout(time.Minute)
+	defer cancel()
+	confirmed := false
+	defer func() {
+		c.Lock()
+		defer c.Unlock()
+		c.savedCertRefreshing = false
+		if confirmed && c.savedCertUsed == used {
+			c.savedCertUsed = nil
+		}
+	}()
+
+	cli, err := c.regClientUnlocked(m)
+	if err != nil {
+		m.Warnw("refreshSavedCert", "stage", "regClient", "err", err)
+		return
+	}
+	fresh, err := cli.GetClientCertChain(m.Ctx(), rem.GetClientCertChainArg{Uid: uid, Key: eid})
+	if err != nil {
+		m.Warnw("refreshSavedCert", "stage", "fetch", "err", err)
+		return
+	}
+	now := m.G().Now()
+	if !certChainValidFor(fresh, now, 0) {
+		m.Warnw("refreshSavedCert", "stage", "check", "err", "reg server returned an unusable chain")
+		return
+	}
+	store := lcl.UserCertChain{Certs: fresh}
+	err = m.DbPut(DbTypeSoft, PutArg{Scope: &uid, Typ: lcl.DataType_UserCertChain, Key: eid, Val: &store})
+	if err != nil {
+		m.Warnw("refreshSavedCert", "stage", "store", "err", err)
+	}
+	confirmed = true
+	if replaceSavedCert(used.Certificate, fresh, now) {
+		c.PrivKeys.ReplaceCert(used, &tls.Certificate{PrivateKey: used.PrivateKey, Certificate: fresh})
+	}
+}
+
+// replaceSavedCert says whether a certificate built from the saved chain
+// should give way to the freshly fetched one. The reg server issues a new
+// leaf every time (new serial and start time), so the chains always differ;
+// the saved one stops working only if the issuing CA changed or it is close
+// to expiry.
+func replaceSavedCert(saved, fresh [][]byte, now time.Time) bool {
+	return !sameCertIssuer(saved, fresh) || !certChainValidFor(saved, now, certChainMinRemaining)
+}
+
+// sameCertIssuer reports that two chains' leaves were issued by the same CA.
+func sameCertIssuer(a, b [][]byte) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	la, err := x509.ParseCertificate(a[0])
+	if err != nil {
+		return false
+	}
+	lb, err := x509.ParseCertificate(b[0])
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(la.AuthorityKeyId, lb.AuthorityKeyId) && bytes.Equal(la.RawIssuer, lb.RawIssuer)
+}
+
+// SameCertChain reports that two certificate chains are byte-for-byte equal:
+// how a cached client tells whether the certificate it was built with is
+// still the one in use.
+func SameCertChain(a, b [][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !bytes.Equal(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchClientCertChainFromServer asks the reg server for the chain and caches
@@ -771,8 +999,14 @@ func (c *UserContext) UserGCli(m MetaContext) (*core.RpcClient, error) {
 	c.Lock()
 	defer c.Unlock()
 
+	// Keep the client unless the memoized certificate has changed under it
+	// (refreshSavedCert). A replaced client is left to idle out, not shut
+	// down, since calls may still be in flight on it.
 	if c.userGCli != nil {
-		return c.userGCli, nil
+		cur := c.PrivKeys.GetCert()
+		if cur == nil || SameCertChain(c.userGCliChain, cur.Certificate) {
+			return c.userGCli, nil
+		}
 	}
 
 	cert, err := c.clientCertLocked(m)
@@ -785,6 +1019,7 @@ func (c *UserContext) UserGCli(m MetaContext) (*core.RpcClient, error) {
 		return nil, err
 	}
 	c.userGCli = gcli
+	c.userGCliChain = cert.Certificate
 	return gcli, nil
 }
 
@@ -830,6 +1065,36 @@ func (c *UserContext) regClientLocked(m MetaContext) (*rem.RegClient, error) {
 	ret := &tmp
 	c.regCli = ret
 	return ret, nil
+}
+
+// regClientUnlocked is RegClient for a caller that must not hold c's lock
+// across the network: it makes the client (which may refresh the probe)
+// without the lock.
+func (c *UserContext) regClientUnlocked(m MetaContext) (*rem.RegClient, error) {
+	c.Lock()
+	if c.regCli != nil {
+		cli := c.regCli
+		c.Unlock()
+		return cli, nil
+	}
+	hs := c.homeServer
+	c.Unlock()
+	if hs == nil {
+		return nil, core.NoDefaultHostError{}
+	}
+	gcli, err := hs.RegGCli(m)
+	if err != nil {
+		return nil, err
+	}
+	tmp := core.NewRegClient(gcli, m.G())
+	c.Lock()
+	defer c.Unlock()
+	if c.regCli != nil {
+		gcli.Shutdown()
+		return c.regCli, nil
+	}
+	c.regCli = &tmp
+	return c.regCli, nil
 }
 
 func (c *UserContext) RegClient(m MetaContext) (*rem.RegClient, error) {

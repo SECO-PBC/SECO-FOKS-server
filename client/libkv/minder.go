@@ -133,8 +133,9 @@ type Minder struct {
 	probes        libclient.ProbeCollection
 	cacheSettings libclient.CacheSettings
 
-	localCliMu sync.Mutex
-	localCli   *rem.KVStoreClient
+	localCliMu    sync.Mutex
+	localCli      *rem.KVStoreClient
+	localCliChain [][]byte // the client cert chain localCli was built with
 
 	testHooks *MinderTestHooks
 }
@@ -212,7 +213,9 @@ func (k *Minder) clientLocal(
 	k.localCliMu.Lock()
 	defer k.localCliMu.Unlock()
 
-	if k.localCli != nil {
+	// A client made with an older certificate (the saved chain, replaced
+	// after a CA change) is rebuilt; the old one is left to idle out.
+	if k.localCli != nil && libclient.SameCertChain(k.localCliChain, cert.Certificate) {
 		return pr, k.localCli, nil
 	}
 
@@ -222,6 +225,7 @@ func (k *Minder) clientLocal(
 	}
 	ret := core.NewKVStoreClient(gcli, m)
 	k.localCli = &ret
+	k.localCliChain = cert.Certificate
 	return pr, &ret, nil
 }
 

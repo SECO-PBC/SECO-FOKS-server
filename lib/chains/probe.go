@@ -43,6 +43,9 @@ type Probe struct {
 	merkleAgentMu sync.Mutex
 	ma            *merkle.Agent
 
+	// Clients Prewarm started connecting, for RPCClient to hand over.
+	prewarmed prewarmPool[*core.RpcClient]
+
 	// only for testing
 	TestWaitCh            <-chan struct{}
 	TestDoneProbeCh       chan<- struct{}
@@ -585,11 +588,58 @@ func (p *Probe) WithRegCli(m MetaContext, f func(rem.RegClient) error) error {
 	return f(cli)
 }
 
-func (p *Probe) RPCClient(m MetaContext, st proto.ServerType, cliCert *tls.Certificate) (*core.RpcClient, error) {
+// Prewarm makes clients for these services and starts connecting all of them
+// at once (TCP, TLS and, where the service needs one, the vhost select), so a
+// cold start pays one connection setup in parallel rather than one per
+// service, each when it is first used. The next RPCClient call for the same
+// service and certificate takes the connecting client over; one nobody takes
+// within prewarmUnclaimedAfter is shut down.
+func (p *Probe) Prewarm(m MetaContext, sts []proto.ServerType, cliCert *tls.Certificate) {
+	// Offline, or on a probe hydrated from cache, there is nothing to gain,
+	// and each client would refresh the probe first.
+	if p == nil || !p.IsConnected() || p.PublicZone() == nil {
+		return
+	}
+	for _, st := range sts {
+		k := prewarmKey{st: st, cert: cliCert}
+		if p.prewarmed.has(k) {
+			continue
+		}
+		// A host that does not run the service lists no address for it.
+		if srv := p.PublicZone().Services.Select(st); srv == nil || *srv == "" {
+			continue
+		}
+		cli, err := p.newRPCClient(m, st, cliCert)
+		if err != nil {
+			m.Warnw("Probe.Prewarm", "server", st, "err", err)
+			continue
+		}
+		if !p.prewarmed.put(k, cli) {
+			cli.Shutdown()
+			continue
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), prewarmUnclaimedAfter)
+			defer cancel()
+			// A failure here is the caller's to see on its first call, which
+			// retries the connection; nothing to report yet.
+			_, _ = cli.Connect(ctx)
+		}()
+		time.AfterFunc(prewarmUnclaimedAfter, func() { p.prewarmed.expire(k, cli) })
+	}
+}
 
+func (p *Probe) RPCClient(m MetaContext, st proto.ServerType, cliCert *tls.Certificate) (*core.RpcClient, error) {
 	if p == nil {
 		return nil, core.InternalError("probe was nil")
 	}
+	if cli, ok := p.prewarmed.take(prewarmKey{st: st, cert: cliCert}); ok {
+		return cli, nil
+	}
+	return p.newRPCClient(m, st, cliCert)
+}
+
+func (p *Probe) newRPCClient(m MetaContext, st proto.ServerType, cliCert *tls.Certificate) (*core.RpcClient, error) {
 	err := p.refresh(m)
 	if err != nil {
 		return nil, err

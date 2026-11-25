@@ -119,6 +119,12 @@ func (c *connectionMgr) xpLoop(m RpcClientMetaContexter) {
 		select {
 		case <-c.eofCh:
 			m.Infow("exiting xp loop")
+			// Shutdown: close the connection too, or it stays open until the
+			// server drops it.
+			if c.xp != nil {
+				c.xp.Close()
+				c.xp = nil
+			}
 			liveConns.clear(c)
 			if c.opts.testExitCh != nil {
 				c.opts.testExitCh <- 0

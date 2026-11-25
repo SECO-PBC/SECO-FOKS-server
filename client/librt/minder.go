@@ -53,8 +53,9 @@ type Minder struct {
 	base *libclient.BaseMinder[RTParty, *RTParty]
 	au   *libclient.UserContext
 
-	localCliMu sync.Mutex
-	localCli   *rem.RealTimeClient
+	localCliMu    sync.Mutex
+	localCli      *rem.RealTimeClient
+	localCliChain [][]byte // the client cert chain localCli was built with
 
 	// Always-on instrumentation counters; read via Metrics(). Useful for tests
 	// and debugging (e.g. asserting a read was served entirely from cache).
@@ -485,7 +486,9 @@ func (k *Minder) clientLocal(
 	k.localCliMu.Lock()
 	defer k.localCliMu.Unlock()
 
-	if k.localCli != nil {
+	// A client made with an older certificate (the saved chain, replaced
+	// after a CA change) is rebuilt; the old one is left to idle out.
+	if k.localCli != nil && libclient.SameCertChain(k.localCliChain, cert.Certificate) {
 		return pr, k.localCli, nil
 	}
 
@@ -495,6 +498,7 @@ func (k *Minder) clientLocal(
 	}
 	ret := core.NewRealTimeClient(gcli, m)
 	k.localCli = &ret
+	k.localCliChain = cert.Certificate
 	return pr, &ret, nil
 }
 
