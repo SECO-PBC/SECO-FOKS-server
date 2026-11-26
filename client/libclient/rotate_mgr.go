@@ -302,7 +302,13 @@ func (r *rotateMgr) post(m MetaContext) error {
 	}
 
 	err = usrv.RevokeDevice(m.Ctx(), arg)
-	return err
+	if err != nil {
+		return err
+	}
+	// The chain just changed: a load-me scope this rotation runs in must not
+	// serve the old one to later steps.
+	ForgetLoadMeScope(m)
+	return nil
 }
 
 // updatePPE updates the passphrase encryption system for the new PUK. Only encrypts

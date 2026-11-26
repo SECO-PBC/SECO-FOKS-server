@@ -212,7 +212,7 @@ func (t *TMLUser) Init(m MetaContext) error {
 	if t.uw != nil {
 		return nil
 	}
-	uw, err := LoadMe(m, t.au)
+	uw, err := LoadMeScoped(m, t.au)
 	if err != nil {
 		return err
 	}

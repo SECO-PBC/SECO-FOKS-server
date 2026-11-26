@@ -2008,6 +2008,9 @@ func (t *TeamMinder) ListMemberships(
 	error,
 ) {
 	var ret lcl.ListMembershipsRes
+	// The membership loader and the PUK minder both load my chain during the
+	// exploration; let them share one load.
+	m = WithLoadMeScope(m)
 	err := t.ExploreAndIndex(m, opts)
 	if err != nil {
 		return nil, err
@@ -2097,6 +2100,11 @@ func (t *TeamMinder) DumpMembershipChain(
 	lcl.TeamMembershipChainList,
 	error,
 ) {
+	// userTMW is guarded by exploreMu, as in UserTMW, refreshUserTML and
+	// Explore. Without it a dump racing an exploration reads and writes
+	// userTMW concurrently.
+	t.exploreMu.Lock()
+	defer t.exploreMu.Unlock()
 	err := t.loadUserTMLLocked(m)
 	if err != nil {
 		return nil, err
