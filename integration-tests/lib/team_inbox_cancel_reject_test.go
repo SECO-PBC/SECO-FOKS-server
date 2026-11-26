@@ -283,7 +283,7 @@ func TestTeamLeaveSelf(t *testing.T) {
 
 	// Admission changes the team, not the joiner's membership chain. The
 	// joiner's client writes the Approved link when it next explores and finds
-	// the team on the server's list (serverTrustListForUser). The app gets
+	// the team on the server's list (applyServerTrustList (seedExplore)). The app gets
 	// there through TeamListMemberships; here we explore directly.
 	err = f.tmj.ExploreAndIndex(f.mj, nil)
 	require.NoError(t, err)

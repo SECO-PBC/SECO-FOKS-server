@@ -212,6 +212,12 @@ func cleanKeyDeleteError(err error) error {
 
 func clearUserFromLocalStores(m MetaContext, fqu proto.FQUser, target core.PublicSuiter) error {
 
+	// This device's saved team view tokens go with it.
+	err := ForgetSavedViewTokens(m, fqu)
+	if err != nil && !errors.Is(err, core.RowNotFoundError{}) {
+		m.Warnw("clearUserFromLocalStores", "stage", "viewTokens", "err", err)
+	}
+
 	targetKeyID := target.GetEntityID()
 	kg, err := targetKeyID.Type().KeyGenus()
 	if err != nil {

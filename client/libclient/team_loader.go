@@ -5,6 +5,7 @@ package libclient
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -873,13 +874,23 @@ const voTokReuseWindow = time.Hour
 // reuseViewToken points this run at the view token an earlier run minted, if
 // it is younger than voTokReuseWindow and was minted for the member, source
 // role and key generation this run would ask for. It reports whether it did.
+//
+// With no token in memory (a new process), one this device saved earlier for
+// the same team, generation, member and role is adopted first, if it passes
+// the same checks (adoptSavedViewToken).
 func (l *TeamLoader) reuseViewToken(m MetaContext) bool {
-	if l.voTok == nil || l.Arg.TestTokenVariant != nil || l.Arg.Tok != nil ||
+	if l.Arg.TestTokenVariant != nil || l.Arg.Tok != nil ||
 		l.Arg.LocalParentTeamTok != nil || l.Arg.Keys == nil {
 		return false
 	}
 	curr := l.Arg.Keys.Current()
-	if curr == nil || curr.Metadata().Gen != l.voTokGen {
+	if curr == nil {
+		return false
+	}
+	if l.voTok == nil {
+		l.adoptSavedViewToken(m, curr.Metadata().Gen)
+	}
+	if l.voTok == nil || curr.Metadata().Gen != l.voTokGen {
 		return false
 	}
 	if m.G().Now().Sub(l.voTokAt) >= voTokReuseWindow {
@@ -893,6 +904,109 @@ func (l *TeamLoader) reuseViewToken(m MetaContext) bool {
 	}
 	l.tok = rem.NewTokenVariantWithTeamvobearer(*l.voTok)
 	return true
+}
+
+// savedViewTokenScope is where this device's saved view tokens are kept: under
+// the signed-in user, so ForgetSavedViewTokens can drop them all on a revoke
+// or a lock.
+func savedViewTokenScope(m MetaContext) *proto.FQUser {
+	au := m.G().ActiveUser()
+	if au == nil {
+		return nil
+	}
+	fqu := au.Info.Fqu
+	return &fqu
+}
+
+// savedViewTokenKey names a saved token by everything reuseViewToken checks
+// before presenting one, in their codec encodings.
+func savedViewTokenKey(tm proto.TeamID, gen proto.Generation, member proto.FQParty, role proto.Role) (string, error) {
+	mb, err := core.EncodeToBytes(&member)
+	if err != nil {
+		return "", err
+	}
+	rb, err := core.EncodeToBytes(&role)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x|%d|%x|%x", tm, gen, mb, rb), nil
+}
+
+// saveViewToken keeps a token this run minted, so the next process can
+// present it within voTokReuseWindow instead of minting another: two round
+// trips per team on every cold start. Soft state; a failed write only costs
+// that saving.
+func (l *TeamLoader) saveViewToken(m MetaContext, tok *rem.ActivatedVOBearerToken, gen proto.Generation,
+	member proto.FQParty, role proto.Role, mintedAt time.Time) {
+	scope := savedViewTokenScope(m)
+	if scope == nil {
+		return
+	}
+	key, err := savedViewTokenKey(tok.Id, gen, member, role)
+	if err != nil {
+		m.Warnw("TeamLoader.saveViewToken", "err", err)
+		return
+	}
+	val := lcl.SavedVOBearerToken{
+		Tok:      tok.Tok[:],
+		Team:     tok.Id,
+		Gen:      gen,
+		Member:   member,
+		SrcRole:  role,
+		MintedAt: proto.ExportTime(mintedAt),
+	}
+	err = m.DbPut(DbTypeSoft, PutArg{Scope: scope, Typ: lcl.DataType_SavedVOBearerToken, Key: key, Val: &val})
+	if err != nil {
+		m.Warnw("TeamLoader.saveViewToken", "err", err)
+	}
+}
+
+// adoptSavedViewToken takes the token saved for this loader's team, gen,
+// member and source role, if every one of those matches what was saved and
+// it was minted less than voTokReuseWindow ago. Only then does it become the
+// loader's token; otherwise the loader is left as it was.
+func (l *TeamLoader) adoptSavedViewToken(m MetaContext, gen proto.Generation) {
+	if l.Arg.Team.Team.IsZero() {
+		return
+	}
+	scope := savedViewTokenScope(m)
+	if scope == nil {
+		return
+	}
+	key, err := savedViewTokenKey(l.Arg.Team.Team, gen, l.Arg.As, l.Arg.SrcRole)
+	if err != nil {
+		return
+	}
+	var saved lcl.SavedVOBearerToken
+	_, err = m.DbGet(&saved, DbTypeSoft, scope, lcl.DataType_SavedVOBearerToken, key)
+	if err != nil {
+		return
+	}
+	var tok rem.TeamVOBearerToken
+	if len(saved.Tok) != len(tok) || !saved.Team.Eq(l.Arg.Team.Team) || saved.Gen != gen ||
+		!saved.Member.Eq(l.Arg.As) {
+		return
+	}
+	if same, err := saved.SrcRole.Eq(l.Arg.SrcRole); err != nil || !same {
+		return
+	}
+	mintedAt := saved.MintedAt.Import()
+	now := m.G().Now()
+	if mintedAt.After(now) || now.Sub(mintedAt) >= voTokReuseWindow {
+		return
+	}
+	copy(tok[:], saved.Tok)
+	l.voTok = &tok
+	l.voTokAt = mintedAt
+	l.voTokGen = gen
+	l.voTokMember = l.Arg.As
+	l.voTokRole = l.Arg.SrcRole
+}
+
+// ForgetSavedViewTokens drops every view token saved for fqu on this device.
+// Called when this device is revoked, and when the user locks it.
+func ForgetSavedViewTokens(m MetaContext, fqu proto.FQUser) error {
+	return m.DbDeleteAllOfType(DbTypeSoft, &fqu, lcl.DataType_SavedVOBearerToken)
 }
 
 // isRefusedViewTokenError reports the server refusing a view token that a
@@ -1067,6 +1181,7 @@ func (l *TeamLoader) makeViewToken(m MetaContext) error {
 	l.voTokMember = req.Member
 	l.voTokRole = req.SrcRole
 	l.tok = rem.NewTokenVariantWithTeamvobearer(tok.Tok)
+	l.saveViewToken(m, tok, req.Gen, req.Member, req.SrcRole, mintedAt)
 	return nil
 }
 

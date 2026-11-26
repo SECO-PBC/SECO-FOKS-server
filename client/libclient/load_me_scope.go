@@ -27,6 +27,9 @@ import (
 //
 //   - TeamMinder.ListMemberships (an exploration: chain loads, generic-chain
 //     reads and team-membership-chain posts, never a user sigchain link).
+//   - UserContext.UnlockKeys (loads my chain while the SSO ping is out, so
+//     PopulateWithDevkey joins that load; unlocking reads keys, it posts no
+//     sigchain link).
 
 type loadMeScopeKey struct{}
 
@@ -74,6 +77,11 @@ func loadMeScopeOf(m MetaContext) *loadMeScope {
 
 // loadMeScoped is LoadMe that shares one load per user within the
 // operation's load-me scope, if it has one; outside a scope it is LoadMe.
+// Concurrent callers wait for the load in flight and share its outcome. A
+// failure is shared too -- the waiters belong to the same operation, and a
+// failure retried at once (offline, say) would only cost another dial --
+// unless it is the loader's own cancellation or the load panicked: then the
+// waiter loads for itself. Nothing failed is kept for later callers.
 func loadMeScoped(m MetaContext, au *UserContext) (*UserWrapper, error) {
 	scope := loadMeScopeOf(m)
 	if au == nil {
@@ -88,9 +96,8 @@ func loadMeScoped(m MetaContext, au *UserContext) (*UserWrapper, error) {
 }
 
 // load returns the scope's load of uid, running fn for it if there is none.
-// Concurrent callers wait for the load in flight. Only successful loads are
-// shared: a failure may be the loader's own context's, so a waiter that sees
-// one runs fn itself.
+// Concurrent callers wait for the load in flight and share its outcome; see
+// loadMeScoped for when a waiter loads for itself instead.
 func (s *loadMeScope) load(
 	ctx context.Context,
 	uid proto.UID,
@@ -111,7 +118,12 @@ func (s *loadMeScope) load(
 			if f.err == nil {
 				return f.res, nil
 			}
-			return fn()
+			if errors.Is(f.err, errLoadMeAbandoned) ||
+				errors.Is(f.err, context.Canceled) ||
+				errors.Is(f.err, context.DeadlineExceeded) {
+				return fn()
+			}
+			return nil, f.err
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}

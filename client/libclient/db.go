@@ -743,6 +743,15 @@ func (g *GlobalContext) DbPutTx(ctx context.Context, which DbType, rows []PutArg
 	return db.PutTx(m, rows)
 }
 
+func (g *GlobalContext) DbDeleteAllOfType(ctx context.Context, which DbType, s Scoper, typ lcl.DataType) error {
+	m := NewMetaContext(ctx, g)
+	db, err := g.Db(ctx, which)
+	if err != nil {
+		return err
+	}
+	return db.DeleteAllOfType(m, s, typ)
+}
+
 func (g *GlobalContext) DbDelete(ctx context.Context, which DbType, s Scoper, typ lcl.DataType, gkey any) error {
 	m := NewMetaContext(ctx, g)
 	db, err := g.Db(ctx, which)
@@ -972,6 +981,23 @@ func (d *DB) DeleteGlobalKV(m MetaContext, key core.KVKey) error {
 		return nil
 	})
 	return err
+}
+
+// DeleteAllOfType deletes every row of one type under one scope.
+func (d *DB) DeleteAllOfType(m MetaContext, scope Scoper, typ lcl.DataType) error {
+	ctx := m.Ctx()
+	d.Lock()
+	defer d.Unlock()
+
+	scopeID, err := d.getScopeID(ctx, scope)
+	if err != nil {
+		return err
+	}
+	q := `DELETE FROM scoped_data WHERE scope_id=$1 AND typ=$2`
+	return RetryTx(m, d.db, "DeleteAllOfType", func(m MetaContext, tx *sql.Tx) error {
+		_, err := tx.Exec(q, int(scopeID), typ)
+		return err
+	})
 }
 
 func (d *DB) Delete(m MetaContext, scope Scoper, typ lcl.DataType, gkey any) error {

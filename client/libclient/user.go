@@ -913,7 +913,7 @@ func (u *UserContext) GetSharedKeyManager(m MetaContext) (SharedKeyManager, erro
 }
 
 func (u *UserContext) PopulateWithDevkey(m MetaContext) error {
-	user, err := LoadMe(m, u)
+	user, err := loadMeScoped(m, u)
 
 	if core.IsTransportError(err) {
 		// Cold start with no network: fall back to the last verified

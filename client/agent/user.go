@@ -225,6 +225,12 @@ func (c *AgentConn) UserLock(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Saved team view tokens are not encrypted at rest; a locked device keeps
+	// none.
+	err = libclient.ForgetSavedViewTokens(m, au.Info.Fqu)
+	if err != nil {
+		m.Warnw("UserLock", "stage", "viewTokens", "err", err)
+	}
 	return nil
 }
 

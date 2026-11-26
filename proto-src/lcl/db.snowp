@@ -28,6 +28,7 @@ enum DataType {
     HostPublicZone @18;    // verified public zone cached per host, for offline starts
     UserCertChain @19;     // issued client-cert chain cached per (user, key), for offline starts
     TeamNameLookup @20;    // FQTeamString -> FQTeam; offline name resolution (see TeamMinder)
+    SavedVOBearerToken @21; // a minted team view token, reused by the next process; see TeamLoader
 
     KVRealm @65;
     KVNSRoot @66;
@@ -59,6 +60,19 @@ enum DataType {
 // offline.
 struct UserCertChain {
     certs @0 : List(Blob);
+}
+
+// A team view token this device minted, saved so the next process can present
+// it instead of minting another (two round trips). Scoped to the user; it
+// carries everything the loader checks before presenting a token, and when it
+// was minted, so the reuse window is measured as for one minted in-process.
+struct SavedVOBearerToken {
+    tok @0 : Blob;         // rem.TeamVOBearerToken
+    team @1 : lib.TeamID;
+    gen @2 : lib.Generation;
+    member @3 : lib.FQParty;
+    srcRole @4 : lib.Role;
+    mintedAt @5 : lib.Time;
 }
 
 typedef ScopeLabel = Blob;
