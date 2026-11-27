@@ -611,6 +611,15 @@ func (d *Minder) drainChannelRows(
 	res *DrainResult,
 	mu *sync.Mutex,
 ) {
+	if len(rows) == 0 {
+		return
+	}
+	// One drain per channel at a time: two at once would race to send the
+	// same rows, and the one that lost could not tell its own message had
+	// been delivered (its row gone, its ack the other drain's) -- a send
+	// online would come back "queued for delivery on reconnect".
+	unlock := d.lockChannelDrain(rows[0].Chid)
+	defer unlock()
 	for _, ie := range rows {
 		msgID := ie.MsgID
 		entry, err := d.dbGetOutboxEntry(m, msgID)
@@ -640,6 +649,7 @@ func (d *Minder) drainChannelRows(
 			}
 			_ = d.setOutboxState(m, msgID, lcl.RTOutboxState_Failed, err)
 			res.noteFailed(mu, msgID, err)
+			d.handOff(msgID, nil, err)
 			continue
 		}
 		err = d.finalizeAck(m, entry.Msg, ack, 0)
@@ -655,11 +665,66 @@ func (d *Minder) drainChannelRows(
 			// aside as Failed rather than wedging the channel forever.
 			_ = d.setOutboxState(m, msgID, lcl.RTOutboxState_Failed, err)
 			res.noteFailed(mu, msgID, err)
+			d.handOff(msgID, nil, err)
 			continue
 		}
 		mu.Lock()
 		res.Acked[msgID] = ack
 		mu.Unlock()
+		d.handOff(msgID, ack, nil)
+	}
+}
+
+// lockChannelDrain holds chid's drain lock until the returned func is called.
+func (d *Minder) lockChannelDrain(chid proto.RTChannelID) func() {
+	d.drainLocksMu.Lock()
+	if d.drainLocks == nil {
+		d.drainLocks = make(map[proto.RTChannelID]*sync.Mutex)
+	}
+	lk := d.drainLocks[chid]
+	if lk == nil {
+		lk = new(sync.Mutex)
+		d.drainLocks[chid] = lk
+	}
+	d.drainLocksMu.Unlock()
+	lk.Lock()
+	return lk.Unlock
+}
+
+// sendOutcome is how a drain settled a message a Send is waiting on: its
+// ack, or the error it was refused with.
+type sendOutcome struct {
+	ack *rem.RTSendRes
+	err error
+}
+
+// awaitOutcome registers a Send's interest in msgID's outcome, before the
+// message is queued, so whichever drain settles it -- the Send's own or one
+// running beside it -- hands the outcome over. The returned func reads the
+// outcome (nil if no drain has settled it) and deregisters; calling it again
+// finds nothing, so a Send defers it as well as reading it.
+func (d *Minder) awaitOutcome(msgID proto.RTMsgID) func() *sendOutcome {
+	d.outcomesMu.Lock()
+	if d.outcomes == nil {
+		d.outcomes = make(map[proto.RTMsgID]*sendOutcome)
+	}
+	d.outcomes[msgID] = nil
+	d.outcomesMu.Unlock()
+	return func() *sendOutcome {
+		d.outcomesMu.Lock()
+		defer d.outcomesMu.Unlock()
+		out := d.outcomes[msgID]
+		delete(d.outcomes, msgID)
+		return out
+	}
+}
+
+// handOff records a drain's outcome for msgID if a Send is waiting on it.
+func (d *Minder) handOff(msgID proto.RTMsgID, ack *rem.RTSendRes, err error) {
+	d.outcomesMu.Lock()
+	defer d.outcomesMu.Unlock()
+	if _, waiting := d.outcomes[msgID]; waiting {
+		d.outcomes[msgID] = &sendOutcome{ack: ack, err: err}
 	}
 }
 

@@ -56,6 +56,14 @@ type Minder struct {
 	localCliMu sync.Mutex
 	localCli   *rem.RealTimeClient
 
+	// One outbox drain per channel at a time (lockChannelDrain).
+	drainLocksMu sync.Mutex
+	drainLocks   map[proto.RTChannelID]*sync.Mutex
+
+	// Sends waiting on a drain to settle their message (awaitOutcome).
+	outcomesMu sync.Mutex
+	outcomes   map[proto.RTMsgID]*sendOutcome
+
 	// Always-on instrumentation counters; read via Metrics(). Useful for tests
 	// and debugging (e.g. asserting a read was served entirely from cache).
 	serverThreadReads atomic.Int64
@@ -1596,6 +1604,10 @@ func (d *Minder) sendTyped(
 	// Queue durably before the first network attempt: from here the message
 	// survives transport failures and crashes, and re-attempting is safe
 	// because rtSend is idempotent on msgID (docs/rt_offline.md, D1/D2).
+	// Registered before the message is queued, so a drain running beside
+	// this Send that delivers it hands the ack over.
+	outcome := d.awaitOutcome(md.MsgID)
+	defer outcome()
 	hasEarlier, err := d.enqueueOutbox(m, msgCached, push)
 	if err != nil {
 		return nil, err
@@ -1623,6 +1635,14 @@ func (d *Minder) sendTyped(
 			// path would, rather than claiming it is queued.
 			_, _ = d.removeOutbox(m, md.MsgID)
 			return nil, ferr
+		}
+		// Another drain of this channel settled it first.
+		if out := outcome(); out != nil {
+			if out.err != nil {
+				_, _ = d.removeOutbox(m, md.MsgID)
+				return nil, out.err
+			}
+			return out.ack, nil
 		}
 		return nil, core.RTMsgQueuedError{MsgID: md.MsgID}
 	}
