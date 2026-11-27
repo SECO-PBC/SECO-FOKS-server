@@ -179,6 +179,14 @@ func (m MetaContext) NetworkConditioner() core.NetworkConditioner {
 	return m.g.NetworkConditioner()
 }
 
+// WithoutCancel is m with a context that outlives m's: for work a call
+// leaves running after it returns (chains.DiscoveryMgr's background probe).
+func (m MetaContext) WithoutCancel() chains.MetaContext {
+	ret := m
+	ret.MetaContext = m.MetaContext.WithContext(context.WithoutCancel(m.Ctx()))
+	return ret
+}
+
 func (m MetaContext) WithLogTagI(k string) chains.MetaContext {
 	return m.WithLogTag(k)
 }

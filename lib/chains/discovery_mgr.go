@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"reflect"
 	"sync"
 	"time"
 
@@ -80,6 +81,14 @@ type ProbeArg struct {
 	DefPort proto.Port
 	Fresh   bool
 	RootCAs *x509.CertPool
+
+	// CachedOK lets a host this device has verified before be used at once,
+	// from the identity (hostchain and public zone) the last full probe
+	// stored, while a full probe re-verifies it in the background
+	// (revalidate). Until that finishes, the client trusts what it verified
+	// last time; a host whose identity has changed or no longer verifies is
+	// re-probed before any new connection is made to it.
+	CachedOK bool
 
 	prev          *core.Hostchain // previous hostchain, preloaded
 	checkHostname bool            // if we did a beacon resolve, we need to check hostchain against probe zone
@@ -185,6 +194,11 @@ func (d *DiscoveryMgr) Probe(m MetaContext, arg ProbeArg) (*Probe, error) {
 	if cached {
 		return pr, nil
 	}
+	if arg.CachedOK && pr.hydrateFromCache(m) {
+		d.cacheProbe(pr)
+		go d.revalidate(m, pr, arg)
+		return pr, nil
+	}
 	err = pr.Run(m)
 
 	// If we failed to connect, then we can still return the dead
@@ -199,6 +213,53 @@ func (d *DiscoveryMgr) Probe(m MetaContext, arg ProbeArg) (*Probe, error) {
 
 	d.cacheProbe(pr)
 	return pr, nil
+}
+
+// revalidate runs a full probe of pr's host -- every check a probe makes --
+// on a probe of its own, after pr was put to use from its cached identity
+// (ProbeArg.CachedOK). If the host proves the same identity, pr carries on.
+// Otherwise pr is marked failed: the next connection made through it
+// re-probes (Probe.refresh) and so picks up the host's new identity, or
+// fails if it no longer verifies. A transport failure leaves pr as an
+// offline start does: serving the cached identity, re-probing on next use.
+func (d *DiscoveryMgr) revalidate(m MetaContext, pr *Probe, arg ProbeArg) {
+	// It outlives the start that kicked it off.
+	if d, ok := m.(interface{ WithoutCancel() MetaContext }); ok {
+		m = d.WithoutCancel()
+	}
+	fresh := &Probe{
+		di:      d.di,
+		addr:    pr.addr,
+		timeout: arg.Timeout,
+		defport: arg.DefPort,
+		rootCAs: arg.RootCAs,
+		hostID:  pr.hostID,
+	}
+	err := fresh.runVerified(m)
+	switch {
+	case err == nil && sameIdentity(pr, fresh):
+		m.Infow("probe", "stage", "revalidated")
+	case err == nil:
+		m.Warnw("probe", "stage", "revalidate", "note", "host identity changed since cached; re-probing")
+		pr.setLastFail(errIdentityChanged)
+	default:
+		m.Warnw("probe", "stage", "revalidate", "err", err)
+		pr.setLastFail(err)
+	}
+}
+
+// errIdentityChanged marks a probe whose cached identity is no longer the
+// host's, so its next use re-probes.
+var errIdentityChanged = core.InternalError("host identity changed since it was cached")
+
+// sameIdentity reports whether two probes of one host hold the same verified
+// identity: hostchain tail and public zone.
+func sameIdentity(a, b *Probe) bool {
+	if a.Chain() == nil || b.Chain() == nil || a.PublicZone() == nil || b.PublicZone() == nil {
+		return false
+	}
+	return reflect.DeepEqual(a.Chain().Tail(), b.Chain().Tail()) &&
+		reflect.DeepEqual(*a.PublicZone(), *b.PublicZone())
 }
 
 func (d *DiscoveryMgr) cacheProbe(pr *Probe) {

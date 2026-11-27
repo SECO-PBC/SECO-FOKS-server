@@ -86,7 +86,10 @@ func (a *ActiveUserLoader) probe(m MetaContext) error {
 	if to == 0 {
 		to = m.G().Cfg().ProbeTimeout()
 	}
-	pr, err := m.G().Probe(m.Ctx(), a.uinfo.Fqu.HostID, to)
+	// A start over a host verified before uses that identity at once and
+	// re-verifies it in the background, rather than wait a probe round trip
+	// (and its connection) before connecting to anything.
+	pr, err := m.G().ProbeCachedOK(m.Ctx(), a.uinfo.Fqu.HostID, to)
 	if pr != nil && (err == nil || core.IsTransportError(err)) {
 		a.uc.SetHomeServer(pr)
 	}

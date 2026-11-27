@@ -433,7 +433,9 @@ func (p *Probe) clean() {
 	}
 }
 
-func (p *Probe) Run(m MetaContext) error {
+// runVerified is a full probe, every check made, with no fallback to the
+// cached identity: Run, less its offline path.
+func (p *Probe) runVerified(m MetaContext) error {
 	m = m.WithLogTagI("probe")
 	defer p.clean()
 
@@ -446,6 +448,13 @@ func (p *Probe) Run(m MetaContext) error {
 		p.TestRetryOnMerkleRace = true
 		err = p.runOnce(m)
 	}
+	return err
+}
+
+func (p *Probe) Run(m MetaContext) error {
+	m = m.WithLogTagI("probe")
+
+	err := p.runVerified(m)
 
 	if err != nil {
 		m.Errorw("probe", "err", err)
@@ -598,8 +607,10 @@ func (p *Probe) WithRegCli(m MetaContext, f func(rem.RegClient) error) error {
 // Prewarm makes no network call itself (no probe refresh, no dial on the
 // caller's goroutine), so it is safe to call under a caller's lock.
 func (p *Probe) Prewarm(m MetaContext, sts []proto.ServerType, cliCert *tls.Certificate) {
-	// Offline, or on a probe hydrated from cache, there is nothing to gain,
-	// and each client would refresh the probe first.
+	// Offline (a failed probe serving its cached identity) there is nothing
+	// to gain, and each client would refresh the probe first. A probe started
+	// from its cached identity on purpose (ProbeArg.CachedOK) is connected,
+	// and prewarms like any other.
 	if p == nil || !p.IsConnected() || p.PublicZone() == nil {
 		return
 	}
