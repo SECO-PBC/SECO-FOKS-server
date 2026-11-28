@@ -56,13 +56,12 @@ type Minder struct {
 	localCliMu sync.Mutex
 	localCli   *rem.RealTimeClient
 
-	// One outbox drain per channel at a time (lockChannelDrain).
-	drainLocksMu sync.Mutex
-	drainLocks   map[proto.RTChannelID]*sync.Mutex
+	// One outbox drain per channel at a time (drainChannel).
+	drainLocks core.Locktab[proto.RTChannelID]
 
 	// Sends waiting on a drain to settle their message (awaitOutcome).
 	outcomesMu sync.Mutex
-	outcomes   map[proto.RTMsgID]*sendOutcome
+	outcomes   map[proto.RTMsgID][]*outcomeWaiter
 
 	// Always-on instrumentation counters; read via Metrics(). Useful for tests
 	// and debugging (e.g. asserting a read was served entirely from cache).
@@ -106,6 +105,11 @@ type MinderTestHooks struct {
 	// without reaching the server, for exercising the stale channel-set
 	// fallback that keeps resolution working offline.
 	ListFail error
+	// AfterOutboxSettle, if set, runs in a drain after it has settled an
+	// outbox row (acked and removed it, or marked it Failed) and before it
+	// hands the outcome to a Send waiting on it -- the window a concurrent
+	// Send's own drain must wait out.
+	AfterOutboxSettle func(proto.RTMsgID)
 }
 
 // SetTestHooks installs (or, with nil, clears) test hooks on the Minder.
@@ -1158,6 +1162,9 @@ type SendTestHooks struct {
 	// MsgIDOverride pins the message ID instead of drawing a random one, to
 	// test the server's idempotent-replay path on duplicate msg_ids.
 	MsgIDOverride *proto.RTMsgID
+	// BeforeDrain, if set, runs after the message is queued behind earlier
+	// rows and before the Send drains its channel.
+	BeforeDrain func(proto.RTMsgID)
 }
 
 // Send encrypts and sends a basic message into the named channel of a team.
@@ -1605,15 +1612,18 @@ func (d *Minder) sendTyped(
 	// survives transport failures and crashes, and re-attempting is safe
 	// because rtSend is idempotent on msgID (docs/rt_offline.md, D1/D2).
 	// Registered before the message is queued, so a drain running beside
-	// this Send that delivers it hands the ack over.
-	outcome := d.awaitOutcome(md.MsgID)
-	defer outcome()
+	// this Send that settles it hands the outcome over.
+	waiter := d.awaitOutcome(md.MsgID)
+	defer waiter.done()
 	hasEarlier, err := d.enqueueOutbox(m, msgCached, push)
 	if err != nil {
 		return nil, err
 	}
 
 	if hasEarlier {
+		if test != nil && test.BeforeDrain != nil {
+			test.BeforeDrain(md.MsgID)
+		}
 		// No queue-jumping: earlier rows for this channel must reach the
 		// server first, so flush the channel in FIFO order -- ours is last.
 		// With connectivity up this typically delivers the whole channel,
@@ -1636,13 +1646,11 @@ func (d *Minder) sendTyped(
 			_, _ = d.removeOutbox(m, md.MsgID)
 			return nil, ferr
 		}
-		// Another drain of this channel settled it first.
-		if out := outcome(); out != nil {
-			if out.err != nil {
-				_, _ = d.removeOutbox(m, md.MsgID)
-				return nil, out.err
-			}
-			return out.ack, nil
+		// Another drain of this channel settled it first. DrainChannel
+		// waited for any drain of the channel under way, so its hand-off has
+		// landed.
+		if o, ok := waiter.take(); ok {
+			return d.settledElsewhere(m, md.MsgID, o)
 		}
 		return nil, core.RTMsgQueuedError{MsgID: md.MsgID}
 	}
@@ -1650,6 +1658,15 @@ func (d *Minder) sendTyped(
 	res, err := d.attemptSend(m, &msgCached, push)
 	if err != nil {
 		if core.IsTransportError(err) {
+			// A drain beside this Send (another Send's flush, a reconnect)
+			// may have delivered the row while this attempt failed; wait out
+			// any drain of the channel under way, and take its outcome.
+			if lk, lerr := d.drainLocks.AcquireCtx(m.Ctx(), ch.Id); lerr == nil {
+				lk.Release()
+				if o, ok := waiter.take(); ok {
+					return d.settledElsewhere(m, md.MsgID, o)
+				}
+			}
 			// The message sits durably in the outbox, to drain on reconnect.
 			_ = d.setOutboxState(m, md.MsgID, lcl.RTOutboxState_Queued, err)
 			return nil, core.RTMsgQueuedError{MsgID: md.MsgID}
@@ -1674,6 +1691,25 @@ func (d *Minder) sendTyped(
 	}
 
 	return res, nil
+}
+
+// settledElsewhere returns the outcome a drain beside a Send handed it. A
+// refusal reaches the caller directly, so the Failed row the drain left
+// would only duplicate it.
+func (d *Minder) settledElsewhere(
+	m MetaContext,
+	msgID proto.RTMsgID,
+	o sendOutcome,
+) (
+	*rem.RTSendRes,
+	error,
+) {
+	ack, err := o.result()
+	if err != nil {
+		_, _ = d.removeOutbox(m, msgID)
+		return nil, err
+	}
+	return ack, nil
 }
 
 func fillFQParty(hostId lib.HostID, p *proto.PartyID) *proto.FQParty {
