@@ -225,11 +225,15 @@ func (c *AgentConn) UserLock(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Saved team view tokens are not encrypted at rest; a locked device keeps
-	// none.
+	// Saved team view tokens are not encrypted at rest, so a locked device
+	// keeps none on disk. This runs after ClearSecrets: a loader saves only
+	// while the user is unlocked, under the lock ClearSecrets takes, so no
+	// save lands after this delete. (Live loaders keep their in-memory
+	// tokens until the process ends.) A failed delete fails the lock call,
+	// so the caller knows tokens may remain.
 	err = libclient.ForgetSavedViewTokens(m, au.Info.Fqu)
 	if err != nil {
-		m.Warnw("UserLock", "stage", "viewTokens", "err", err)
+		return err
 	}
 	return nil
 }

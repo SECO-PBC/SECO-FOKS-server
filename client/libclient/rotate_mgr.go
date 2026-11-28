@@ -212,7 +212,10 @@ func cleanKeyDeleteError(err error) error {
 
 func clearUserFromLocalStores(m MetaContext, fqu proto.FQUser, target core.PublicSuiter) error {
 
-	// This device's saved team view tokens go with it.
+	// Drop the user's saved team view tokens on this device. Called both
+	// when this device is the one revoked and when this device revokes
+	// another; in the second case the revoke rotates the PUK, so the saved
+	// tokens (minted at the old generation) could not be adopted anyway.
 	err := ForgetSavedViewTokens(m, fqu)
 	if err != nil && !errors.Is(err, core.RowNotFoundError{}) {
 		m.Warnw("clearUserFromLocalStores", "stage", "viewTokens", "err", err)

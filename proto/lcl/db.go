@@ -240,9 +240,44 @@ func (u *UserCertChain) Decode(dec rpc.Decoder) error {
 
 func (u *UserCertChain) Bytes() []byte { return nil }
 
+type SavedVOBearerTokenBytes [16]byte
+type SavedVOBearerTokenBytesInternal__ [16]byte
+
+func (s SavedVOBearerTokenBytes) Export() *SavedVOBearerTokenBytesInternal__ {
+	tmp := (([16]byte)(s))
+	return ((*SavedVOBearerTokenBytesInternal__)(&tmp))
+}
+func (s SavedVOBearerTokenBytesInternal__) Import() SavedVOBearerTokenBytes {
+	tmp := ([16]byte)(s)
+	return SavedVOBearerTokenBytes((func(x *[16]byte) (ret [16]byte) {
+		if x == nil {
+			return ret
+		}
+		return *x
+	})(&tmp))
+}
+
+func (s *SavedVOBearerTokenBytes) Encode(enc rpc.Encoder) error {
+	return enc.Encode(s.Export())
+}
+
+func (s *SavedVOBearerTokenBytes) Decode(dec rpc.Decoder) error {
+	var tmp SavedVOBearerTokenBytesInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*s = tmp.Import()
+	return nil
+}
+
+func (s SavedVOBearerTokenBytes) Bytes() []byte {
+	return (s)[:]
+}
+
 type SavedVOBearerToken struct {
-	Tok      []byte
-	Team     lib.TeamID
+	Tok      SavedVOBearerTokenBytes
+	Team     lib.FQTeam
 	Gen      lib.Generation
 	Member   lib.FQParty
 	SrcRole  lib.Role
@@ -250,8 +285,8 @@ type SavedVOBearerToken struct {
 }
 type SavedVOBearerTokenInternal__ struct {
 	_struct  struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
-	Tok      *[]byte
-	Team     *lib.TeamIDInternal__
+	Tok      *SavedVOBearerTokenBytesInternal__
+	Team     *lib.FQTeamInternal__
 	Gen      *lib.GenerationInternal__
 	Member   *lib.FQPartyInternal__
 	SrcRole  *lib.RoleInternal__
@@ -260,13 +295,13 @@ type SavedVOBearerTokenInternal__ struct {
 
 func (s SavedVOBearerTokenInternal__) Import() SavedVOBearerToken {
 	return SavedVOBearerToken{
-		Tok: (func(x *[]byte) (ret []byte) {
+		Tok: (func(x *SavedVOBearerTokenBytesInternal__) (ret SavedVOBearerTokenBytes) {
 			if x == nil {
 				return ret
 			}
-			return *x
+			return x.Import()
 		})(s.Tok),
-		Team: (func(x *lib.TeamIDInternal__) (ret lib.TeamID) {
+		Team: (func(x *lib.FQTeamInternal__) (ret lib.FQTeam) {
 			if x == nil {
 				return ret
 			}
@@ -300,7 +335,7 @@ func (s SavedVOBearerTokenInternal__) Import() SavedVOBearerToken {
 }
 func (s SavedVOBearerToken) Export() *SavedVOBearerTokenInternal__ {
 	return &SavedVOBearerTokenInternal__{
-		Tok:      &s.Tok,
+		Tok:      s.Tok.Export(),
 		Team:     s.Team.Export(),
 		Gen:      s.Gen.Export(),
 		Member:   s.Member.Export(),

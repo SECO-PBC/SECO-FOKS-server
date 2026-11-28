@@ -467,6 +467,20 @@ func (u *UserContext) ArePUKsUnlocked() bool {
 	return len(u.PrivKeys.puks) > 0
 }
 
+// whileUnlocked runs f holding the user's lock for reading, if the user's
+// PUKs are unlocked, and reports whether it ran. ClearSecrets (UserLock)
+// takes the same lock for writing, so f either completes before a lock
+// clears the secrets or does not run after it. f must not take u's lock.
+func (u *UserContext) whileUnlocked(f func()) bool {
+	u.RLock()
+	defer u.RUnlock()
+	if len(u.PrivKeys.puks) == 0 {
+		return false
+	}
+	f()
+	return true
+}
+
 type UserPrivateKeys struct {
 	sync.RWMutex
 	puks   []core.SharedPrivateSuiter

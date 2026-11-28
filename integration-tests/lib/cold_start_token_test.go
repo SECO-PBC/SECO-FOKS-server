@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/foks-proj/go-foks/client/libclient"
+	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/keybase/clockwork"
 	"github.com/stretchr/testify/require"
 )
@@ -63,4 +64,43 @@ func TestColdStartReusesSavedViewTokens(t *testing.T) {
 		require.NoError(t, libclient.ForgetSavedViewTokens(m, m.G().ActiveUser().Info.Fqu))
 	})
 	require.Equal(t, nTeams, mints(by), "nothing saved to reuse")
+}
+
+// TestColdStartSavedViewTokenRefusedAfterRoleChange: a member's role changes
+// between processes, so the server no longer honors the token the member's
+// last run saved (its roster row is superseded). The next cold start presents
+// it, is refused, mints one fresh token and loads the team; the run after
+// that reuses the fresh one.
+func TestColdStartSavedViewTokenRefusedAfterRoleChange(t *testing.T) {
+	tew := testEnvBeta(t)
+	owner := tew.NewTestUser(t)
+	bob := tew.NewTestUser(t)
+	tew.DirectDoubleMerklePokeInTest(t)
+	tm := tew.makeTeamForOwner(t, owner)
+	m := tew.MetaContext()
+	tm.makeChanges(t, m, owner, []proto.MemberRole{
+		bob.toMemberRole(t, proto.NewRoleWithMember(0), tm.hepks),
+	}, nil)
+	tew.DirectDoubleMerklePokeInTest(t)
+	// Bob's client records the admission in his membership chain when it
+	// first explores; get that into the merkle tree before the cold runs.
+	mb, tmb := tew.teamMinderFor(t, bob)
+	require.NoError(t, tmb.ExploreAndIndex(mb, nil))
+	tew.DirectDoubleMerklePokeInTest(t)
+	home := t.TempDir()
+	mints := func(by map[string]int) int { return by["TeamLoader.getTeamVOBearerTokenChallenge"] }
+
+	require.Equal(t, 1, mints(coldListMemberships(t, tew, bob, home, 1, nil)), "first run mints")
+	require.Zero(t, mints(coldListMemberships(t, tew, bob, home, 1, nil)), "second run reuses")
+
+	tm.makeChanges(t, m, owner, []proto.MemberRole{
+		bob.toMemberRole(t, proto.NewRoleWithMember(5), tm.hepks),
+	}, nil)
+	tew.DirectDoubleMerklePokeInTest(t)
+
+	by := coldListMemberships(t, tew, bob, home, 1, nil)
+	require.Equal(t, 1, mints(by), "the refused saved token is replaced by one mint")
+	require.Equal(t, 2, by["TeamLoader.loadTeamChain"], "one refused load, one with the fresh token")
+
+	require.Zero(t, mints(coldListMemberships(t, tew, bob, home, 1, nil)), "the fresh token was saved")
 }

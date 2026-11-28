@@ -132,12 +132,8 @@ type TeamLoader struct {
 	ntn             proto.Name
 	rpcLoader       rem.TeamLoaderClient
 	stopFn          func()
-	voTok           *rem.TeamVOBearerToken
+	voTok           *mintedViewToken // the view token minted, and what for (reuseViewToken)
 	tok             rem.TokenVariant
-	voTokAt         time.Time // when, and for whom, voTok was minted (reuseViewToken)
-	voTokGen        proto.Generation
-	voTokMember     proto.FQParty
-	voTokRole       proto.Role
 	existing        *lcl.TeamChainState
 	newState        *lcl.TeamChainState
 	preload         *lcl.TeamChainState
@@ -450,7 +446,7 @@ func (l *TeamWrapper) RosterDelegationFloor() *proto.Role {
 }
 
 func (l *TeamLoader) Tok() *rem.TeamVOBearerToken {
-	return l.voTok
+	return l.viewTok()
 }
 
 func (l *TeamLoader) WrappedRes() *TeamWrapper {
@@ -460,7 +456,7 @@ func (l *TeamLoader) WrappedRes() *TeamWrapper {
 		rk:            l.removalKey,
 		hostname:      l.probe.Hostname(),
 		rosterDetails: l.rosterDetails,
-		voTok:         l.voTok,
+		voTok:         l.viewTok(),
 		hepks:         l.hepks,
 	}
 }
@@ -871,13 +867,70 @@ func (l *TeamLoader) readyTeamMutation(m MetaContext) (*rem.TeamBearerToken, *re
 // default); a server that refuses the token sooner gets a fresh one (runOnce).
 const voTokReuseWindow = time.Hour
 
+// mintedViewToken is a view token together with what it was minted for and
+// when: everything reuseViewToken checks before presenting it. A loader holds
+// one or none, so a token without its context cannot be represented.
+type mintedViewToken struct {
+	tok    rem.TeamVOBearerToken
+	team   proto.FQTeam
+	gen    proto.Generation
+	member proto.FQParty
+	role   proto.Role
+	at     time.Time
+}
+
+// usableFor reports whether v was minted for this team, key generation,
+// member and source role, and at a time from now back to voTokReuseWindow
+// ago. A mint time after now (the clock moved back) does not count as young.
+func (v *mintedViewToken) usableFor(team proto.FQTeam, gen proto.Generation, member proto.FQParty,
+	role proto.Role, now time.Time) bool {
+	if v == nil || !v.team.Eq(team) || v.gen != gen || !v.member.Eq(member) {
+		return false
+	}
+	if same, err := v.role.Eq(role); err != nil || !same {
+		return false
+	}
+	return !v.at.After(now) && now.Sub(v.at) < voTokReuseWindow
+}
+
+func (v *mintedViewToken) export() lcl.SavedVOBearerToken {
+	return lcl.SavedVOBearerToken{
+		Tok:      lcl.SavedVOBearerTokenBytes(v.tok),
+		Team:     v.team,
+		Gen:      v.gen,
+		Member:   v.member,
+		SrcRole:  v.role,
+		MintedAt: proto.ExportTime(v.at),
+	}
+}
+
+func importSavedViewToken(s lcl.SavedVOBearerToken) *mintedViewToken {
+	return &mintedViewToken{
+		tok:    rem.TeamVOBearerToken(s.Tok),
+		team:   s.Team,
+		gen:    s.Gen,
+		member: s.Member,
+		role:   s.SrcRole,
+		at:     s.MintedAt.Import(),
+	}
+}
+
+// viewTok is the view token this loader holds, if any.
+func (l *TeamLoader) viewTok() *rem.TeamVOBearerToken {
+	if l.voTok == nil {
+		return nil
+	}
+	return &l.voTok.tok
+}
+
 // reuseViewToken points this run at the view token an earlier run minted, if
-// it is younger than voTokReuseWindow and was minted for the member, source
-// role and key generation this run would ask for. It reports whether it did.
+// it is younger than voTokReuseWindow and was minted for the team, member,
+// source role and key generation this run would ask for. It reports whether
+// it did.
 //
 // With no token in memory (a new process), one this device saved earlier for
-// the same team, generation, member and role is adopted first, if it passes
-// the same checks (adoptSavedViewToken).
+// the same team, member and role is adopted first, if it passes the same
+// checks (adoptSavedViewToken).
 func (l *TeamLoader) reuseViewToken(m MetaContext) bool {
 	if l.Arg.TestTokenVariant != nil || l.Arg.Tok != nil ||
 		l.Arg.LocalParentTeamTok != nil || l.Arg.Keys == nil {
@@ -887,40 +940,38 @@ func (l *TeamLoader) reuseViewToken(m MetaContext) bool {
 	if curr == nil {
 		return false
 	}
+	gen := curr.Metadata().Gen
 	if l.voTok == nil {
-		l.adoptSavedViewToken(m, curr.Metadata().Gen)
+		l.adoptSavedViewToken(m, gen)
 	}
-	if l.voTok == nil || curr.Metadata().Gen != l.voTokGen {
+	if !l.voTok.usableFor(l.Arg.Team, gen, l.Arg.As, l.Arg.SrcRole, m.G().Now()) {
 		return false
 	}
-	if m.G().Now().Sub(l.voTokAt) >= voTokReuseWindow {
-		return false
-	}
-	if !l.voTokMember.Eq(l.Arg.As) {
-		return false
-	}
-	if same, err := l.voTokRole.Eq(l.Arg.SrcRole); err != nil || !same {
-		return false
-	}
-	l.tok = rem.NewTokenVariantWithTeamvobearer(*l.voTok)
+	l.tok = rem.NewTokenVariantWithTeamvobearer(l.voTok.tok)
 	return true
 }
 
-// savedViewTokenScope is where this device's saved view tokens are kept: under
-// the signed-in user, so ForgetSavedViewTokens can drop them all on a revoke
-// or a lock.
-func savedViewTokenScope(m MetaContext) *proto.FQUser {
-	au := m.G().ActiveUser()
-	if au == nil {
+// savedViewTokenScope is where this loader's saved view tokens are kept:
+// under the loader's own user -- not whoever is active now, which a user
+// switch can change under a running loader -- so ForgetSavedViewTokens for
+// that user drops them all on a revoke or a lock.
+func (l *TeamLoader) savedViewTokenScope() *proto.FQUser {
+	if l.au == nil {
 		return nil
 	}
-	fqu := au.Info.Fqu
+	fqu := l.au.FQU()
 	return &fqu
 }
 
-// savedViewTokenKey names a saved token by everything reuseViewToken checks
-// before presenting one, in their codec encodings.
-func savedViewTokenKey(tm proto.TeamID, gen proto.Generation, member proto.FQParty, role proto.Role) (string, error) {
+// savedViewTokenKey names a saved token by the team, member and source role,
+// in their codec encodings. The key generation is left out on purpose: a
+// mint at a newer generation replaces the row instead of leaving the old one
+// behind (adoption still checks the generation).
+func savedViewTokenKey(tm proto.FQTeam, member proto.FQParty, role proto.Role) (string, error) {
+	tb, err := core.EncodeToBytes(&tm)
+	if err != nil {
+		return "", err
+	}
 	mb, err := core.EncodeToBytes(&member)
 	if err != nil {
 		return "", err
@@ -929,51 +980,56 @@ func savedViewTokenKey(tm proto.TeamID, gen proto.Generation, member proto.FQPar
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%x|%d|%x|%x", tm, gen, mb, rb), nil
+	return fmt.Sprintf("%x|%x|%x", tb, mb, rb), nil
 }
 
 // saveViewToken keeps a token this run minted, so the next process can
 // present it within voTokReuseWindow instead of minting another: two round
 // trips per team on every cold start. Soft state; a failed write only costs
 // that saving.
-func (l *TeamLoader) saveViewToken(m MetaContext, tok *rem.ActivatedVOBearerToken, gen proto.Generation,
-	member proto.FQParty, role proto.Role, mintedAt time.Time) {
-	scope := savedViewTokenScope(m)
+//
+// It writes only while the loader's user is unlocked, under the user's lock
+// (UserContext.whileUnlocked), so a mint that finishes during a UserLock
+// either lands before the lock clears the secrets (and is then forgotten with
+// the rest) or is not saved at all. Rows older than the reuse window are
+// pruned on the way.
+func (l *TeamLoader) saveViewToken(m MetaContext, v *mintedViewToken) {
+	scope := l.savedViewTokenScope()
 	if scope == nil {
 		return
 	}
-	key, err := savedViewTokenKey(tok.Id, gen, member, role)
+	key, err := savedViewTokenKey(v.team, v.member, v.role)
 	if err != nil {
 		m.Warnw("TeamLoader.saveViewToken", "err", err)
 		return
 	}
-	val := lcl.SavedVOBearerToken{
-		Tok:      tok.Tok[:],
-		Team:     tok.Id,
-		Gen:      gen,
-		Member:   member,
-		SrcRole:  role,
-		MintedAt: proto.ExportTime(mintedAt),
-	}
-	err = m.DbPut(DbTypeSoft, PutArg{Scope: scope, Typ: lcl.DataType_SavedVOBearerToken, Key: key, Val: &val})
+	val := v.export()
+	l.au.whileUnlocked(func() {
+		err = m.DbPut(DbTypeSoft, PutArg{Scope: scope, Typ: lcl.DataType_SavedVOBearerToken, Key: key, Val: &val})
+	})
 	if err != nil {
 		m.Warnw("TeamLoader.saveViewToken", "err", err)
 	}
+	// Rows are written with the wall clock (scoped_data.mtime), so prune by it.
+	cutoff := proto.ExportTime(time.Now().Add(-voTokReuseWindow))
+	err = m.DbDeleteOfTypeModifiedBefore(DbTypeSoft, scope, lcl.DataType_SavedVOBearerToken, cutoff)
+	if err != nil {
+		m.Warnw("TeamLoader.saveViewToken", "stage", "prune", "err", err)
+	}
 }
 
-// adoptSavedViewToken takes the token saved for this loader's team, gen,
-// member and source role, if every one of those matches what was saved and
-// it was minted less than voTokReuseWindow ago. Only then does it become the
-// loader's token; otherwise the loader is left as it was.
+// adoptSavedViewToken takes the token saved for this loader's team, member
+// and source role, if it was minted at gen and passes usableFor. Only then
+// does it become the loader's token; otherwise the loader is left as it was.
 func (l *TeamLoader) adoptSavedViewToken(m MetaContext, gen proto.Generation) {
 	if l.Arg.Team.Team.IsZero() {
 		return
 	}
-	scope := savedViewTokenScope(m)
+	scope := l.savedViewTokenScope()
 	if scope == nil {
 		return
 	}
-	key, err := savedViewTokenKey(l.Arg.Team.Team, gen, l.Arg.As, l.Arg.SrcRole)
+	key, err := savedViewTokenKey(l.Arg.Team, l.Arg.As, l.Arg.SrcRole)
 	if err != nil {
 		return
 	}
@@ -982,29 +1038,34 @@ func (l *TeamLoader) adoptSavedViewToken(m MetaContext, gen proto.Generation) {
 	if err != nil {
 		return
 	}
-	var tok rem.TeamVOBearerToken
-	if len(saved.Tok) != len(tok) || !saved.Team.Eq(l.Arg.Team.Team) || saved.Gen != gen ||
-		!saved.Member.Eq(l.Arg.As) {
+	v := importSavedViewToken(saved)
+	if !v.usableFor(l.Arg.Team, gen, l.Arg.As, l.Arg.SrcRole, m.G().Now()) {
 		return
 	}
-	if same, err := saved.SrcRole.Eq(l.Arg.SrcRole); err != nil || !same {
+	l.voTok = v
+}
+
+// forgetSavedViewToken drops the saved row for this loader's team, member and
+// source role, after the server refused it: a row the server no longer
+// honors would otherwise stay on disk if the re-mint fails (say, the member
+// was removed).
+func (l *TeamLoader) forgetSavedViewToken(m MetaContext) {
+	scope := l.savedViewTokenScope()
+	if scope == nil || l.Arg.Team.Team.IsZero() {
 		return
 	}
-	mintedAt := saved.MintedAt.Import()
-	now := m.G().Now()
-	if mintedAt.After(now) || now.Sub(mintedAt) >= voTokReuseWindow {
+	key, err := savedViewTokenKey(l.Arg.Team, l.Arg.As, l.Arg.SrcRole)
+	if err != nil {
 		return
 	}
-	copy(tok[:], saved.Tok)
-	l.voTok = &tok
-	l.voTokAt = mintedAt
-	l.voTokGen = gen
-	l.voTokMember = l.Arg.As
-	l.voTokRole = l.Arg.SrcRole
+	err = m.DbDelete(DbTypeSoft, scope, lcl.DataType_SavedVOBearerToken, key)
+	if err != nil && !errors.Is(err, core.RowNotFoundError{}) {
+		m.Warnw("TeamLoader.forgetSavedViewToken", "err", err)
+	}
 }
 
 // ForgetSavedViewTokens drops every view token saved for fqu on this device.
-// Called when this device is revoked, and when the user locks it.
+// Called when one of fqu's devices is revoked, and when the user locks.
 func ForgetSavedViewTokens(m MetaContext, fqu proto.FQUser) error {
 	return m.DbDeleteAllOfType(DbTypeSoft, &fqu, lcl.DataType_SavedVOBearerToken)
 }
@@ -1175,13 +1236,16 @@ func (l *TeamLoader) makeViewToken(m MetaContext) error {
 		}
 	}
 	l.Arg.Team.Team = tok.Id
-	l.voTok = &tok.Tok
-	l.voTokAt = mintedAt
-	l.voTokGen = req.Gen
-	l.voTokMember = req.Member
-	l.voTokRole = req.SrcRole
+	l.voTok = &mintedViewToken{
+		tok:    tok.Tok,
+		team:   l.Arg.Team,
+		gen:    req.Gen,
+		member: req.Member,
+		role:   req.SrcRole,
+		at:     mintedAt,
+	}
 	l.tok = rem.NewTokenVariantWithTeamvobearer(tok.Tok)
-	l.saveViewToken(m, tok, req.Gen, req.Member, req.SrcRole, mintedAt)
+	l.saveViewToken(m, l.voTok)
 	return nil
 }
 
@@ -1699,6 +1763,8 @@ func (l *TeamLoader) runOnce(m MetaContext) error {
 	err = l.loadTeamFromServer(m)
 	if reused && isRefusedViewTokenError(err) {
 		m.Infow("TeamLoader.runOnce", "stage", "reusedViewTokenRefused", "err", err)
+		l.voTok = nil
+		l.forgetSavedViewToken(m)
 		err = l.makeViewToken(m)
 		if err != nil {
 			return err
@@ -1827,7 +1893,7 @@ func (l *TeamLoader) openRemoteViewTokens(
 }
 
 func (p *rosterPackage) load(m MetaContext, l *TeamLoader) error {
-	tok := l.voTok
+	tok := l.viewTok()
 	uid, tid, err := p.fqp.Party.Select()
 	if err != nil {
 		return err

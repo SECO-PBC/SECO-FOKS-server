@@ -62,13 +62,19 @@ struct UserCertChain {
     certs @0 : List(Blob);
 }
 
+// The bytes of a rem.TeamVOBearerToken (Blob(16) there too); lcl does not
+// import rem.
+typedef SavedVOBearerTokenBytes = Blob(16);
+
 // A team view token this device minted, saved so the next process can present
-// it instead of minting another (two round trips). Scoped to the user; it
-// carries everything the loader checks before presenting a token, and when it
-// was minted, so the reuse window is measured as for one minted in-process.
+// it instead of minting another (two round trips). Scoped to the loader's
+// user; it carries everything the loader checks before presenting a token, and
+// when it was minted, so the reuse window is measured as for one minted
+// in-process. One row per (team, member, source role): a newer mint, at any
+// key generation, replaces it.
 struct SavedVOBearerToken {
-    tok @0 : Blob;         // rem.TeamVOBearerToken
-    team @1 : lib.TeamID;
+    tok @0 : SavedVOBearerTokenBytes;
+    team @1 : lib.FQTeam;
     gen @2 : lib.Generation;
     member @3 : lib.FQParty;
     srcRole @4 : lib.Role;
