@@ -119,6 +119,12 @@ func (c *connectionMgr) xpLoop(m RpcClientMetaContexter) {
 		select {
 		case <-c.eofCh:
 			m.Infow("exiting xp loop")
+			// Shutdown: close the connection too, or it stays open until the
+			// server drops it.
+			if c.xp != nil {
+				c.xp.Close()
+				c.xp = nil
+			}
 			liveConns.clear(c)
 			if c.opts.testExitCh != nil {
 				c.opts.testExitCh <- 0
@@ -330,6 +336,8 @@ type RpcClient struct {
 	opts          *RpcClientOpts
 	cm            *connectionMgr
 	dead          bool
+	retiring      bool
+	lastDone      time.Time // when nOut last dropped to zero
 }
 
 type RpcClientOpts struct {
@@ -414,11 +422,60 @@ func NewRpcClient(
 	return res
 }
 
+// Shutdown stops c and closes its connection, failing any call still on it.
+// Safe to call more than once, and after Retire.
 func (c *RpcClient) Shutdown() {
 	c.Lock()
+	defer c.Unlock()
+	c.shutdownLocked()
+}
+
+func (c *RpcClient) shutdownLocked() {
+	if c.dead {
+		return
+	}
 	c.dead = true
-	c.Unlock()
 	close(c.killConnMgrCh)
+}
+
+// Retire shuts c down once it is idle: no call outstanding, and none ended
+// within the last IdleTimeout, the same idleness after which its connection
+// would be closed anyway (so a caller that fetched c just before it was
+// replaced still gets to make its call). Checked every PollInterval. For a client replaced by a newer one
+// while calls may be in flight on it; a call made after the shutdown fails
+// fast, as on any shut-down client.
+func (c *RpcClient) Retire() {
+	c.Lock()
+	if c.dead || c.retiring {
+		c.Unlock()
+		return
+	}
+	c.retiring = true
+	if c.nOut == 0 {
+		c.lastDone = c.now()
+	}
+	c.Unlock()
+	go func() {
+		for {
+			<-c.opts.Clock.After(c.opts.PollInterval)
+			if c.shutdownIfIdle() {
+				return
+			}
+		}
+	}()
+}
+
+func (c *RpcClient) shutdownIfIdle() bool {
+	c.Lock()
+	defer c.Unlock()
+	if c.dead {
+		return true
+	}
+	if c.nOut > 0 || c.now().Sub(c.lastDone) < c.opts.IdleTimeout {
+		return false
+	}
+	c.shutdownLocked()
+	return true
 }
 
 func (c *RpcClient) Reset() {
@@ -431,20 +488,34 @@ func (c *RpcClient) now() time.Time {
 	return c.opts.Clock.Now()
 }
 
-func (c *RpcClient) inc() {
+// acquire counts a call as outstanding, unless c is shut down. Checking and
+// counting under one lock is what keeps Retire from shutting c down between
+// a caller's check and its call. The refcount loop runs until Shutdown, which
+// takes the same lock, so the send cannot block forever.
+func (c *RpcClient) acquire() error {
 	c.Lock()
 	defer c.Unlock()
+	if c.dead {
+		return InternalError("attempt to use an RpcClient after Shutdown()")
+	}
 	c.nOut++
-	n := c.nOut
-	c.refcountCh <- refcount{time: c.now(), i: n}
+	c.refcountCh <- refcount{time: c.now(), i: c.nOut}
+	return nil
 }
 
-func (c *RpcClient) dec() {
+// release ends a call acquire counted. After Shutdown the refcount loop is
+// gone, so there is nothing to tell it.
+func (c *RpcClient) release() {
 	c.Lock()
 	defer c.Unlock()
 	c.nOut--
-	n := c.nOut
-	c.refcountCh <- refcount{time: c.now(), i: n}
+	if c.nOut == 0 {
+		c.lastDone = c.now()
+	}
+	if c.dead {
+		return
+	}
+	c.refcountCh <- refcount{time: c.now(), i: c.nOut}
 }
 
 func (c *RpcClient) isDead() bool {
@@ -510,12 +581,14 @@ func (c *RpcClient) Call2(ctx context.Context, method rpc.Methoder, arg interfac
 		defer canc()
 	}
 
+	if err := c.acquire(); err != nil {
+		return err
+	}
+	defer c.release()
 	gcli, err := c.ConnectCli(ctx)
 	if err != nil {
 		return err
 	}
-	c.inc()
-	defer c.dec()
 
 	// Every generated client funnels through here, so this is the one place
 	// that sees all outbound traffic. Costs two wall-clock reads per call when

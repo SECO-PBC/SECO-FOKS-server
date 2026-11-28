@@ -373,3 +373,79 @@ func TestRpcConnectGiveUpIsTransportError(t *testing.T) {
 	viaAgent := StatusToError(ErrorToStatus(err))
 	require.True(t, IsTransportError(viaAgent), "across the agent RPC: %T %v", viaAgent, viaAgent)
 }
+
+// A client shut down with a call in flight fails that call promptly and the
+// caller returns: release must not wait on the refcount loop, which Shutdown
+// has stopped. Shutdown twice is harmless.
+func TestRpcShutdownReleasesInFlightCall(t *testing.T) {
+	fc := clockwork.NewFakeClock() // never advanced: Slow never returns
+	srv := testServer{cl: fc}
+	srv.start(t)
+	defer srv.stop(t)
+	m := newRpcLogMetaContext()
+	gcli := NewRpcClient(m, proto.TCPAddr(srv.connectTo), srv.tlsConfig.RootCAs, nil, nil)
+	cli := lcl.TestLibsClient{Cli: gcli, ErrorUnwrapper: StatusToError}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := cli.Slow(context.Background(), lcl.SlowArg{X: 1, Wait: proto.ExportDurationMilli(time.Hour)})
+		errCh <- err
+	}()
+	fc.BlockUntil(1)
+
+	gcli.Shutdown()
+	gcli.Shutdown()
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("call in flight at Shutdown never returned")
+	}
+	_, err := cli.Fast(context.Background(), 1)
+	require.Error(t, err, "a shut-down client refuses new calls")
+}
+
+// Retire leaves a client up while a call is in flight on it, and shuts it
+// down once it has been idle for IdleTimeout.
+func TestRpcRetireWaitsForInFlightCall(t *testing.T) {
+	fc := clockwork.NewFakeClock() // the server's: Slow returns when advanced
+	srv := testServer{cl: fc}
+	srv.start(t)
+	defer srv.stop(t)
+	m := newRpcLogMetaContext()
+	cc := clockwork.NewFakeClock()
+	opts := NewRpcClientOpts()
+	opts.Clock = cc
+	gcli := NewRpcClient(m, proto.TCPAddr(srv.connectTo), srv.tlsConfig.RootCAs, nil, opts)
+	cli := lcl.TestLibsClient{Cli: gcli, ErrorUnwrapper: StatusToError}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := cli.Slow(context.Background(), lcl.SlowArg{X: 1, Wait: proto.ExportDurationMilli(time.Minute)})
+		errCh <- err
+	}()
+	fc.BlockUntil(1)
+
+	gcli.Retire()
+	gcli.Retire() // idempotent
+	for range 3 {
+		cc.Advance(opts.IdleTimeout)
+		time.Sleep(5 * time.Millisecond)
+	}
+	require.False(t, gcli.isDead(), "a call is still in flight")
+
+	fc.Advance(time.Minute)
+	require.NoError(t, <-errCh, "the in-flight call completes on the retired client")
+	cc.Advance(opts.IdleTimeout - opts.PollInterval)
+	time.Sleep(20 * time.Millisecond)
+	require.False(t, gcli.isDead(), "idle for less than IdleTimeout")
+	res, err := cli.Fast(context.Background(), 1)
+	require.NoError(t, err, "a late caller still gets its call")
+	require.Equal(t, int64(2), res)
+
+	require.Eventually(t, func() bool {
+		cc.Advance(opts.PollInterval)
+		return gcli.isDead()
+	}, 5*time.Second, 5*time.Millisecond, "an idle retired client is shut down")
+	gcli.Shutdown() // after Retire's shutdown: harmless
+}

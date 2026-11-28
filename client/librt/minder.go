@@ -48,13 +48,22 @@ func (k *RTParty) PLCNode() *libclient.PLCNode {
 
 var _ libclient.BaseMinderNoder = (*RTParty)(nil)
 
+// localClient is the home server's client together with what it was built
+// from: its RPC client (to retire it when replaced) and the identity of the
+// certificate it presents.
+type localClient struct {
+	cli  rem.RealTimeClient
+	gcli *core.RpcClient
+	cert core.CertChainID
+}
+
 type Minder struct {
 	sync.Mutex
 	base *libclient.BaseMinder[RTParty, *RTParty]
 	au   *libclient.UserContext
 
 	localCliMu sync.Mutex
-	localCli   *rem.RealTimeClient
+	localCli   *localClient // nil until first use
 
 	// Always-on instrumentation counters; read via Metrics(). Useful for tests
 	// and debugging (e.g. asserting a read was served entirely from cache).
@@ -473,6 +482,12 @@ func (k *Minder) clientLocal(
 	*rem.RealTimeClient,
 	error,
 ) {
+	// The certificate is read under localCliMu, so two callers racing a
+	// certificate replacement cannot rebuild the client back onto the
+	// replaced one.
+	k.localCliMu.Lock()
+	defer k.localCliMu.Unlock()
+
 	cert, err := au.ClientCert(m)
 	if err != nil {
 		return nil, nil, err
@@ -482,20 +497,23 @@ func (k *Minder) clientLocal(
 		return nil, nil, core.HomeError("no home server")
 	}
 
-	k.localCliMu.Lock()
-	defer k.localCliMu.Unlock()
-
-	if k.localCli != nil {
-		return pr, k.localCli, nil
+	// A client made with an older certificate (the saved chain, replaced
+	// after a CA change) is rebuilt; the old one is retired, shut down once
+	// the calls still in flight on it are done.
+	certID := core.ClientCertID(cert)
+	if k.localCli != nil && k.localCli.cert == certID {
+		return pr, &k.localCli.cli, nil
 	}
 
 	gcli, err := pr.RPCClient(m, proto.ServerType_RealTime, cert)
 	if err != nil {
 		return nil, nil, err
 	}
-	ret := core.NewRealTimeClient(gcli, m)
-	k.localCli = &ret
-	return pr, &ret, nil
+	if k.localCli != nil {
+		k.localCli.gcli.Retire()
+	}
+	k.localCli = &localClient{cli: core.NewRealTimeClient(gcli, m), gcli: gcli, cert: certID}
+	return pr, &k.localCli.cli, nil
 }
 
 func (r *RTParty) keysAtRoleGen(
