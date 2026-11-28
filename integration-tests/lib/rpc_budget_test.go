@@ -59,7 +59,7 @@ func TestListMembershipsRoundTripBudget(t *testing.T) {
 		"expected one team chain load per team, not one per load site")
 
 	// My own chain is loaded once: the membership loader and the PUK minder
-	// share one load within the listing (WithLoadMeScope). It was two.
+	// share one load within the listing (a load-me scope). It was two.
 	require.Equal(t, 1, byMethod["User.loadUserChain"])
 
 	// The membership chain is the second, genuinely distinct fetch per team.

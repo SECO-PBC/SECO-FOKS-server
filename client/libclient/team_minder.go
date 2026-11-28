@@ -2010,7 +2010,7 @@ func (t *TeamMinder) ListMemberships(
 	var ret lcl.ListMembershipsRes
 	// The membership loader and the PUK minder both load my chain during the
 	// exploration; let them share one load.
-	m = WithLoadMeScope(m)
+	m = withLoadMeScope(m)
 	err := t.ExploreAndIndex(m, opts)
 	if err != nil {
 		return nil, err

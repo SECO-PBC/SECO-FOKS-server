@@ -5,6 +5,7 @@ package libclient
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	proto "github.com/foks-proj/go-foks/proto/lib"
@@ -15,8 +16,17 @@ import (
 // and the PUK minder -- and each load is a server round trip returning the
 // same chain. The scope lives in the operation's context, so it ends with the
 // operation: nothing loaded in one is served to another, however close
-// together. A step that changes the user's sigchain inside the scope calls
-// ForgetLoadMeScope, so later steps load afresh.
+// together.
+//
+// A scope is for READ-ONLY operations on the user's sigchain: a chain loaded
+// at the start is served to every later step, so a step that posted to the
+// sigchain would be handed the chain from before its own write. That is why
+// the constructor is unexported and there is no way to "refresh" a scope: the
+// only operations that open one are listed here, and none of them writes the
+// user's sigchain.
+//
+//   - TeamMinder.ListMemberships (an exploration: chain loads, generic-chain
+//     reads and team-membership-chain posts, never a user sigchain link).
 
 type loadMeScopeKey struct{}
 
@@ -24,6 +34,10 @@ type loadMeScope struct {
 	mu      sync.Mutex
 	loads   map[proto.UID]*UserWrapper
 	flights map[proto.UID]*loadMeFlight
+
+	// onWait, if set (tests only), runs when a caller starts waiting on a
+	// load in flight.
+	onWait func()
 }
 
 type loadMeFlight struct {
@@ -32,14 +46,24 @@ type loadMeFlight struct {
 	err  error
 }
 
-// WithLoadMeScope starts a load-me scope for one operation.
-func WithLoadMeScope(m MetaContext) MetaContext {
-	scope := &loadMeScope{
+// errLoadMeAbandoned is a flight's outcome until its load returns. A load that
+// never returns normally (it panicked) leaves it in place, so the flight
+// counts as failed: nothing is shared, and its waiters load for themselves.
+var errLoadMeAbandoned = errors.New("load-me flight abandoned")
+
+func newLoadMeScope() *loadMeScope {
+	return &loadMeScope{
 		loads:   make(map[proto.UID]*UserWrapper),
 		flights: make(map[proto.UID]*loadMeFlight),
 	}
+}
+
+// withLoadMeScope starts a load-me scope for one read-only operation; see the
+// list above before adding a caller.
+func withLoadMeScope(m MetaContext) MetaContext {
 	ret := m
-	ret.MetaContext = m.MetaContext.WithContext(context.WithValue(m.Ctx(), loadMeScopeKey{}, scope))
+	ret.MetaContext = m.MetaContext.WithContext(
+		context.WithValue(m.Ctx(), loadMeScopeKey{}, newLoadMeScope()))
 	return ret
 }
 
@@ -48,11 +72,9 @@ func loadMeScopeOf(m MetaContext) *loadMeScope {
 	return s
 }
 
-// LoadMeScoped is LoadMe that shares one load per user within the
+// loadMeScoped is LoadMe that shares one load per user within the
 // operation's load-me scope, if it has one; outside a scope it is LoadMe.
-// Concurrent callers wait for the load in flight; only successful loads are
-// shared, since a failure may be the loader's own context's.
-func LoadMeScoped(m MetaContext, au *UserContext) (*UserWrapper, error) {
+func loadMeScoped(m MetaContext, au *UserContext) (*UserWrapper, error) {
 	scope := loadMeScopeOf(m)
 	if au == nil {
 		au = m.G().ActiveUser()
@@ -60,53 +82,53 @@ func LoadMeScoped(m MetaContext, au *UserContext) (*UserWrapper, error) {
 	if scope == nil || au == nil {
 		return LoadMe(m, au)
 	}
-	uid := au.Info.Fqu.Uid
+	return scope.load(m.Ctx(), au.Info.Fqu.Uid, func() (*UserWrapper, error) {
+		return LoadMe(m, au)
+	})
+}
 
-	scope.mu.Lock()
-	if res, ok := scope.loads[uid]; ok {
-		scope.mu.Unlock()
+// load returns the scope's load of uid, running fn for it if there is none.
+// Concurrent callers wait for the load in flight. Only successful loads are
+// shared: a failure may be the loader's own context's, so a waiter that sees
+// one runs fn itself.
+func (s *loadMeScope) load(
+	ctx context.Context,
+	uid proto.UID,
+	fn func() (*UserWrapper, error),
+) (*UserWrapper, error) {
+	s.mu.Lock()
+	if res, ok := s.loads[uid]; ok {
+		s.mu.Unlock()
 		return res, nil
 	}
-	if f, ok := scope.flights[uid]; ok {
-		scope.mu.Unlock()
+	if f, ok := s.flights[uid]; ok {
+		s.mu.Unlock()
+		if s.onWait != nil {
+			s.onWait()
+		}
 		select {
 		case <-f.done:
 			if f.err == nil {
 				return f.res, nil
 			}
-			return LoadMe(m, au)
-		case <-m.Ctx().Done():
-			return nil, m.Ctx().Err()
+			return fn()
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
-	f := &loadMeFlight{done: make(chan struct{})}
-	scope.flights[uid] = f
-	scope.mu.Unlock()
+	f := &loadMeFlight{done: make(chan struct{}), err: errLoadMeAbandoned}
+	s.flights[uid] = f
+	s.mu.Unlock()
 
 	defer func() {
-		scope.mu.Lock()
-		if scope.flights[uid] == f {
-			delete(scope.flights, uid)
-			if f.err == nil {
-				scope.loads[uid] = f.res
-			}
+		s.mu.Lock()
+		delete(s.flights, uid)
+		if f.err == nil {
+			s.loads[uid] = f.res
 		}
-		scope.mu.Unlock()
+		s.mu.Unlock()
 		close(f.done)
 	}()
-	f.res, f.err = LoadMe(m, au)
+	f.res, f.err = fn()
 	return f.res, f.err
-}
-
-// ForgetLoadMeScope drops what the operation's scope holds, and any load in
-// flight, so steps after a change to the user's sigchain see the change.
-func ForgetLoadMeScope(m MetaContext) {
-	scope := loadMeScopeOf(m)
-	if scope == nil {
-		return
-	}
-	scope.mu.Lock()
-	defer scope.mu.Unlock()
-	clear(scope.loads)
-	clear(scope.flights)
 }

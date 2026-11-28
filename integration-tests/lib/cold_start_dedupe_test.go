@@ -7,7 +7,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/foks-proj/go-foks/client/libclient"
 	"github.com/foks-proj/go-foks/client/librt"
 	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/lib/team"
@@ -24,41 +23,30 @@ func rpcCountsByMethod(stats *core.RpcStats) map[string]int {
 	return by
 }
 
-// TestLoadMeScope: inside one operation's load-me scope, loads of my own chain
-// are shared; outside one they are not; and forgetting the scope (after a
-// change to my sigchain) sends the next load back to the server.
-func TestLoadMeScope(t *testing.T) {
+// TestLoadMeScopeEndsWithOperation: a listing loads my chain once (pinned
+// in TestListMembershipsRoundTripBudget), and the next listing loads it
+// again: the scope is the operation's, never carried to the next one. The
+// sharing itself is unit-tested in client/libclient/load_me_scope_test.go.
+func TestLoadMeScopeEndsWithOperation(t *testing.T) {
 	tew := testEnvBeta(t)
-	u := tew.NewTestUser(t)
+	owner := tew.NewTestUser(t)
+	tew.DirectDoubleMerklePokeInTest(t)
+	tew.makeTeamForOwner(t, owner)
 	tew.DirectDoubleMerklePokeInTest(t)
 
-	cm := tew.NewClientMetaContext(t, u)
-	au := cm.G().ActiveUser()
+	cm := tew.NewClientMetaContext(t, owner)
+	tmm, err := cm.G().TeamMinder()
+	require.NoError(t, err)
 	cm, stats := cm.WithRpcStats()
 	loads := func() int { return rpcCountsByMethod(stats)["User.loadUserChain"] }
 
-	for range 2 {
-		_, err := libclient.LoadMeScoped(cm, au)
-		require.NoError(t, err)
-	}
-	require.Equal(t, 2, loads(), "no scope, no sharing")
-
-	scoped := libclient.WithLoadMeScope(cm)
-	for range 3 {
-		_, err := libclient.LoadMeScoped(scoped, au)
-		require.NoError(t, err)
-	}
-	require.Equal(t, 3, loads(), "one load for the whole scope")
-
-	libclient.ForgetLoadMeScope(scoped)
-	_, err := libclient.LoadMeScoped(scoped, au)
+	_, err = tmm.ListMemberships(cm, nil)
 	require.NoError(t, err)
-	require.Equal(t, 4, loads())
-
-	// A new scope starts empty: nothing carries from one operation to the next.
-	_, err = libclient.LoadMeScoped(libclient.WithLoadMeScope(cm), au)
+	first := loads()
+	require.Positive(t, first)
+	_, err = tmm.ListMemberships(cm, nil)
 	require.NoError(t, err)
-	require.Equal(t, 5, loads())
+	require.Greater(t, loads(), first, "a second listing loads my chain afresh")
 }
 
 // TestThreadViewByIDListsNoChannels: the head page of a channel named by id
@@ -96,6 +84,58 @@ func TestThreadViewByIDListsNoChannels(t *testing.T) {
 	_, err = r.minder.GetThreadView(r.mb, tm, proto.RTAppID_Chat,
 		lcl.NewRTChannelSpecifierWithId(bogus), 0, 0)
 	require.Error(t, err)
+}
+
+// TestThreadViewByIDOfflineChecksListing: a head read named by id skips the
+// listing only while the server answers. Served from the local cache alone
+// (server unreachable), it must still find the channel in the caller's
+// last-known listing, or a channel the caller lost access to would keep
+// serving its cached messages.
+func TestThreadViewByIDOfflineChecksListing(t *testing.T) {
+	sc := setupPrivScene(t, false)
+	sc.grant(t, sc.alice, sc.bob, false)
+	sc.send(t, sc.alice, "before the revoke")
+
+	// A caching minder for bob (the scene's actors cache nothing).
+	bm := librt.NewMinder(sc.bob.m.G().ActiveUser())
+	mb := sc.bob.m
+	tm := sc.teamCfg()
+	offline := &librt.MinderTestHooks{ReadsFail: simTransportErr(), ListFail: simTransportErr()}
+	view := func() (*lcl.RTThreadView, error) {
+		return bm.GetThreadView(mb, tm, proto.RTAppID_Chat, sc.spec(), 0, 0)
+	}
+	inListing := func() bool {
+		lst, err := bm.ListAllChannelsForTeam(mb, tm, proto.RTAppID_Chat)
+		require.NoError(t, err)
+		for _, ch := range lst.Channels {
+			if ch.Id.Eq(sc.chid) {
+				return true
+			}
+		}
+		return false
+	}
+
+	v, err := view()
+	require.NoError(t, err)
+	require.Len(t, v.Msgs, 1)
+	require.True(t, inListing())
+
+	// Offline while still a member: the cached page is served, stale.
+	bm.SetTestHooks(offline)
+	v, err = view()
+	require.NoError(t, err)
+	require.True(t, v.Stale)
+	require.Len(t, v.Msgs, 1)
+	bm.SetTestHooks(nil)
+
+	// Revoked, and the listing has caught up; then offline again.
+	sc.revoke(t, sc.alice, sc.bob)
+	require.False(t, inListing())
+	bm.SetTestHooks(offline)
+	v, err = view()
+	require.Nil(t, v)
+	var nf core.RTNotFoundError
+	require.ErrorAs(t, err, &nf, "a channel gone from the listing serves nothing from cache")
 }
 
 // TestDumpAndListMembershipsConcurrently: the bridge may dump the membership
