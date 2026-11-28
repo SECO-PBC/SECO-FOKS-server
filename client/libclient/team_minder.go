@@ -703,18 +703,17 @@ func (t *TeamMinder) storeMembershipToChain(m MetaContext, fqt proto.FQTeam) err
 	return nil
 }
 
-func (t *TeamMinder) serverTrustListForUser(m MetaContext) error {
-
+func (t *TeamMinder) fetchServerTrustList(m MetaContext) (rem.LocalTeamList, error) {
 	ucli, err := t.au.UserClient(m)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	return ucli.GetTeamListServerTrust(m.Ctx())
+}
 
-	tmList, err := ucli.GetTeamListServerTrust(m.Ctx())
-	if err != nil {
-		return err
-	}
-
+// applyServerTrustList records in my membership chain any team the server
+// lists that the chain lacks. Needs the chain loaded (loadUserTMLLocked).
+func (t *TeamMinder) applyServerTrustList(m MetaContext, tmList rem.LocalTeamList) error {
 	for _, tm := range tmList {
 		found, fqt, err := t.checkSingleTeamInMembershipChain(m, tm)
 		if err != nil {
@@ -731,18 +730,32 @@ func (t *TeamMinder) serverTrustListForUser(m MetaContext) error {
 	return nil
 }
 
+// seedExplore loads my membership chain and fetches the server's list of my
+// teams at the same time: two independent fetches, of which only applying
+// the list needs the chain. If the chain fails to load, the fetch is
+// cancelled and the error returned at once.
 func (t *TeamMinder) seedExplore(m MetaContext) error {
+	type listResult struct {
+		list rem.LocalTeamList
+		err  error
+	}
+	lm, cancel := m.WithContextCancel()
+	defer cancel()
+	listCh := make(chan listResult, 1)
+	go func() {
+		l, err := t.fetchServerTrustList(lm)
+		listCh <- listResult{l, err}
+	}()
 
 	err := t.loadUserTMLLocked(m)
 	if err != nil {
 		return err
 	}
-
-	err = t.serverTrustListForUser(m)
-	if err != nil {
-		return err
+	r := <-listCh
+	if r.err != nil {
+		return r.err
 	}
-	return nil
+	return t.applyServerTrustList(m, r.list)
 }
 
 type MembershipDetails struct {

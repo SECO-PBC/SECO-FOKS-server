@@ -69,6 +69,7 @@ const (
 	DataType_HostPublicZone       DataType = 18
 	DataType_UserCertChain        DataType = 19
 	DataType_TeamNameLookup       DataType = 20
+	DataType_SavedVOBearerToken   DataType = 21
 	DataType_KVRealm              DataType = 65
 	DataType_KVNSRoot             DataType = 66
 	DataType_KVDir                DataType = 67
@@ -111,6 +112,7 @@ var DataTypeMap = map[string]DataType{
 	"HostPublicZone":       18,
 	"UserCertChain":        19,
 	"TeamNameLookup":       20,
+	"SavedVOBearerToken":   21,
 	"KVRealm":              65,
 	"KVNSRoot":             66,
 	"KVDir":                67,
@@ -152,6 +154,7 @@ var DataTypeRevMap = map[DataType]string{
 	18:  "HostPublicZone",
 	19:  "UserCertChain",
 	20:  "TeamNameLookup",
+	21:  "SavedVOBearerToken",
 	65:  "KVRealm",
 	66:  "KVNSRoot",
 	67:  "KVDir",
@@ -236,6 +239,125 @@ func (u *UserCertChain) Decode(dec rpc.Decoder) error {
 }
 
 func (u *UserCertChain) Bytes() []byte { return nil }
+
+type SavedVOBearerTokenBytes [16]byte
+type SavedVOBearerTokenBytesInternal__ [16]byte
+
+func (s SavedVOBearerTokenBytes) Export() *SavedVOBearerTokenBytesInternal__ {
+	tmp := (([16]byte)(s))
+	return ((*SavedVOBearerTokenBytesInternal__)(&tmp))
+}
+func (s SavedVOBearerTokenBytesInternal__) Import() SavedVOBearerTokenBytes {
+	tmp := ([16]byte)(s)
+	return SavedVOBearerTokenBytes((func(x *[16]byte) (ret [16]byte) {
+		if x == nil {
+			return ret
+		}
+		return *x
+	})(&tmp))
+}
+
+func (s *SavedVOBearerTokenBytes) Encode(enc rpc.Encoder) error {
+	return enc.Encode(s.Export())
+}
+
+func (s *SavedVOBearerTokenBytes) Decode(dec rpc.Decoder) error {
+	var tmp SavedVOBearerTokenBytesInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*s = tmp.Import()
+	return nil
+}
+
+func (s SavedVOBearerTokenBytes) Bytes() []byte {
+	return (s)[:]
+}
+
+type SavedVOBearerToken struct {
+	Tok      SavedVOBearerTokenBytes
+	Team     lib.FQTeam
+	Gen      lib.Generation
+	Member   lib.FQParty
+	SrcRole  lib.Role
+	MintedAt lib.Time
+}
+type SavedVOBearerTokenInternal__ struct {
+	_struct  struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Tok      *SavedVOBearerTokenBytesInternal__
+	Team     *lib.FQTeamInternal__
+	Gen      *lib.GenerationInternal__
+	Member   *lib.FQPartyInternal__
+	SrcRole  *lib.RoleInternal__
+	MintedAt *lib.TimeInternal__
+}
+
+func (s SavedVOBearerTokenInternal__) Import() SavedVOBearerToken {
+	return SavedVOBearerToken{
+		Tok: (func(x *SavedVOBearerTokenBytesInternal__) (ret SavedVOBearerTokenBytes) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(s.Tok),
+		Team: (func(x *lib.FQTeamInternal__) (ret lib.FQTeam) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(s.Team),
+		Gen: (func(x *lib.GenerationInternal__) (ret lib.Generation) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(s.Gen),
+		Member: (func(x *lib.FQPartyInternal__) (ret lib.FQParty) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(s.Member),
+		SrcRole: (func(x *lib.RoleInternal__) (ret lib.Role) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(s.SrcRole),
+		MintedAt: (func(x *lib.TimeInternal__) (ret lib.Time) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(s.MintedAt),
+	}
+}
+func (s SavedVOBearerToken) Export() *SavedVOBearerTokenInternal__ {
+	return &SavedVOBearerTokenInternal__{
+		Tok:      s.Tok.Export(),
+		Team:     s.Team.Export(),
+		Gen:      s.Gen.Export(),
+		Member:   s.Member.Export(),
+		SrcRole:  s.SrcRole.Export(),
+		MintedAt: s.MintedAt.Export(),
+	}
+}
+func (s *SavedVOBearerToken) Encode(enc rpc.Encoder) error {
+	return enc.Encode(s.Export())
+}
+
+func (s *SavedVOBearerToken) Decode(dec rpc.Decoder) error {
+	var tmp SavedVOBearerTokenInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*s = tmp.Import()
+	return nil
+}
+
+func (s *SavedVOBearerToken) Bytes() []byte { return nil }
 
 type ScopeLabel []byte
 type ScopeLabelInternal__ []byte

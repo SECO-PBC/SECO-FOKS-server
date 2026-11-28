@@ -121,6 +121,14 @@ func (m MetaContext) Shutdown() {
 	m.G().Shutdown()
 }
 
+func (m MetaContext) DbDeleteAllOfType(which DbType, s Scoper, typ lcl.DataType) error {
+	return m.G().DbDeleteAllOfType(m.Ctx(), which, s, typ)
+}
+
+func (m MetaContext) DbDeleteOfTypeModifiedBefore(which DbType, s Scoper, typ lcl.DataType, cutoff proto.Time) error {
+	return m.G().DbDeleteOfTypeModifiedBefore(m.Ctx(), which, s, typ, cutoff)
+}
+
 func (m MetaContext) DbDelete(which DbType, s Scoper, typ lcl.DataType, gkey any) error {
 	return m.G().DbDelete(m.Ctx(), which, s, typ, gkey)
 }

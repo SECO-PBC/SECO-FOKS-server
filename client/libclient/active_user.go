@@ -435,6 +435,14 @@ func (u *UserContext) UnlockKeys(m MetaContext, opts LoadActiveUserOpts) error {
 		return nil
 	}
 
+	// Load my own chain while the SSO ping is out. PopulateWithDevkey below
+	// joins this load through the scope instead of starting its own; the
+	// load only reads public chain data, and whether to populate at all is
+	// still decided after the ping. Returning early cancels it.
+	pm, cancelPrefetch := withLoadMeScope(m).WithContextCancel()
+	defer cancelPrefetch()
+	go func() { _, _ = loadMeScoped(pm, u) }()
+
 	err = u.pingForSSO(m)
 	if err != nil {
 		// Offline tolerance: the ping exists to discover an SSO lock, which
@@ -461,7 +469,7 @@ func (u *UserContext) UnlockKeys(m MetaContext, opts LoadActiveUserOpts) error {
 		return nil
 	}
 
-	err = u.PopulateWithDevkey(m)
+	err = u.PopulateWithDevkey(pm)
 	if err != nil {
 		return err
 	}

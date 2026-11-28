@@ -132,3 +132,45 @@ func TestLoadMeScopeWaiterHonorsItsContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	close(release)
 }
+
+// A waiter shares the flight's failure (one dial per operation, offline),
+// but not the loader's own cancellation: then it loads for itself.
+func TestLoadMeScopeWaiterSharesFailureNotCancel(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		loaderErr error
+		shared    bool
+	}{
+		{"failure", errors.New("offline"), true},
+		{"cancel", context.Canceled, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newLoadMeScope()
+			var uid proto.UID
+			started := make(chan struct{})
+			waiting := make(chan struct{})
+			s.onWait = func() { close(waiting) }
+			go func() {
+				_, _ = s.load(context.Background(), uid, func() (*UserWrapper, error) {
+					close(started)
+					<-waiting
+					return nil, tc.loaderErr
+				})
+			}()
+			<-started
+			want := &UserWrapper{}
+			ran := false
+			res, err := s.load(context.Background(), uid, func() (*UserWrapper, error) {
+				ran = true
+				return want, nil
+			})
+			if tc.shared {
+				require.ErrorIs(t, err, tc.loaderErr)
+				require.False(t, ran)
+			} else {
+				require.NoError(t, err)
+				require.Same(t, want, res)
+			}
+		})
+	}
+}

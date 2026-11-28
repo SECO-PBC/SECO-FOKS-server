@@ -743,6 +743,24 @@ func (g *GlobalContext) DbPutTx(ctx context.Context, which DbType, rows []PutArg
 	return db.PutTx(m, rows)
 }
 
+func (g *GlobalContext) DbDeleteAllOfType(ctx context.Context, which DbType, s Scoper, typ lcl.DataType) error {
+	m := NewMetaContext(ctx, g)
+	db, err := g.Db(ctx, which)
+	if err != nil {
+		return err
+	}
+	return db.DeleteAllOfType(m, s, typ)
+}
+
+func (g *GlobalContext) DbDeleteOfTypeModifiedBefore(ctx context.Context, which DbType, s Scoper, typ lcl.DataType, cutoff proto.Time) error {
+	m := NewMetaContext(ctx, g)
+	db, err := g.Db(ctx, which)
+	if err != nil {
+		return err
+	}
+	return db.DeleteOfTypeModifiedBefore(m, s, typ, cutoff)
+}
+
 func (g *GlobalContext) DbDelete(ctx context.Context, which DbType, s Scoper, typ lcl.DataType, gkey any) error {
 	m := NewMetaContext(ctx, g)
 	db, err := g.Db(ctx, which)
@@ -972,6 +990,43 @@ func (d *DB) DeleteGlobalKV(m MetaContext, key core.KVKey) error {
 		return nil
 	})
 	return err
+}
+
+// DeleteAllOfType deletes every row of one type under one scope.
+func (d *DB) DeleteAllOfType(m MetaContext, scope Scoper, typ lcl.DataType) error {
+	return d.deleteOfType(m, scope, typ, nil)
+}
+
+// DeleteOfTypeModifiedBefore deletes the rows of one type under one scope
+// last written before cutoff (scoped_data.mtime, the wall clock at write).
+func (d *DB) DeleteOfTypeModifiedBefore(m MetaContext, scope Scoper, typ lcl.DataType, cutoff proto.Time) error {
+	return d.deleteOfType(m, scope, typ, &cutoff)
+}
+
+// deleteOfType deletes the rows of one type under one scope: all of them, or
+// with modifiedBefore, those last written before it.
+func (d *DB) deleteOfType(m MetaContext, scope Scoper, typ lcl.DataType, modifiedBefore *proto.Time) error {
+	if scope == nil {
+		return core.InternalError("scope is nil")
+	}
+	ctx := m.Ctx()
+	d.Lock()
+	defer d.Unlock()
+
+	scopeID, err := d.getScopeID(ctx, scope)
+	if err != nil {
+		return err
+	}
+	q := `DELETE FROM scoped_data WHERE scope_id=$1 AND typ=$2`
+	args := []any{int(scopeID), typ}
+	if modifiedBefore != nil {
+		q += ` AND mtime<$3`
+		args = append(args, uint64(*modifiedBefore))
+	}
+	return RetryTx(m, d.db, "deleteOfType", func(m MetaContext, tx *sql.Tx) error {
+		_, err := tx.Exec(q, args...)
+		return err
+	})
 }
 
 func (d *DB) Delete(m MetaContext, scope Scoper, typ lcl.DataType, gkey any) error {
