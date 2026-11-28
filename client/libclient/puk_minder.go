@@ -236,7 +236,7 @@ func (p *PUKMinder) loadUser(m MetaContext) (*UserWrapper, error) {
 		return p.chain, nil
 	}
 	var err error
-	p.chain, err = LoadMe(m, p.u)
+	p.chain, err = loadMeScoped(m, p.u)
 	switch {
 	case core.IsTransportError(err):
 		// Offline fallback, mirroring PopulateWithDevkey: the verified local

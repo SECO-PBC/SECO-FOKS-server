@@ -1238,14 +1238,26 @@ func (d *Minder) readThrough(
 	if err != nil {
 		return err
 	}
-	err = d.attemptReadThrough(m, ch.Id, seq, explicit, dm)
+	return d.readThroughChid(m, ch.Id, seq, explicit, dm)
+}
+
+// readThroughChid is readThrough for a caller that already resolved the
+// channel, so it is not listed again to find its id.
+func (d *Minder) readThroughChid(
+	m MetaContext,
+	chid proto.RTChannelID,
+	seq proto.RTMsgSeq,
+	explicit bool,
+	dm bool,
+) error {
+	err := d.attemptReadThrough(m, chid, seq, explicit, dm)
 	if err != nil {
 		if core.IsTransportError(err) {
-			return d.queuePendingMark(m, ch.Id, seq, explicit, dm)
+			return d.queuePendingMark(m, chid, seq, explicit, dm)
 		}
 		return err
 	}
-	return d.clearPendingMarks(m, map[pendingKey]proto.RTMsgSeq{{chid: ch.Id, explicit: explicit}: seq})
+	return d.clearPendingMarks(m, map[pendingKey]proto.RTMsgSeq{{chid: chid, explicit: explicit}: seq})
 }
 
 // SetChannelMuted sets the caller's own push mute in a channel
@@ -1863,6 +1875,44 @@ type initReqResult struct {
 	ch     *lcl.RTChannelMetadataPlaintext
 	cli    *rem.RealTimeClient
 	appID  proto.RTAppID
+	// resolvedBy is how ch was actually found: resolveIDWithoutListing only
+	// when the caller asked for it AND the specifier named an id.
+	resolvedBy channelResolution
+}
+
+// channelResolution says how initReq finds the channel a read names.
+type channelResolution int
+
+const (
+	// resolveByListing lists the team's channels and finds the one named,
+	// failing if it is not there. Required for any read that may be served
+	// from the local cache alone: the listing is then the only check that
+	// the caller can still see the channel.
+	resolveByListing channelResolution = iota
+	// resolveIDWithoutListing takes a channel named by id as given, for a
+	// read whose server reply is the visibility check: the server refuses a
+	// channel the caller cannot see, so the listing would only add a round
+	// trip. Such a read must call confirmVisibleForCachedRead before serving
+	// anything from the local cache without a server reply.
+	resolveIDWithoutListing
+)
+
+// confirmVisibleForCachedRead is the check a read resolved without the
+// listing owes before it serves the local cache alone (the server being
+// unreachable): the channel must still be in the caller's listing -- the
+// last-known one, offline -- exactly as if initReq had listed it. A channel
+// the caller has lost access to drops out of that listing, while its cached
+// messages stay on disk.
+func (d *Minder) confirmVisibleForCachedRead(
+	m MetaContext,
+	irr *initReqResult,
+	channel lcl.RTChannelSpecifier,
+) error {
+	if irr.resolvedBy == resolveByListing {
+		return nil
+	}
+	_, err := d.resolveChannel(m, irr.rtp, irr.appID, channel)
+	return err
 }
 
 func (d *Minder) initReq(
@@ -1870,6 +1920,7 @@ func (d *Minder) initReq(
 	team lcl.ConfigTeam,
 	appID proto.RTAppID,
 	channel lcl.RTChannelSpecifier,
+	how channelResolution,
 ) (
 	*initReqResult,
 	error,
@@ -1882,9 +1933,16 @@ func (d *Minder) initReq(
 	if err != nil {
 		return nil, err
 	}
-	ch, err := d.resolveChannel(m, rtp, appID, channel)
-	if err != nil {
-		return nil, err
+	var ch *lcl.RTChannelMetadataPlaintext
+	resolvedBy := resolveByListing
+	if t, terr := channel.GetT(); how == resolveIDWithoutListing && terr == nil && t == lcl.RTChannelSpecifierType_ID {
+		ch = &lcl.RTChannelMetadataPlaintext{Id: channel.Id()}
+		resolvedBy = resolveIDWithoutListing
+	} else {
+		ch, err = d.resolveChannel(m, rtp, appID, channel)
+		if err != nil {
+			return nil, err
+		}
 	}
 	pr, cli, err := d.clientLocal(m.Base(), d.au)
 	hostId := pr.Chain().HostID()
@@ -1892,11 +1950,12 @@ func (d *Minder) initReq(
 		return nil, err
 	}
 	return &initReqResult{
-		hostId: hostId,
-		rtp:    rtp,
-		ch:     ch,
-		cli:    cli,
-		appID:  appID,
+		hostId:     hostId,
+		rtp:        rtp,
+		ch:         ch,
+		cli:        cli,
+		appID:      appID,
+		resolvedBy: resolvedBy,
 	}, nil
 }
 
@@ -2089,7 +2148,7 @@ func (d *Minder) GetThreadBookended(
 		inc = -1
 	}
 
-	irr, err := d.initReq(m, team, appID, channel)
+	irr, err := d.initReq(m, team, appID, channel, resolveByListing)
 	if err != nil {
 		return nil, err
 	}
@@ -2350,7 +2409,12 @@ func (d *Minder) GetThreadView(
 		for i := range msgs[1:] {
 			maxSeq = max(maxSeq, msgs[i+1].Seq)
 		}
-		err = d.ReadThrough(m, team, appID, channel, maxSeq)
+		// The page names the channel it resolved; no second listing.
+		if page.Chid != (proto.RTChannelID{}) {
+			err = d.readThroughChid(m, page.Chid, maxSeq, false, false)
+		} else {
+			err = d.ReadThrough(m, team, appID, channel, maxSeq)
+		}
 		if err != nil {
 			m.Warnw("GetThreadView", "stage", "readThrough", "err", err)
 		}
@@ -2404,7 +2468,10 @@ func (d *Minder) GetThreadRecentMsgs(
 		num = 128
 	}
 	inc := -1
-	irr, err := d.initReq(m, team, appID, channel)
+	// The head page asks the server, which refuses a channel the caller cannot
+	// see; an id needs no listing to be found. The one answer served without
+	// the server (the degraded read below) checks the listing first.
+	irr, err := d.initReq(m, team, appID, channel, resolveIDWithoutListing)
 	if err != nil {
 		return nil, err
 	}
@@ -2450,8 +2517,12 @@ func (d *Minder) GetThreadRecentMsgs(
 	}
 	if err != nil {
 		// Degraded read (docs/rt_offline.md, D4): serve the cached tail,
-		// flagged stale. An empty cache still errors.
+		// flagged stale. An empty cache still errors, and so does a channel
+		// no longer in the caller's listing.
 		if core.IsTransportError(err) && len(cached) > 0 {
+			if verr := d.confirmVisibleForCachedRead(m, irr, channel); verr != nil {
+				return nil, verr
+			}
 			end := min(int(num), len(cached))
 			return staleRead(cached[0:end], irr.ch.Id, err), nil
 		}
@@ -2695,7 +2766,7 @@ func (d *Minder) GetMsgs(
 	if err != nil {
 		return nil, err
 	}
-	irr, err := d.initReq(m, team, appID, channel)
+	irr, err := d.initReq(m, team, appID, channel, resolveByListing)
 	if err != nil {
 		return nil, err
 	}
