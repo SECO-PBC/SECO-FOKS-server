@@ -179,6 +179,14 @@ func (m MetaContext) NetworkConditioner() core.NetworkConditioner {
 	return m.g.NetworkConditioner()
 }
 
+// WithContextI is m over ctx, for chains code that derives a context of its
+// own (chains.DiscoveryMgr's background probe).
+func (m MetaContext) WithContextI(ctx context.Context) chains.MetaContext {
+	ret := m
+	ret.MetaContext = m.MetaContext.WithContext(ctx)
+	return ret
+}
+
 func (m MetaContext) WithLogTagI(k string) chains.MetaContext {
 	return m.WithLogTag(k)
 }

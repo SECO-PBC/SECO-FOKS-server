@@ -214,7 +214,8 @@ func (p *Probe) probe(m MetaContext) error {
 		return err
 	}
 
-	p.setLastFail(nil)
+	// The connection worked; lastFail stays as it is until the whole run has
+	// verified (Run), since everything the server sent is still unchecked.
 	p.noteCertOutcome(nil)
 
 	if p.TestDoneProbeCh != nil {
@@ -340,6 +341,26 @@ func (b *Probe) merkleAgentInner(m MetaContext) (*merkle.Agent, error) {
 	return ret, err
 }
 
+// takeMerkleAgent hands over the probe's merkle agent, if it made one.
+func (b *Probe) takeMerkleAgent() *merkle.Agent {
+	b.merkleAgentMu.Lock()
+	defer b.merkleAgentMu.Unlock()
+	ret := b.ma
+	b.ma = nil
+	return ret
+}
+
+// adoptMerkleAgent makes ma the probe's merkle agent unless it has one.
+func (b *Probe) adoptMerkleAgent(ma *merkle.Agent) bool {
+	b.merkleAgentMu.Lock()
+	defer b.merkleAgentMu.Unlock()
+	if b.ma != nil {
+		return false
+	}
+	b.ma = ma
+	return true
+}
+
 func (p *Probe) saveMerkleRoot(m MetaContext) error {
 
 	// We need to stall here, in test, while we trigger a merkle race. Will never be non-nil in
@@ -433,8 +454,11 @@ func (p *Probe) clean() {
 	}
 }
 
-func (p *Probe) Run(m MetaContext) error {
-	m = m.WithLogTagI("probe")
+// runVerified is a full probe, every check made, with no fallback to the
+// cached identity: Run, less its offline path. On failure, p's chain and
+// zone may hold server data that did not pass every check; Run puts the
+// previous ones back.
+func (p *Probe) runVerified(m MetaContext) error {
 	defer p.clean()
 
 	err := p.runOnce(m)
@@ -446,10 +470,42 @@ func (p *Probe) Run(m MetaContext) error {
 		p.TestRetryOnMerkleRace = true
 		err = p.runOnce(m)
 	}
+	return err
+}
 
-	if err != nil {
-		m.Errorw("probe", "err", err)
+// probeIdentity is what a run of a probe replaces: what it is a probe of.
+type probeIdentity struct {
+	chain  *core.Hostchain
+	pz     *proto.PublicZone
+	hostID *proto.HostID
+}
+
+func (p *Probe) identity() probeIdentity {
+	return probeIdentity{chain: p.chain, pz: p.pz, hostID: p.hostID}
+}
+
+func (p *Probe) setIdentity(id probeIdentity) {
+	p.chain, p.pz, p.hostID = id.chain, id.pz, id.hostID
+}
+
+func (p *Probe) Run(m MetaContext) error {
+	m = m.WithLogTagI("probe")
+
+	before := p.identity()
+	err := p.runVerified(m)
+
+	if err == nil {
+		// Only a run that passed every check makes the probe usable.
+		p.setLastFail(nil)
+		return nil
 	}
+
+	m.Errorw("probe", "err", err)
+
+	// A failed run must leave nothing it fetched behind: playChain and
+	// checkZoneSig set the chain and zone from server data before the
+	// merkle, pin and hostname checks run.
+	p.setIdentity(before)
 
 	// A transport failure with a locally cached, previously verified identity
 	// is survivable: hydrate and proceed offline. The failure is remembered
@@ -473,6 +529,9 @@ func (p *Probe) Run(m MetaContext) error {
 		return nil
 	}
 
+	// Failed, transport or not: the next refresh probes again rather than
+	// carry on.
+	p.setLastFail(err)
 	return err
 }
 
@@ -598,8 +657,10 @@ func (p *Probe) WithRegCli(m MetaContext, f func(rem.RegClient) error) error {
 // Prewarm makes no network call itself (no probe refresh, no dial on the
 // caller's goroutine), so it is safe to call under a caller's lock.
 func (p *Probe) Prewarm(m MetaContext, sts []proto.ServerType, cliCert *tls.Certificate) {
-	// Offline, or on a probe hydrated from cache, there is nothing to gain,
-	// and each client would refresh the probe first.
+	// Offline (a failed probe serving its cached identity) there is nothing
+	// to gain, and each client would refresh the probe first. A probe started
+	// from its cached identity on purpose (DiscoveryMgr.ProbeCachedOK) is
+	// connected, and prewarms like any other.
 	if p == nil || !p.IsConnected() || p.PublicZone() == nil {
 		return
 	}
@@ -641,7 +702,13 @@ func (p *Probe) RPCClient(m MetaContext, st proto.ServerType, cliCert *tls.Certi
 		return nil, core.InternalError("probe was nil")
 	}
 	if cli, ok := p.prewarmed.take(prewarmKey{st: st, cert: core.ClientCertID(cliCert)}); ok {
-		return cli, nil
+		// A client prewarmed for an identity that has since failed (a
+		// cached start whose revalidate found a change, or no longer
+		// verifies) is not used: the probe re-probes first.
+		if p.IsConnected() {
+			return cli, nil
+		}
+		cli.Shutdown()
 	}
 	return p.newRPCClient(m, st, cliCert)
 }
