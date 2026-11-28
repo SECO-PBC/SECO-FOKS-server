@@ -47,15 +47,16 @@ func TestSyncReplyBudget(t *testing.T) {
 	ret := run(smallSz+bigSz-1,
 		[]rem.SyncReply{small, {}, big},
 		[]error{nil, core.PermissionError("no"), nil})
-	require.True(t, syncOK(t, ret[0]))
 	require.False(t, syncOK(t, ret[1]))
 	require.Equal(t, proto.StatusCode_PERMISSION_ERROR, ret[1].False().Sc)
-	if syncOK(t, ret[2]) {
-		// big completed first and took the budget; small must then be out.
-		require.False(t, syncOK(t, ret[0]))
-	} else {
-		require.Equal(t, proto.StatusCode_KV_TOO_BIG_ERROR, ret[2].False().Sc)
+	// Exactly one of small and big is kept: whichever completed first. The
+	// other is refused as too big.
+	require.NotEqual(t, syncOK(t, ret[0]), syncOK(t, ret[2]))
+	refused := ret[0]
+	if !syncOK(t, ret[2]) {
+		refused = ret[2]
 	}
+	require.Equal(t, proto.StatusCode_KV_TOO_BIG_ERROR, refused.False().Sc)
 }
 
 // TestSyncBudgetStopsStartingCalls: a batch of many large calls stops
