@@ -29,55 +29,89 @@ func (c *UserClientConn) Sync(ctx context.Context, calls []rem.SyncCall) ([]rem.
 	if len(calls) > rem.MaxSyncCalls {
 		return nil, core.BadArgsError("sync: too many calls")
 	}
-	ret := make([]rem.SyncResult, len(calls))
+	return runSyncBatch(ctx, len(calls), rem.MaxSyncReplyBytes, func(ctx context.Context, i int) (rem.SyncReply, error) {
+		return c.syncOne(ctx, calls[i])
+	}), nil
+}
+
+// runSyncBatch runs n calls, at most syncParallelism at once, and keeps the
+// answer within budget bytes of encoded results as they complete: a reply
+// that would go past what is left is replaced with a TooBigError, and once
+// one has been, or the budget is used up, the calls not yet started are not
+// started and are answered TooBigError too. The client makes each of those
+// on its own, as it does for any call the batch could not answer. So a
+// batch of large chains never outgrows the transport's frame limit
+// (core.RpcMaxSz), and the server neither runs nor holds more than about a
+// budget's worth of replies. Which calls get in is completion order, not
+// call order.
+//
+// Each reply is encoded once here to be measured; the transport encodes the
+// answer again to send it, and offers no way to reuse these bytes.
+func runSyncBatch(
+	ctx context.Context,
+	n int,
+	budget int,
+	run func(ctx context.Context, i int) (rem.SyncReply, error),
+) []rem.SyncResult {
+	ret := make([]rem.SyncResult, n)
+	tooBig := func(actual int) rem.SyncResult {
+		return rem.NewSyncResultWithFalse(core.ErrorToStatus(
+			core.TooBigError{Limit: budget, Actual: actual, Desc: "sync reply budget"}))
+	}
+	var mu sync.Mutex // guards used and spent
+	used := 0
+	spent := false
+	isSpent := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return spent
+	}
+
 	sem := make(chan struct{}, syncParallelism)
 	var wg sync.WaitGroup
-	for i, call := range calls {
+	for i := range n {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			ret[i] = rem.NewSyncResultWithFalse(core.ErrorToStatus(ctx.Err()))
+			continue
+		}
+		if isSpent() {
+			<-sem
+			ret[i] = tooBig(budget)
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				ret[i] = rem.NewSyncResultWithFalse(core.ErrorToStatus(ctx.Err()))
-				return
-			}
-			reply, err := c.syncOne(ctx, call)
+			defer func() { <-sem }()
+			reply, err := run(ctx, i)
 			if err != nil {
 				ret[i] = rem.NewSyncResultWithFalse(core.ErrorToStatus(err))
 				return
 			}
-			ret[i] = rem.NewSyncResultWithTrue(reply)
+			res := rem.NewSyncResultWithTrue(reply)
+			b, err := core.EncodeToBytes(&res)
+			if err != nil {
+				ret[i] = rem.NewSyncResultWithFalse(core.ErrorToStatus(err))
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if used+len(b) > budget {
+				spent = true
+				ret[i] = tooBig(used + len(b))
+				return
+			}
+			used += len(b)
+			if used >= budget {
+				spent = true
+			}
+			ret[i] = res
 		}()
 	}
 	wg.Wait()
-	budgetSyncReply(ret, rem.MaxSyncReplyBytes)
-	return ret, nil
-}
-
-// budgetSyncReply keeps the batch's reply within budget bytes of encoded
-// results, in call order: a reply that would go past it is replaced with a
-// TooBigError, so the client makes that call on its own (as it does for any
-// call the batch could not answer). Without it, a batch of large chains could
-// outgrow the transport's frame limit (core.RpcMaxSz) and fail as a whole.
-func budgetSyncReply(ret []rem.SyncResult, budget int) {
-	used := 0
-	for i := range ret {
-		ok, err := ret[i].GetOk()
-		if err != nil || !ok {
-			continue
-		}
-		b, err := core.EncodeToBytes(&ret[i])
-		if err == nil && used+len(b) <= budget {
-			used += len(b)
-			continue
-		}
-		if err == nil {
-			err = core.TooBigError{Limit: budget, Actual: used + len(b), Desc: "sync reply budget"}
-		}
-		ret[i] = rem.NewSyncResultWithFalse(core.ErrorToStatus(err))
-	}
+	return ret
 }
 
 func (c *UserClientConn) syncOne(ctx context.Context, call rem.SyncCall) (rem.SyncReply, error) {

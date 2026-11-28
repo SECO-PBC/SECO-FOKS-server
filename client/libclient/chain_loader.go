@@ -69,6 +69,12 @@ func (c *GenericChainLoader) loadExistingChain(m MetaContext) error {
 	if errors.Is(err, core.RowNotFoundError{}) {
 		return nil
 	}
+	// Any other read failure is the caller's to see. Carrying on would load
+	// the zero state and replay the chain from scratch over a DB that may
+	// still hold newer state.
+	if err != nil {
+		return err
+	}
 	err = c.eng.LoadState(state.Payload)
 	if err != nil {
 		return err

@@ -71,15 +71,13 @@ func IsMethodNotFound(err error) bool {
 	return errors.As(err, &mnf)
 }
 
-// Refused reports whether this client's current connection answered o
-// "method not found", so a caller can skip preparing a call that would only
-// be refused again. It connects if need be (the caller is about to call).
-func (c *RpcClient) Refused(ctx context.Context, o OptionalMethod) (bool, error) {
-	xp, err := c.Connect(ctx)
-	if err != nil {
-		return false, err
-	}
-	return c.refused.has(xp, o.name), nil
+// RefusedOver reports whether xp -- a connection of this client's, from
+// Connect -- answered o "method not found", so a caller can skip preparing a
+// call that would only be refused again. It never dials: the caller holds
+// the connection it is about to call over, and a refusal over any other
+// connection says nothing about this one.
+func (c *RpcClient) RefusedOver(xp rpc.Transporter, o OptionalMethod) bool {
+	return c.refused.has(xp, o.name)
 }
 
 // refusals is the set of optional methods one connection's server refused.

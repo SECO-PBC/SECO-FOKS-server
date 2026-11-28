@@ -89,40 +89,77 @@ var syncMethod = core.MustOptionalMethodOf(func(cli rpc.GenericClient) error {
 	return err
 })
 
-// syncRefused reports whether gcli's current connection already said it has
-// no User.sync.
-func syncRefused(m MetaContext, gcli *core.RpcClient) (bool, error) {
-	return gcli.Refused(m.Ctx(), syncMethod)
+// errSyncRefused: this connection's server has no User.sync, so there is
+// nothing to plan for; the loads go out one at a time.
+var errSyncRefused = errors.New("server has no User.sync")
+
+// syncConnection is the user client and the connection a batch goes out
+// over. Connecting is what the operation's first call does anyway (at once
+// over a live connection), so it costs nothing extra online. Offline, its
+// failure is the operation's: every load planned here goes to this same
+// server, so the caller reports it rather than dialing again for its own
+// first call (two connect loops where the operation without a batch has one).
+// errSyncRefused when the connection already said it has no User.sync
+// (core.RpcClient.RefusedOver, which never dials).
+func syncConnection(m MetaContext, au *UserContext) (*core.RpcClient, error) {
+	if au == nil {
+		return nil, core.NoActiveUserError{}
+	}
+	gcli, err := au.UserGCli(m)
+	if err != nil {
+		return nil, err
+	}
+	xp, err := gcli.Connect(m.Ctx())
+	if err != nil {
+		return nil, err
+	}
+	if gcli.RefusedOver(xp, syncMethod) {
+		return nil, errSyncRefused
+	}
+	return gcli, nil
+}
+
+// prefetchOutcome is what a prefetch's failure means for its operation. A
+// transport error reaching the server ends the operation (see
+// syncConnection); anything else just means the loads go out one at a time.
+func prefetchOutcome(m MetaContext, where string, err error) error {
+	switch {
+	case err == nil, errors.Is(err, errSyncRefused):
+		return nil
+	case core.IsTransportError(err):
+		return err
+	default:
+		m.Infow(where, "err", err, "note", "falling back to one load at a time")
+		return nil
+	}
 }
 
 // prefetchForExplore sends User.sync for what an exploration of my teams is
 // about to load, and stores the replies in m's prefetch scope. A no-op
-// without a scope.
-func (t *TeamMinder) prefetchForExplore(m MetaContext) {
+// without a scope. Its error is only that the server can't be reached
+// (syncConnection); the exploration then fails with it, as its own first
+// load would have.
+func (t *TeamMinder) prefetchForExplore(m MetaContext) error {
 	scope := core.PrefetchScopeFromContext(m.Ctx())
 	if scope == nil {
-		return
+		return nil
 	}
-	err := t.prefetchForExploreWithScope(m, scope)
+	gcli, err := syncConnection(m, t.au)
 	if err != nil {
+		return prefetchOutcome(m, "TeamMinder.prefetchForExplore", err)
+	}
+	err = t.prefetchForExploreWithScope(m, scope, gcli)
+	if err != nil {
+		// The batch itself failing (even for a dropped connection) leaves
+		// the loads to go out one at a time: they redial if need be.
 		m.Infow("TeamMinder.prefetchForExplore", "err", err,
 			"note", "falling back to one load at a time")
 	}
+	return nil
 }
 
-func (t *TeamMinder) prefetchForExploreWithScope(m MetaContext, scope *core.PrefetchScope) error {
+func (t *TeamMinder) prefetchForExploreWithScope(m MetaContext, scope *core.PrefetchScope, gcli *core.RpcClient) error {
 	au := t.au
-	if au == nil {
-		return core.NoActiveUserError{}
-	}
-	gcli, err := au.UserGCli(m)
-	if err != nil {
-		return err
-	}
-	// A server without User.sync: nothing to plan for.
-	if refused, err := syncRefused(m, gcli); err != nil || refused {
-		return err
-	}
 
 	var plan []plannedCall
 	add := func(pc plannedCall, err error) error {
@@ -190,30 +227,26 @@ func (t *TeamMinder) prefetchForExploreWithScope(m MetaContext, scope *core.Pref
 
 // prefetchForTeam sends one User.sync for what loading fqt on its own
 // (directLoadTeam) is about to ask for -- my chain and the team's chain --
-// and stores the replies in m's prefetch scope. A no-op without a scope.
-func (t *TeamMinder) prefetchForTeam(m MetaContext, fqt proto.FQTeam) {
+// and stores the replies in m's prefetch scope. A no-op without a scope. Its
+// error is only that the server can't be reached (syncConnection).
+func (t *TeamMinder) prefetchForTeam(m MetaContext, fqt proto.FQTeam) error {
 	scope := core.PrefetchScopeFromContext(m.Ctx())
 	if scope == nil {
-		return
+		return nil
 	}
-	err := t.prefetchForTeamWithScope(m, scope, fqt)
+	gcli, err := syncConnection(m, t.au)
+	if err != nil {
+		return prefetchOutcome(m, "TeamMinder.prefetchForTeam", err)
+	}
+	err = t.prefetchForTeamWithScope(m, scope, gcli, fqt)
 	if err != nil {
 		m.Infow("TeamMinder.prefetchForTeam", "err", err, "note", "loading it one call at a time")
 	}
+	return nil
 }
 
-func (t *TeamMinder) prefetchForTeamWithScope(m MetaContext, scope *core.PrefetchScope, fqt proto.FQTeam) error {
+func (t *TeamMinder) prefetchForTeamWithScope(m MetaContext, scope *core.PrefetchScope, gcli *core.RpcClient, fqt proto.FQTeam) error {
 	au := t.au
-	if au == nil {
-		return core.NoActiveUserError{}
-	}
-	gcli, err := au.UserGCli(m)
-	if err != nil {
-		return err
-	}
-	if refused, err := syncRefused(m, gcli); err != nil || refused {
-		return err
-	}
 	ua, err := planLoadMe(m, au)
 	if err != nil {
 		return err

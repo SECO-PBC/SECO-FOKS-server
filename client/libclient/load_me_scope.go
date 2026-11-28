@@ -5,7 +5,9 @@ package libclient
 
 import (
 	"context"
+
 	"errors"
+	"github.com/foks-proj/go-ctxlog"
 	"sync"
 
 	"github.com/foks-proj/go-foks/lib/core"
@@ -199,9 +201,10 @@ func WithPrefetchScope(m MetaContext) MetaContext {
 }
 
 // DetachFromOperation is m for work its operation leaves running after it
-// returns (a read mark sent once the view is shown, say): not cancelled with
-// the operation, not counted in its RPC stats, and outside its scopes -- no
-// load-me sharing and no prefetched replies. A scope ends with its operation,
+// returns (a read mark sent once the view is shown, say). Its context is a
+// fresh one carrying only m's log tags: not cancelled with the operation,
+// and none of the operation's values -- not its RPC stats, its load-me or
+// prefetch scopes, or anything added later. A scope ends with its operation,
 // even for work the operation started.
 func DetachFromOperation(m MetaContext) MetaContext {
 	ret := m
@@ -210,8 +213,9 @@ func DetachFromOperation(m MetaContext) MetaContext {
 }
 
 func detachContext(ctx context.Context) context.Context {
-	ctx = context.WithoutCancel(ctx)
-	ctx = core.WithoutRpcStats(ctx)
-	ctx = core.WithoutPrefetchScope(ctx)
-	return context.WithValue(ctx, loadMeScopeKey{}, (*loadMeScope)(nil))
+	ret := context.Background()
+	if tags, ok := ctxlog.TagsFromContext(ctx); ok {
+		ret = ctxlog.AddTagsToContext(ret, tags)
+	}
+	return ret
 }

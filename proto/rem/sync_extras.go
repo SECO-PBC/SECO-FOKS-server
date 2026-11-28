@@ -5,8 +5,11 @@ package rem
 
 // MaxSyncCalls is the most calls one User.sync batch may carry. The server
 // refuses a longer batch; a client with more to ask splits it into batches of
-// at most this many, sent at once (docs/rtt-budget.md).
-const MaxSyncCalls = 512
+// at most this many, sent at once (docs/rtt-budget.md). The planner's
+// largest batch is an exploration's: 3 calls plus 2 per team I'm directly
+// in, so 128 covers 62 teams in one batch, and the server holds no more
+// than 128 calls' state for one answer.
+const MaxSyncCalls = 128
 
 // MaxSyncReplyBytes bounds the encoded replies in one User.sync answer. The
 // server answers the calls that fit, in order, and refuses the rest as too

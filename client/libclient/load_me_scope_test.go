@@ -9,7 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/foks-proj/go-ctxlog"
 	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/stretchr/testify/require"
@@ -183,10 +185,21 @@ func TestDetachContextDropsScopes(t *testing.T) {
 	ctx, _ = core.WithRpcStats(ctx)
 	ctx, _ = core.WithPrefetchScope(ctx)
 	ctx = context.WithValue(ctx, loadMeScopeKey{}, &loadMeScope{})
+	type otherKey struct{}
+	ctx = context.WithValue(ctx, otherKey{}, "the operation's")
+	ctx = ctxlog.WithLogTagWithValue(ctx, "op", "tag")
+	ctx, cancelT := context.WithTimeout(ctx, time.Hour)
+	defer cancelT()
 	cancel()
 
 	d := detachContext(ctx)
 	require.NoError(t, d.Err())
+	_, hasDeadline := d.Deadline()
+	require.False(t, hasDeadline)
+	require.Nil(t, d.Value(otherKey{}), "a fresh context: none of the operation's values")
+	tags, ok := ctxlog.TagsFromContext(d)
+	require.True(t, ok)
+	require.Equal(t, "tag", tags["op"], "log tags are kept")
 	require.Nil(t, core.RpcStatsFromContext(d))
 	require.Nil(t, core.PrefetchScopeFromContext(d))
 	s, _ := d.Value(loadMeScopeKey{}).(*loadMeScope)

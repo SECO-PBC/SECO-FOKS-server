@@ -121,6 +121,9 @@ func TestThreadViewByIDOfflineChecksListing(t *testing.T) {
 	tm := sc.teamCfg()
 	offline := &librt.MinderTestHooks{ReadsFail: simTransportErr(), ListFail: simTransportErr()}
 	view := func() (*lcl.RTThreadView, error) {
+		// The head page's mark runs after the view returns (markLater); let
+		// it finish before the hooks it reads change.
+		defer bm.WaitLaterMarks()
 		return bm.GetThreadView(mb, tm, proto.RTAppID_Chat, sc.spec(), 0, 0)
 	}
 	inListing := func() bool {

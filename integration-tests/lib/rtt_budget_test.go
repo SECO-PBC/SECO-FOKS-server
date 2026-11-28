@@ -5,6 +5,8 @@ package lib
 
 import (
 	"context"
+	"maps"
+	"sync"
 	"testing"
 	"time"
 
@@ -410,6 +412,62 @@ func TestListMembershipsOlderServer(t *testing.T) {
 	_, err = tmm.ListMemberships(mi, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, rpcCountsByMethod(stats)["User.sync"], "a new connection asks again")
+}
+
+// countingOffline fails every connection, as CatastrophicNetworkConditions
+// does, and counts the connect loops each address saw.
+type countingOffline struct {
+	mu    sync.Mutex
+	dials map[proto.TCPAddr]int
+}
+
+func (c *countingOffline) FailConnect(a proto.TCPAddr) error {
+	c.mu.Lock()
+	c.dials[a]++
+	c.mu.Unlock()
+	return core.CatastrophicNetworkConditions{On: true}.FailConnect(a)
+}
+
+func (c *countingOffline) counts() map[proto.TCPAddr]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return maps.Clone(c.dials)
+}
+
+// TestOfflineListMembershipsDialsOnce: offline, a cold ListMemberships with
+// a prefetch scope pays one connect loop to the user server -- the batch's
+// connect, whose failure is the exploration's -- not one for the batch and
+// another for the exploration's own first load.
+func TestOfflineListMembershipsDialsOnce(t *testing.T) {
+	tew := testEnvBeta(t)
+	owner := tew.NewTestUser(t)
+	tew.DirectDoubleMerklePokeInTest(t)
+	tew.makeTeamForOwner(t, owner)
+	tew.DirectDoubleMerklePokeInTest(t)
+	home := t.TempDir()
+	coldListMemberships(t, tew, owner, home, 1, nil)
+
+	m := tew.NewClientMetaContextAtHome(t, owner, home)
+	tmm, err := m.G().TeamMinder()
+	require.NoError(t, err)
+	// The client certificate first, while online, so the dials counted are
+	// the listing's own.
+	_, err = m.G().ActiveUser().UserGCli(m)
+	require.NoError(t, err)
+	off := &countingOffline{dials: make(map[proto.TCPAddr]int)}
+	m.G().SetNetworkConditioner(off)
+	defer m.G().SetNetworkConditioner(nil)
+
+	m = libclient.WithPrefetchScope(m)
+	_, err = tmm.ListMemberships(m, nil)
+	require.Error(t, err)
+	require.True(t, core.IsTransportError(err), "%v", err)
+	dials := off.counts()
+	t.Logf("offline ListMemberships dials: %v", dials)
+	require.NotEmpty(t, dials)
+	for addr, n := range dials {
+		require.Equal(t, 1, n, "connect loops to %s", addr)
+	}
 }
 
 // TestBatchedReplyThatFailsFallsBack: a reply fetched ahead that fails the

@@ -25,11 +25,15 @@ always already knows the answer. So:
    the generated client against a client that sends nothing and records the
    call -- the method and argument `RpcClient.Call2` will see -- so the key a
    reply is kept under is the loader's call by construction.
-2. **Batch** them in `User.sync`, at most `rem.MaxSyncCalls` per batch,
-   several batches at once when there are more. The server keeps one
+2. **Batch** them in `User.sync`, at most `rem.MaxSyncCalls` (128) per
+   batch, several batches at once when there are more. The server keeps one
    answer's encoded replies within `rem.MaxSyncReplyBytes` (4 MiB, a quarter
-   of the transport's frame limit), in call order; a reply past it comes back
-   as a too-big error and that call goes out on its own. The server runs each call
+   of the transport's frame limit) as the calls complete: a reply past what
+   is left comes back as a too-big error, and once one has (or the budget is
+   used up) the calls not yet started are not run and come back too big as
+   well, so a batch of large chains never runs or holds much more than the
+   budget (`runSyncBatch`, `TestSyncBudgetStopsStartingCalls`). Each refused
+   call goes out on its own. The server runs each call
    through the handler the client would have called itself, so authorization
    and reply shapes are unchanged, and observes it under that method's name
    (`Telemetry.ObserveCall`). Each result is the call's reply (of the call's
@@ -41,7 +45,10 @@ always already knows the answer. So:
    network reply. A reply fetched ahead can predate state stored since (a
    newer merkle root from a load that went out on its own): a chain load that
    used one and failed runs once more, and the network answers
-   (`BaseChainLoader.runMany`).
+   (`BaseChainLoader.runMany`). Every retry there -- this one and the merkle
+   race's -- starts from a clean slate: the loader's own state and the link
+   hashes, merkle leaves and last hash the failed run accumulated
+   (`BaseChainLoader.resetRun`).
 
 A call planned wrong, refused, failing its checks, or not planned at all (a
 team joined since the last run, one with no reusable view token) goes to the
@@ -51,10 +58,18 @@ their operation.
 A newer method with a fallback is a `core.OptionalMethod`, and its call is
 made under `core.WithOptionalMethod`. A server without it answers "method not
 found" once; the `RpcClient` remembers that for the connection it came over
-(`RpcClient.Refused`) and answers later calls to it locally, so callers fall
-back to the older calls at no extra cost. No time window: a re-dial (which
-may reach an upgraded server) asks again. A method nobody declared optional
-is never answered locally. `User.sync` is the only optional method today.
+and answers later calls to it locally, so callers fall back to the older
+calls at no extra cost. The planner checks the memo for the connection it
+is about to send over (`RpcClient.RefusedOver`, which never dials). No time
+window: a re-dial (which may reach an upgraded server) asks again. A method
+nobody declared optional is never answered locally. `User.sync` is the only
+optional method today.
+
+The batch's connect is the operation's first (`syncConnection`; at once over
+a live connection). Offline its failure is the operation's: the exploration
+returns it, as its own first load would have, rather than dialing again for
+that load -- one connect loop, not two or three
+(`TestOfflineListMembershipsDialsOnce`).
 
 ## Reads that don't need what came before
 
@@ -69,10 +84,15 @@ Viewing the head page marks it read, through the newest message shown. The
 mark goes out only once the page has been built and verified, and after the
 view has returned (`Minder.markLater`), so it costs the view no round trip
 and a page that failed is never marked (`TestThreadViewFailedPageNotMarked`).
-It runs detached from the view's operation (`libclient.DetachFromOperation`):
-not cancelled with it, not in its stats, outside its load-me and prefetch
-scopes. Queued for the outbox drain when offline, as any mark is. History
-pages mark inside the view, as before.
+**Contract:** when `GetThreadView` returns a head page, its read pointer may
+not have moved yet; `Minder.WaitLaterMarks` waits until every such mark has
+been sent or queued (tests use it before reading the pointer or changing
+hooks). The mark runs on a fresh context (`libclient.DetachFromOperation`)
+carrying only the view's log tags: not cancelled with the view, not in its
+stats, none of its values (load-me and prefetch scopes included). Its send
+is bounded by `laterMarkTimeout` (20 s), not the call default; a mark the
+server didn't take in time, or at all while offline, is queued for the
+outbox drain, as any mark is. History pages mark inside the view, as before.
 
 Trade-off, chosen over a combined read-and-mark RPC (tried and dropped): the
 server would mark before the client had opened and checked the messages, so
@@ -92,7 +112,11 @@ stale token, new keys) always reloads. Per operation, never per time window.
 
 ## Not queuing behind another exploration
 
-Explorations run one at a time (`TeamMinder.exploreMu`). On a cold start the
+Explorations run one at a time (`TeamMinder.exploreMu`). "One is running" is
+a count of the loads holding `exploreMu` for round trips (`lockForLoad`: an
+exploration, `DumpMembershipChain`, `refreshUserTML`), not whether the lock
+is taken, which an instant getter (`UserTMW`) or another caller's probe also
+does. On a cold start the
 app lists its teams (an exploration) while the tapped chat reads its thread,
 whose party-cache load of the team found no record and explored too: it
 waited for the whole listing, then explored again. Now the party cache's
@@ -100,13 +124,21 @@ first load of a team, while an exploration is running, loads just that team
 (`loadOnlyThisTeam`: `directLoadTeam`, its two loads -- my chain and the
 team's -- asked for in one batch by `prefetchForTeam`), for that operation
 only; the running exploration indexes it as usual. A team I'm only in
-through another team fails the direct load and explores as before.
+through another team fails the direct load and explores as before. An
+ad-hoc (DM) team is loaded with member names, as an exploration loads it
+(`minMemberLoad`; it is named by its member list), and the same operation's
+skipped refresh never hands back an ad-hoc record without them; the skip
+fills the teamname cache as a load would (`TestAdHocLoadedAloneCarriesNames`).
 The app names teams by name (`name@host`), and a cold process has no name
 index in memory, so resolving the name explored too -- before the read even
 started. While an exploration runs, a name now resolves from the index the
 last exploration persisted (`resolveAndReindex`, `teamResolution`), unchecked,
 and only where the caller checks it: `LoadTeam` checks the loaded team still
-goes by that name (`teamClaimsName`) and otherwise resolves the long way;
+goes by that name (`teamClaimsName`); if it doesn't, or the load fails for
+any reason (without `Refresh`, a team the running exploration has not
+indexed yet is simply not found), it resolves the long way -- waiting for
+the exploration, as without the shortcut
+(`TestUnloadedIndexNameWaitsForExploration`);
 librt's and libkv's per-team minder keys (`ResolveForKey`) are a distinct
 type, `libclient.TeamKey`, that nothing which loads, seals or shows a team
 accepts. Offline resolution keeps its check against the cached snapshot.

@@ -1253,14 +1253,29 @@ func (d *Minder) readThroughChid(
 	explicit bool,
 	dm bool,
 ) error {
-	err := d.attemptReadThrough(m, chid, seq, explicit, dm)
+	return d.readThroughChidSplit(m, m, chid, seq, explicit, dm)
+}
+
+// readThroughChidSplit is readThroughChid with the server attempt under send
+// and the local bookkeeping (queueing or clearing the pending mark) under
+// local, so a send bounded by a short deadline still queues its mark once
+// that deadline has passed.
+func (d *Minder) readThroughChidSplit(
+	send MetaContext,
+	local MetaContext,
+	chid proto.RTChannelID,
+	seq proto.RTMsgSeq,
+	explicit bool,
+	dm bool,
+) error {
+	err := d.attemptReadThrough(send, chid, seq, explicit, dm)
 	if err != nil {
 		if core.IsTransportError(err) {
-			return d.queuePendingMark(m, chid, seq, explicit, dm)
+			return d.queuePendingMark(local, chid, seq, explicit, dm)
 		}
 		return err
 	}
-	return d.clearPendingMarks(m, map[pendingKey]proto.RTMsgSeq{{chid: chid, explicit: explicit}: seq})
+	return d.clearPendingMarks(local, map[pendingKey]proto.RTMsgSeq{{chid: chid, explicit: explicit}: seq})
 }
 
 // SetChannelMuted sets the caller's own push mute in a channel
@@ -2344,6 +2359,14 @@ func (d *Minder) GetThreadPage(
 // their UIDs. Name resolution is team-mediated (closed viewership only lets
 // co-members load each other through the shared team) and best-effort -- a sender
 // that can't be loaded simply has a nil name rather than failing the read.
+//
+// Marking read is asynchronous for the head page (before == 0): the view
+// returns as soon as the page is built and verified, and its read mark goes
+// out afterwards (markLater), bounded by laterMarkTimeout and queued for the
+// outbox drain if the server doesn't take it. So when GetThreadView returns,
+// the read pointer may not have moved yet; WaitLaterMarks waits until it has
+// (or the mark is queued). Older pages (before != 0) are marked before the
+// view returns, as before.
 func (d *Minder) GetThreadView(
 	m MetaContext,
 	team lcl.ConfigTeam,
@@ -2435,24 +2458,37 @@ func (d *Minder) GetThreadView(
 	return &ret, nil
 }
 
+// laterMarkTimeout bounds the server attempt of a mark sent after its view
+// returned (markLater). A mark that can't get through in that time is queued
+// for the outbox drain like any mark the server didn't take; it must not
+// hold a connection attempt open for the whole default call timeout.
+const laterMarkTimeout = 20 * time.Second
+
 // markLater marks chid read through seq once the view that built, verified
 // and showed the page through seq has returned, so the mark costs the view no
-// round trip and is never sent for a page that failed. It runs detached from
-// the view's operation (libclient.DetachFromOperation): not cancelled with
-// it, not in its RPC stats, and outside its load-me and prefetch scopes.
-// Queued for the outbox drain if the server is unreachable, as any mark is.
+// round trip and is never sent for a page that failed. It runs on a fresh
+// context (libclient.DetachFromOperation) carrying only the view's log tags:
+// not cancelled with the view, not in its RPC stats, and outside its load-me
+// and prefetch scopes. Its send is bounded by laterMarkTimeout; a mark the
+// server didn't take (unreachable, or out of time) is queued for the outbox
+// drain, as any mark is.
 func (d *Minder) markLater(m MetaContext, chid proto.RTChannelID, seq proto.RTMsgSeq) {
-	mm := NewMetaContext(libclient.DetachFromOperation(m.Base()))
+	local := NewMetaContext(libclient.DetachFromOperation(m.Base()))
 	d.laterMarks.Add(1)
 	go func() {
 		defer d.laterMarks.Done()
-		if err := d.readThroughChid(mm, chid, seq, false, false); err != nil {
-			mm.Warnw("GetThreadView", "stage", "markLater", "err", err)
+		send, cancel := local.Base().WithContextTimeout(laterMarkTimeout)
+		defer cancel()
+		err := d.readThroughChidSplit(NewMetaContext(send), local, chid, seq, false, false)
+		if err != nil {
+			local.Warnw("GetThreadView", "stage", "markLater", "err", err)
 		}
 	}()
 }
 
-// WaitLaterMarks waits for the marks markLater sent. For tests.
+// WaitLaterMarks waits until every mark markLater started has been sent or
+// queued: GetThreadView returns before its head page's read pointer moves, so
+// a caller (a test) that needs to observe the moved pointer waits here first.
 func (d *Minder) WaitLaterMarks() {
 	d.laterMarks.Wait()
 }
