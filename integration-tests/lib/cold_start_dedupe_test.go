@@ -12,6 +12,7 @@ import (
 	"github.com/foks-proj/go-foks/lib/team"
 	"github.com/foks-proj/go-foks/proto/lcl"
 	proto "github.com/foks-proj/go-foks/proto/lib"
+	"github.com/foks-proj/go-foks/proto/rem"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,7 +39,12 @@ func TestLoadMeScopeEndsWithOperation(t *testing.T) {
 	tmm, err := cm.G().TeamMinder()
 	require.NoError(t, err)
 	cm, stats := cm.WithRpcStats()
-	loads := func() int { return rpcCountsByMethod(stats)["User.loadUserChain"] }
+	// My chain comes either on its own or inside the listing's batched
+	// User.sync (which always plans it); either way it is a fresh load.
+	loads := func() int {
+		c := rpcCountsByMethod(stats)
+		return c["User.loadUserChain"] + c["User.sync"]
+	}
 
 	_, err = tmm.ListMemberships(cm, nil)
 	require.NoError(t, err)
@@ -63,14 +69,27 @@ func TestThreadViewByIDListsNoChannels(t *testing.T) {
 	_, err = r.minder.Send(r.mb, tm, proto.RTAppID_Chat, spc, []byte("hello"))
 	require.NoError(t, err)
 
+	// The head page's mark goes out after the view returns (markLater), so
+	// it is caught here rather than in the view's stats.
+	var marks []rem.RTReadThroughArg
+	r.minder.SetTestHooks(&librt.MinderTestHooks{
+		ReadThroughRPC: func(_ librt.MetaContext, arg rem.RTReadThroughArg) error {
+			marks = append(marks, arg)
+			return nil
+		},
+	})
 	base, stats := r.mb.Base().WithRpcStats()
 	mb := librt.NewMetaContext(base)
 	view, err := r.minder.GetThreadView(mb, tm, proto.RTAppID_Chat, spc, 0, 0)
 	require.NoError(t, err)
 	require.Len(t, view.Msgs, 1)
+	r.minder.WaitLaterMarks()
+	r.minder.SetTestHooks(nil)
 	by := rpcCountsByMethod(stats)
 	require.Zero(t, by["RealTime.rtListAllChannelsForTeam"])
-	require.Equal(t, 1, by["RealTime.rtReadThrough"], "the view still marks its page read")
+	require.Len(t, marks, 1, "the view still marks its page read")
+	require.Equal(t, *chid, marks[0].ChannelID)
+	require.Equal(t, view.Msgs[0].Seq, marks[0].Seq)
 
 	// The message is cached now; a history read of it may never reach the
 	// server, so it keeps the listing.
@@ -102,6 +121,9 @@ func TestThreadViewByIDOfflineChecksListing(t *testing.T) {
 	tm := sc.teamCfg()
 	offline := &librt.MinderTestHooks{ReadsFail: simTransportErr(), ListFail: simTransportErr()}
 	view := func() (*lcl.RTThreadView, error) {
+		// The head page's mark runs after the view returns (markLater); let
+		// it finish before the hooks it reads change.
+		defer bm.WaitLaterMarks()
 		return bm.GetThreadView(mb, tm, proto.RTAppID_Chat, sc.spec(), 0, 0)
 	}
 	inListing := func() bool {

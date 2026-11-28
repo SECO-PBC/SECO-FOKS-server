@@ -1367,25 +1367,10 @@ func (l *TeamLoader) loadExistingTeam(m MetaContext) error {
 	return nil
 }
 
-func (l *TeamLoader) loadTeamFromServer(m MetaContext) error {
-	ma, err := l.probe.MerkleAgent(m)
-	if err != nil {
-		return err
-	}
-	l.msess = merkle.NewSession(ma)
-	err = l.msess.Init(m.Ctx())
-	if err != nil {
-		return err
-	}
-
-	toktyp, err := l.tok.GetT()
-	if err != nil {
-		return err
-	}
-	if toktyp == rem.TokenType_None && !l.Arg.TestSkipArgCheck {
-		return core.InternalError("expected a token to load the team with")
-	}
-
+// serverArg is the loadTeamChain call this loader makes, given its token and
+// the state it read locally. Split out so a batched load can ask for it ahead
+// of time.
+func (l *TeamLoader) serverArg() rem.LoadTeamChainArg {
 	arg := rem.LoadTeamChainArg{
 		Team:  l.Arg.Team,
 		Tok:   l.tok,
@@ -1410,6 +1395,29 @@ func (l *TeamLoader) loadTeamFromServer(m MetaContext) error {
 	if l.Arg.MemberLoad >= MemberLoadNames && (l.existing == nil || len(l.existing.RemoteViewTokens) == 0) {
 		arg.LoadRemoteViewTokens = true
 	}
+	return arg
+}
+
+func (l *TeamLoader) loadTeamFromServer(m MetaContext) error {
+	ma, err := l.probe.MerkleAgent(m)
+	if err != nil {
+		return err
+	}
+	l.msess = merkle.NewSession(ma)
+	err = l.msess.Init(m.Ctx())
+	if err != nil {
+		return err
+	}
+
+	toktyp, err := l.tok.GetT()
+	if err != nil {
+		return err
+	}
+	if toktyp == rem.TokenType_None && !l.Arg.TestSkipArgCheck {
+		return core.InternalError("expected a token to load the team with")
+	}
+
+	arg := l.serverArg()
 	res, err := l.rpcLoader.LoadTeamChain(m.Ctx(), arg)
 	if err != nil {
 		return err

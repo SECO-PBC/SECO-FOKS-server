@@ -69,12 +69,32 @@ func (c *GenericChainLoader) loadExistingChain(m MetaContext) error {
 	if errors.Is(err, core.RowNotFoundError{}) {
 		return nil
 	}
+	// Any other read failure is the caller's to see. Carrying on would load
+	// the zero state and replay the chain from scratch over a DB that may
+	// still hold newer state.
+	if err != nil {
+		return err
+	}
 	err = c.eng.LoadState(state.Payload)
 	if err != nil {
 		return err
 	}
 	c.existing = &state
 	return nil
+}
+
+// serverArg is the chain load this loader asks for, given the state it read
+// locally. Split out so a batched load can ask for it ahead of time.
+func (c *GenericChainLoader) serverArg() rem.LoadGenericChainArg {
+	arg := rem.LoadGenericChainArg{
+		Eid:   c.eid,
+		Typ:   c.eng.Type(),
+		Start: proto.ChainEldestSeqno,
+	}
+	if c.existing != nil {
+		arg.Start = c.existing.Tail.Base.Seqno + 1
+	}
+	return arg
 }
 
 func (c *GenericChainLoader) loadChainFromServer(m MetaContext) error {
@@ -88,15 +108,7 @@ func (c *GenericChainLoader) loadChainFromServer(m MetaContext) error {
 	if err != nil {
 		return err
 	}
-	arg := rem.LoadGenericChainArg{
-		Eid:   c.eid,
-		Typ:   c.eng.Type(),
-		Start: proto.ChainEldestSeqno,
-	}
-	if c.existing != nil {
-		arg.Start = c.existing.Tail.Base.Seqno + 1
-	}
-	res, err := c.eng.Fetch(m, arg)
+	res, err := c.eng.Fetch(m, c.serverArg())
 	if err != nil {
 		return err
 	}

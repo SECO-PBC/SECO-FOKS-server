@@ -567,22 +567,14 @@ func (u *UserLoader) connectHost(m MetaContext) error {
 	return nil
 }
 
-func (u *UserLoader) loadUserFromServer(m MetaContext) error {
+// serverArg is the loadUserChain call this loader makes, given what it
+// already holds locally. Split out so a batched load can ask for exactly this
+// call ahead of time (PlanLoadMe).
+func (u *UserLoader) serverArg() (rem.LoadUserChainArg, error) {
 	var tok *proto.PermissionToken
 
 	if u.arg.Host != nil {
 		tok = &u.arg.Host.Tok
-	}
-
-	ma, err := u.probe.MerkleAgent(m)
-	if err != nil {
-		return err
-	}
-
-	u.msess = merkle.NewSession(ma)
-	err = u.msess.Init(m.Ctx())
-	if err != nil {
-		return err
 	}
 
 	arg := rem.LoadUserChainArg{
@@ -597,7 +589,7 @@ func (u *UserLoader) loadUserFromServer(m MetaContext) error {
 	case u.arg.LoadMode == LoadModeOpenOthers:
 		auth = rem.NewLoadUserChainAuthWithOpenvhost()
 	case tok != nil && tok.IsZero():
-		return core.InternalError("zero'ed permissions token passed through loader is a bug")
+		return arg, core.InternalError("zero'ed permissions token passed through loader is a bug")
 	case tok != nil && !u.arg.LoadMode.IsSelf():
 		auth = rem.NewLoadUserChainAuthWithToken(*tok)
 	case tok != nil && u.arg.LoadMode.IsSelf():
@@ -616,6 +608,25 @@ func (u *UserLoader) loadUserFromServer(m MetaContext) error {
 			N: u.existing.Username.B.Name,
 			S: u.existing.Username.S + 1,
 		}
+	}
+	return arg, nil
+}
+
+func (u *UserLoader) loadUserFromServer(m MetaContext) error {
+	ma, err := u.probe.MerkleAgent(m)
+	if err != nil {
+		return err
+	}
+
+	u.msess = merkle.NewSession(ma)
+	err = u.msess.Init(m.Ctx())
+	if err != nil {
+		return err
+	}
+
+	arg, err := u.serverArg()
+	if err != nil {
+		return err
 	}
 	res, err := u.rpcLoader.LoadUserChain(m.Ctx(), arg)
 	if err != nil {

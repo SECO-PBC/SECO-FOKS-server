@@ -1615,6 +1615,668 @@ func (y *YubiEncryptedManagementKey) Decode(dec rpc.Decoder) error {
 
 func (y *YubiEncryptedManagementKey) Bytes() []byte { return nil }
 
+type SyncCallType int
+
+const (
+	SyncCallType_LoadUserChain           SyncCallType = 1
+	SyncCallType_LoadGenericChain        SyncCallType = 2
+	SyncCallType_TeamListServerTrust     SyncCallType = 3
+	SyncCallType_LoadTeamChain           SyncCallType = 4
+	SyncCallType_LoadTeamMembershipChain SyncCallType = 5
+)
+
+var SyncCallTypeMap = map[string]SyncCallType{
+	"LoadUserChain":           1,
+	"LoadGenericChain":        2,
+	"TeamListServerTrust":     3,
+	"LoadTeamChain":           4,
+	"LoadTeamMembershipChain": 5,
+}
+var SyncCallTypeRevMap = map[SyncCallType]string{
+	1: "LoadUserChain",
+	2: "LoadGenericChain",
+	3: "TeamListServerTrust",
+	4: "LoadTeamChain",
+	5: "LoadTeamMembershipChain",
+}
+
+type SyncCallTypeInternal__ SyncCallType
+
+func (s SyncCallTypeInternal__) Import() SyncCallType {
+	return SyncCallType(s)
+}
+func (s SyncCallType) Export() *SyncCallTypeInternal__ {
+	return ((*SyncCallTypeInternal__)(&s))
+}
+
+type SyncLoadGenericChainArg struct {
+	Eid   lib.EntityID
+	Typ   lib.ChainType
+	Start lib.Seqno
+}
+type SyncLoadGenericChainArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Eid     *lib.EntityIDInternal__
+	Typ     *lib.ChainTypeInternal__
+	Start   *lib.SeqnoInternal__
+}
+
+func (s SyncLoadGenericChainArgInternal__) Import() SyncLoadGenericChainArg {
+	return SyncLoadGenericChainArg{
+		Eid: (func(x *lib.EntityIDInternal__) (ret lib.EntityID) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(s.Eid),
+		Typ: (func(x *lib.ChainTypeInternal__) (ret lib.ChainType) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(s.Typ),
+		Start: (func(x *lib.SeqnoInternal__) (ret lib.Seqno) {
+			if x == nil {
+				return ret
+			}
+			return x.Import()
+		})(s.Start),
+	}
+}
+func (s SyncLoadGenericChainArg) Export() *SyncLoadGenericChainArgInternal__ {
+	return &SyncLoadGenericChainArgInternal__{
+		Eid:   s.Eid.Export(),
+		Typ:   s.Typ.Export(),
+		Start: s.Start.Export(),
+	}
+}
+func (s *SyncLoadGenericChainArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(s.Export())
+}
+
+func (s *SyncLoadGenericChainArg) Decode(dec rpc.Decoder) error {
+	var tmp SyncLoadGenericChainArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*s = tmp.Import()
+	return nil
+}
+
+func (s *SyncLoadGenericChainArg) Bytes() []byte { return nil }
+
+type SyncCall struct {
+	T     SyncCallType
+	F_1__ *LoadUserChainArg           `json:"f1,omitempty"`
+	F_2__ *SyncLoadGenericChainArg    `json:"f2,omitempty"`
+	F_4__ *LoadTeamChainArg           `json:"f4,omitempty"`
+	F_5__ *LoadTeamMembershipChainArg `json:"f5,omitempty"`
+}
+type SyncCallInternal__ struct {
+	_struct  struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	T        SyncCallType
+	Switch__ SyncCallInternalSwitch__
+}
+type SyncCallInternalSwitch__ struct {
+	_struct struct{}                              `codec:",omitempty"` //lint:ignore U1000 msgpack internal field
+	F_1__   *LoadUserChainArgInternal__           `codec:"1"`
+	F_2__   *SyncLoadGenericChainArgInternal__    `codec:"2"`
+	F_4__   *LoadTeamChainArgInternal__           `codec:"4"`
+	F_5__   *LoadTeamMembershipChainArgInternal__ `codec:"5"`
+}
+
+func (s SyncCall) GetT() (ret SyncCallType, err error) {
+	switch s.T {
+	case SyncCallType_LoadUserChain:
+		if s.F_1__ == nil {
+			return ret, errors.New("unexpected nil case for F_1__")
+		}
+	case SyncCallType_LoadGenericChain:
+		if s.F_2__ == nil {
+			return ret, errors.New("unexpected nil case for F_2__")
+		}
+	case SyncCallType_TeamListServerTrust:
+		break
+	case SyncCallType_LoadTeamChain:
+		if s.F_4__ == nil {
+			return ret, errors.New("unexpected nil case for F_4__")
+		}
+	case SyncCallType_LoadTeamMembershipChain:
+		if s.F_5__ == nil {
+			return ret, errors.New("unexpected nil case for F_5__")
+		}
+	}
+	return s.T, nil
+}
+func (s SyncCall) Loaduserchain() LoadUserChainArg {
+	if s.F_1__ == nil {
+		panic("unexpected nil case; should have been checked")
+	}
+	if s.T != SyncCallType_LoadUserChain {
+		panic(fmt.Sprintf("unexpected switch value (%v) when Loaduserchain is called", s.T))
+	}
+	return *s.F_1__
+}
+func (s SyncCall) Loadgenericchain() SyncLoadGenericChainArg {
+	if s.F_2__ == nil {
+		panic("unexpected nil case; should have been checked")
+	}
+	if s.T != SyncCallType_LoadGenericChain {
+		panic(fmt.Sprintf("unexpected switch value (%v) when Loadgenericchain is called", s.T))
+	}
+	return *s.F_2__
+}
+func (s SyncCall) Loadteamchain() LoadTeamChainArg {
+	if s.F_4__ == nil {
+		panic("unexpected nil case; should have been checked")
+	}
+	if s.T != SyncCallType_LoadTeamChain {
+		panic(fmt.Sprintf("unexpected switch value (%v) when Loadteamchain is called", s.T))
+	}
+	return *s.F_4__
+}
+func (s SyncCall) Loadteammembershipchain() LoadTeamMembershipChainArg {
+	if s.F_5__ == nil {
+		panic("unexpected nil case; should have been checked")
+	}
+	if s.T != SyncCallType_LoadTeamMembershipChain {
+		panic(fmt.Sprintf("unexpected switch value (%v) when Loadteammembershipchain is called", s.T))
+	}
+	return *s.F_5__
+}
+func NewSyncCallWithLoaduserchain(v LoadUserChainArg) SyncCall {
+	return SyncCall{
+		T:     SyncCallType_LoadUserChain,
+		F_1__: &v,
+	}
+}
+func NewSyncCallWithLoadgenericchain(v SyncLoadGenericChainArg) SyncCall {
+	return SyncCall{
+		T:     SyncCallType_LoadGenericChain,
+		F_2__: &v,
+	}
+}
+func NewSyncCallWithTeamlistservertrust() SyncCall {
+	return SyncCall{
+		T: SyncCallType_TeamListServerTrust,
+	}
+}
+func NewSyncCallWithLoadteamchain(v LoadTeamChainArg) SyncCall {
+	return SyncCall{
+		T:     SyncCallType_LoadTeamChain,
+		F_4__: &v,
+	}
+}
+func NewSyncCallWithLoadteammembershipchain(v LoadTeamMembershipChainArg) SyncCall {
+	return SyncCall{
+		T:     SyncCallType_LoadTeamMembershipChain,
+		F_5__: &v,
+	}
+}
+func (s SyncCallInternal__) Import() SyncCall {
+	return SyncCall{
+		T: s.T,
+		F_1__: (func(x *LoadUserChainArgInternal__) *LoadUserChainArg {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *LoadUserChainArgInternal__) (ret LoadUserChainArg) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(s.Switch__.F_1__),
+		F_2__: (func(x *SyncLoadGenericChainArgInternal__) *SyncLoadGenericChainArg {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *SyncLoadGenericChainArgInternal__) (ret SyncLoadGenericChainArg) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(s.Switch__.F_2__),
+		F_4__: (func(x *LoadTeamChainArgInternal__) *LoadTeamChainArg {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *LoadTeamChainArgInternal__) (ret LoadTeamChainArg) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(s.Switch__.F_4__),
+		F_5__: (func(x *LoadTeamMembershipChainArgInternal__) *LoadTeamMembershipChainArg {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *LoadTeamMembershipChainArgInternal__) (ret LoadTeamMembershipChainArg) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(s.Switch__.F_5__),
+	}
+}
+func (s SyncCall) Export() *SyncCallInternal__ {
+	return &SyncCallInternal__{
+		T: s.T,
+		Switch__: SyncCallInternalSwitch__{
+			F_1__: (func(x *LoadUserChainArg) *LoadUserChainArgInternal__ {
+				if x == nil {
+					return nil
+				}
+				return (*x).Export()
+			})(s.F_1__),
+			F_2__: (func(x *SyncLoadGenericChainArg) *SyncLoadGenericChainArgInternal__ {
+				if x == nil {
+					return nil
+				}
+				return (*x).Export()
+			})(s.F_2__),
+			F_4__: (func(x *LoadTeamChainArg) *LoadTeamChainArgInternal__ {
+				if x == nil {
+					return nil
+				}
+				return (*x).Export()
+			})(s.F_4__),
+			F_5__: (func(x *LoadTeamMembershipChainArg) *LoadTeamMembershipChainArgInternal__ {
+				if x == nil {
+					return nil
+				}
+				return (*x).Export()
+			})(s.F_5__),
+		},
+	}
+}
+func (s *SyncCall) Encode(enc rpc.Encoder) error {
+	return enc.Encode(s.Export())
+}
+
+func (s *SyncCall) Decode(dec rpc.Decoder) error {
+	var tmp SyncCallInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*s = tmp.Import()
+	return nil
+}
+
+func (s *SyncCall) Bytes() []byte { return nil }
+
+type SyncReply struct {
+	T     SyncCallType
+	F_1__ *UserChain     `json:"f1,omitempty"`
+	F_2__ *GenericChain  `json:"f2,omitempty"`
+	F_3__ *LocalTeamList `json:"f3,omitempty"`
+	F_4__ *TeamChain     `json:"f4,omitempty"`
+	F_5__ *GenericChain  `json:"f5,omitempty"`
+}
+type SyncReplyInternal__ struct {
+	_struct  struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	T        SyncCallType
+	Switch__ SyncReplyInternalSwitch__
+}
+type SyncReplyInternalSwitch__ struct {
+	_struct struct{}                 `codec:",omitempty"` //lint:ignore U1000 msgpack internal field
+	F_1__   *UserChainInternal__     `codec:"1"`
+	F_2__   *GenericChainInternal__  `codec:"2"`
+	F_3__   *LocalTeamListInternal__ `codec:"3"`
+	F_4__   *TeamChainInternal__     `codec:"4"`
+	F_5__   *GenericChainInternal__  `codec:"5"`
+}
+
+func (s SyncReply) GetT() (ret SyncCallType, err error) {
+	switch s.T {
+	case SyncCallType_LoadUserChain:
+		if s.F_1__ == nil {
+			return ret, errors.New("unexpected nil case for F_1__")
+		}
+	case SyncCallType_LoadGenericChain:
+		if s.F_2__ == nil {
+			return ret, errors.New("unexpected nil case for F_2__")
+		}
+	case SyncCallType_TeamListServerTrust:
+		if s.F_3__ == nil {
+			return ret, errors.New("unexpected nil case for F_3__")
+		}
+	case SyncCallType_LoadTeamChain:
+		if s.F_4__ == nil {
+			return ret, errors.New("unexpected nil case for F_4__")
+		}
+	case SyncCallType_LoadTeamMembershipChain:
+		if s.F_5__ == nil {
+			return ret, errors.New("unexpected nil case for F_5__")
+		}
+	}
+	return s.T, nil
+}
+func (s SyncReply) Loaduserchain() UserChain {
+	if s.F_1__ == nil {
+		panic("unexpected nil case; should have been checked")
+	}
+	if s.T != SyncCallType_LoadUserChain {
+		panic(fmt.Sprintf("unexpected switch value (%v) when Loaduserchain is called", s.T))
+	}
+	return *s.F_1__
+}
+func (s SyncReply) Loadgenericchain() GenericChain {
+	if s.F_2__ == nil {
+		panic("unexpected nil case; should have been checked")
+	}
+	if s.T != SyncCallType_LoadGenericChain {
+		panic(fmt.Sprintf("unexpected switch value (%v) when Loadgenericchain is called", s.T))
+	}
+	return *s.F_2__
+}
+func (s SyncReply) Teamlistservertrust() LocalTeamList {
+	if s.F_3__ == nil {
+		panic("unexpected nil case; should have been checked")
+	}
+	if s.T != SyncCallType_TeamListServerTrust {
+		panic(fmt.Sprintf("unexpected switch value (%v) when Teamlistservertrust is called", s.T))
+	}
+	return *s.F_3__
+}
+func (s SyncReply) Loadteamchain() TeamChain {
+	if s.F_4__ == nil {
+		panic("unexpected nil case; should have been checked")
+	}
+	if s.T != SyncCallType_LoadTeamChain {
+		panic(fmt.Sprintf("unexpected switch value (%v) when Loadteamchain is called", s.T))
+	}
+	return *s.F_4__
+}
+func (s SyncReply) Loadteammembershipchain() GenericChain {
+	if s.F_5__ == nil {
+		panic("unexpected nil case; should have been checked")
+	}
+	if s.T != SyncCallType_LoadTeamMembershipChain {
+		panic(fmt.Sprintf("unexpected switch value (%v) when Loadteammembershipchain is called", s.T))
+	}
+	return *s.F_5__
+}
+func NewSyncReplyWithLoaduserchain(v UserChain) SyncReply {
+	return SyncReply{
+		T:     SyncCallType_LoadUserChain,
+		F_1__: &v,
+	}
+}
+func NewSyncReplyWithLoadgenericchain(v GenericChain) SyncReply {
+	return SyncReply{
+		T:     SyncCallType_LoadGenericChain,
+		F_2__: &v,
+	}
+}
+func NewSyncReplyWithTeamlistservertrust(v LocalTeamList) SyncReply {
+	return SyncReply{
+		T:     SyncCallType_TeamListServerTrust,
+		F_3__: &v,
+	}
+}
+func NewSyncReplyWithLoadteamchain(v TeamChain) SyncReply {
+	return SyncReply{
+		T:     SyncCallType_LoadTeamChain,
+		F_4__: &v,
+	}
+}
+func NewSyncReplyWithLoadteammembershipchain(v GenericChain) SyncReply {
+	return SyncReply{
+		T:     SyncCallType_LoadTeamMembershipChain,
+		F_5__: &v,
+	}
+}
+func (s SyncReplyInternal__) Import() SyncReply {
+	return SyncReply{
+		T: s.T,
+		F_1__: (func(x *UserChainInternal__) *UserChain {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *UserChainInternal__) (ret UserChain) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(s.Switch__.F_1__),
+		F_2__: (func(x *GenericChainInternal__) *GenericChain {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *GenericChainInternal__) (ret GenericChain) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(s.Switch__.F_2__),
+		F_3__: (func(x *LocalTeamListInternal__) *LocalTeamList {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *LocalTeamListInternal__) (ret LocalTeamList) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(s.Switch__.F_3__),
+		F_4__: (func(x *TeamChainInternal__) *TeamChain {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *TeamChainInternal__) (ret TeamChain) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(s.Switch__.F_4__),
+		F_5__: (func(x *GenericChainInternal__) *GenericChain {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *GenericChainInternal__) (ret GenericChain) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(s.Switch__.F_5__),
+	}
+}
+func (s SyncReply) Export() *SyncReplyInternal__ {
+	return &SyncReplyInternal__{
+		T: s.T,
+		Switch__: SyncReplyInternalSwitch__{
+			F_1__: (func(x *UserChain) *UserChainInternal__ {
+				if x == nil {
+					return nil
+				}
+				return (*x).Export()
+			})(s.F_1__),
+			F_2__: (func(x *GenericChain) *GenericChainInternal__ {
+				if x == nil {
+					return nil
+				}
+				return (*x).Export()
+			})(s.F_2__),
+			F_3__: (func(x *LocalTeamList) *LocalTeamListInternal__ {
+				if x == nil {
+					return nil
+				}
+				return (*x).Export()
+			})(s.F_3__),
+			F_4__: (func(x *TeamChain) *TeamChainInternal__ {
+				if x == nil {
+					return nil
+				}
+				return (*x).Export()
+			})(s.F_4__),
+			F_5__: (func(x *GenericChain) *GenericChainInternal__ {
+				if x == nil {
+					return nil
+				}
+				return (*x).Export()
+			})(s.F_5__),
+		},
+	}
+}
+func (s *SyncReply) Encode(enc rpc.Encoder) error {
+	return enc.Encode(s.Export())
+}
+
+func (s *SyncReply) Decode(dec rpc.Decoder) error {
+	var tmp SyncReplyInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*s = tmp.Import()
+	return nil
+}
+
+func (s *SyncReply) Bytes() []byte { return nil }
+
+type SyncResult struct {
+	Ok    bool
+	F_1__ *SyncReply  `json:"f1,omitempty"`
+	F_0__ *lib.Status `json:"f0,omitempty"`
+}
+type SyncResultInternal__ struct {
+	_struct  struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Ok       bool
+	Switch__ SyncResultInternalSwitch__
+}
+type SyncResultInternalSwitch__ struct {
+	_struct struct{}              `codec:",omitempty"` //lint:ignore U1000 msgpack internal field
+	F_1__   *SyncReplyInternal__  `codec:"1"`
+	F_0__   *lib.StatusInternal__ `codec:"0"`
+}
+
+func (s SyncResult) GetOk() (ret bool, err error) {
+	switch s.Ok {
+	case true:
+		if s.F_1__ == nil {
+			return ret, errors.New("unexpected nil case for F_1__")
+		}
+	case false:
+		if s.F_0__ == nil {
+			return ret, errors.New("unexpected nil case for F_0__")
+		}
+	}
+	return s.Ok, nil
+}
+func (s SyncResult) True() SyncReply {
+	if s.F_1__ == nil {
+		panic("unexpected nil case; should have been checked")
+	}
+	if !s.Ok {
+		panic(fmt.Sprintf("unexpected switch value (%v) when True is called", s.Ok))
+	}
+	return *s.F_1__
+}
+func (s SyncResult) False() lib.Status {
+	if s.F_0__ == nil {
+		panic("unexpected nil case; should have been checked")
+	}
+	if s.Ok {
+		panic(fmt.Sprintf("unexpected switch value (%v) when False is called", s.Ok))
+	}
+	return *s.F_0__
+}
+func NewSyncResultWithTrue(v SyncReply) SyncResult {
+	return SyncResult{
+		Ok:    true,
+		F_1__: &v,
+	}
+}
+func NewSyncResultWithFalse(v lib.Status) SyncResult {
+	return SyncResult{
+		Ok:    false,
+		F_0__: &v,
+	}
+}
+func (s SyncResultInternal__) Import() SyncResult {
+	return SyncResult{
+		Ok: s.Ok,
+		F_1__: (func(x *SyncReplyInternal__) *SyncReply {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *SyncReplyInternal__) (ret SyncReply) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(s.Switch__.F_1__),
+		F_0__: (func(x *lib.StatusInternal__) *lib.Status {
+			if x == nil {
+				return nil
+			}
+			tmp := (func(x *lib.StatusInternal__) (ret lib.Status) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(x)
+			return &tmp
+		})(s.Switch__.F_0__),
+	}
+}
+func (s SyncResult) Export() *SyncResultInternal__ {
+	return &SyncResultInternal__{
+		Ok: s.Ok,
+		Switch__: SyncResultInternalSwitch__{
+			F_1__: (func(x *SyncReply) *SyncReplyInternal__ {
+				if x == nil {
+					return nil
+				}
+				return (*x).Export()
+			})(s.F_1__),
+			F_0__: (func(x *lib.Status) *lib.StatusInternal__ {
+				if x == nil {
+					return nil
+				}
+				return (*x).Export()
+			})(s.F_0__),
+		},
+	}
+}
+func (s *SyncResult) Encode(enc rpc.Encoder) error {
+	return enc.Encode(s.Export())
+}
+
+func (s *SyncResult) Decode(dec rpc.Decoder) error {
+	var tmp SyncResultInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*s = tmp.Import()
+	return nil
+}
+
+func (s *SyncResult) Bytes() []byte { return nil }
+
 var UserProtocolID rpc.ProtocolUniqueID = rpc.ProtocolUniqueID(0x823f0899)
 
 type PingArg struct {
@@ -3100,6 +3762,66 @@ func (r *ReportClientAnalyticsArg) Decode(dec rpc.Decoder) error {
 
 func (r *ReportClientAnalyticsArg) Bytes() []byte { return nil }
 
+type SyncArg struct {
+	Calls []SyncCall
+}
+type SyncArgInternal__ struct {
+	_struct struct{} `codec:",toarray"` //lint:ignore U1000 msgpack internal field
+	Calls   *[](*SyncCallInternal__)
+}
+
+func (s SyncArgInternal__) Import() SyncArg {
+	return SyncArg{
+		Calls: (func(x *[](*SyncCallInternal__)) (ret []SyncCall) {
+			if x == nil || len(*x) == 0 {
+				return nil
+			}
+			ret = make([]SyncCall, len(*x))
+			for k, v := range *x {
+				if v == nil {
+					continue
+				}
+				ret[k] = (func(x *SyncCallInternal__) (ret SyncCall) {
+					if x == nil {
+						return ret
+					}
+					return x.Import()
+				})(v)
+			}
+			return ret
+		})(s.Calls),
+	}
+}
+func (s SyncArg) Export() *SyncArgInternal__ {
+	return &SyncArgInternal__{
+		Calls: (func(x []SyncCall) *[](*SyncCallInternal__) {
+			if len(x) == 0 {
+				return nil
+			}
+			ret := make([](*SyncCallInternal__), len(x))
+			for k, v := range x {
+				ret[k] = v.Export()
+			}
+			return &ret
+		})(s.Calls),
+	}
+}
+func (s *SyncArg) Encode(enc rpc.Encoder) error {
+	return enc.Encode(s.Export())
+}
+
+func (s *SyncArg) Decode(dec rpc.Decoder) error {
+	var tmp SyncArgInternal__
+	err := dec.Decode(&tmp)
+	if err != nil {
+		return err
+	}
+	*s = tmp.Import()
+	return nil
+}
+
+func (s *SyncArg) Bytes() []byte { return nil }
+
 type UserInterface interface {
 	Ping(context.Context) (lib.UID, error)
 	SetPassphrase(context.Context, SetPassphraseArg) error
@@ -3132,6 +3854,7 @@ type UserInterface interface {
 	GetAllYubiManagementKeys(context.Context) ([]YubiEncryptedManagementKey, error)
 	NewInviteCode(context.Context) (InviteCode, error)
 	ReportClientAnalytics(context.Context, lib.ClientAnalyticsBatch) error
+	Sync(context.Context, []SyncCall) ([]SyncResult, error)
 	ErrorWrapper() func(error) lib.Status
 	CheckArgHeader(ctx context.Context, h lib.Header) error
 	MakeResHeader() lib.Header
@@ -3879,6 +4602,47 @@ func (c UserClient) ReportClientAnalytics(ctx context.Context, batch lib.ClientA
 			return
 		}
 	}
+	return
+}
+func (c UserClient) Sync(ctx context.Context, calls []SyncCall) (res []SyncResult, err error) {
+	arg := SyncArg{
+		Calls: calls,
+	}
+	warg := &rpc.DataWrap[lib.Header, *SyncArgInternal__]{
+		Data: arg.Export(),
+	}
+	if c.MakeArgHeader != nil {
+		warg.Header = c.MakeArgHeader()
+	}
+	var tmp rpc.DataWrap[lib.Header, [](*SyncResultInternal__)]
+	err = c.Cli.Call2(ctx, rpc.NewMethodV2(UserProtocolID, 202, "User.sync"), warg, &tmp, 0*time.Millisecond, userErrorUnwrapperAdapter{h: c.ErrorUnwrapper})
+	if err != nil {
+		return
+	}
+	if c.CheckResHeader != nil {
+		err = c.CheckResHeader(ctx, tmp.Header)
+		if err != nil {
+			return
+		}
+	}
+	res = (func(x *[](*SyncResultInternal__)) (ret []SyncResult) {
+		if x == nil || len(*x) == 0 {
+			return nil
+		}
+		ret = make([]SyncResult, len(*x))
+		for k, v := range *x {
+			if v == nil {
+				continue
+			}
+			ret[k] = (func(x *SyncResultInternal__) (ret SyncResult) {
+				if x == nil {
+					return ret
+				}
+				return x.Import()
+			})(v)
+		}
+		return ret
+	})(&tmp.Data)
 	return
 }
 func UserProtocol(i UserInterface) rpc.ProtocolV2 {
@@ -4774,6 +5538,47 @@ func UserProtocol(i UserInterface) rpc.ProtocolV2 {
 					},
 				},
 				Name: "reportClientAnalytics",
+			},
+			202: {
+				ServeHandlerDescription: rpc.ServeHandlerDescription{
+					MakeArg: func() interface{} {
+						var ret rpc.DataWrap[lib.Header, *SyncArgInternal__]
+						return &ret
+					},
+					Handler: func(ctx context.Context, args interface{}) (interface{}, error) {
+						typedWrappedArg, ok := args.(*rpc.DataWrap[lib.Header, *SyncArgInternal__])
+						if !ok {
+							err := rpc.NewTypeError((*rpc.DataWrap[lib.Header, *SyncArgInternal__])(nil), args)
+							return nil, err
+						}
+						if err := i.CheckArgHeader(ctx, typedWrappedArg.Header); err != nil {
+							return nil, err
+						}
+						typedArg := typedWrappedArg.Data
+						tmp, err := i.Sync(ctx, (typedArg.Import()).Calls)
+						if err != nil {
+							return nil, err
+						}
+						lst := (func(x []SyncResult) *[](*SyncResultInternal__) {
+							if len(x) == 0 {
+								return nil
+							}
+							ret := make([](*SyncResultInternal__), len(x))
+							for k, v := range x {
+								ret[k] = v.Export()
+							}
+							return &ret
+						})(tmp)
+						ret := rpc.DataWrap[lib.Header, [](*SyncResultInternal__)]{
+							Header: i.MakeResHeader(),
+						}
+						if lst != nil {
+							ret.Data = *lst
+						}
+						return &ret, nil
+					},
+				},
+				Name: "sync",
 			},
 		},
 		WrapError: UserMakeGenericErrorWrapper(i.ErrorWrapper()),

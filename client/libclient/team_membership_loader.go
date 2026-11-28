@@ -101,15 +101,24 @@ func (t *TMLTeam) SeedCommitment() *proto.TreeLocationCommitment {
 	return t.tmWrapper.SeedCommitment()
 }
 
-func (t *TMLTeam) Fetch(m MetaContext, arg rem.LoadGenericChainArg) (rem.GenericChain, error) {
+// fetchArg is the loadTeamMembershipChain call Fetch makes for the generic
+// loader's arg. Split out so a batched load can ask for it ahead of time.
+func (t *TMLTeam) fetchArg(arg rem.LoadGenericChainArg) (rem.LoadTeamMembershipChainArg, error) {
 	tok := t.tmLoader.Tok()
 	if tok == nil {
-		return rem.GenericChain{}, core.InternalError("no token in TMLTeam.Fetch")
+		return rem.LoadTeamMembershipChainArg{}, core.InternalError("no token in TMLTeam.Fetch")
 	}
-	targ := rem.LoadTeamMembershipChainArg{
+	return rem.LoadTeamMembershipChainArg{
 		Team:  t.arg.Team,
 		Tok:   *tok,
 		Start: arg.Start,
+	}, nil
+}
+
+func (t *TMLTeam) Fetch(m MetaContext, arg rem.LoadGenericChainArg) (rem.GenericChain, error) {
+	targ, err := t.fetchArg(arg)
+	if err != nil {
+		return rem.GenericChain{}, err
 	}
 	var zed rem.GenericChain
 	cli, _, closer, err := t.tmLoader.RpcLoaderClient(m)

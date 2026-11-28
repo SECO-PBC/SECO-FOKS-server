@@ -303,3 +303,56 @@ func TestReportRpcScopeContainsAndDisarmsAPanickingReporter(t *testing.T) {
 	require.NotPanics(t, func() { ReportRpcScope("Op", time.Second, nil) })
 	require.Equal(t, 1, calls, "a panicking reporter must not be called again")
 }
+
+func TestRpcStatsDepth(t *testing.T) {
+	ms := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Millisecond) }
+
+	var nilst *RpcStats
+	require.Equal(t, 0, nilst.Depth())
+
+	st := NewRpcStats()
+	require.Equal(t, 0, st.Depth())
+
+	// Three in a row: depth 3.
+	rec(st, "a", ms(0), ms(10))
+	rec(st, "b", ms(10), ms(20)) // starts exactly when a ends: still sequential
+	rec(st, "c", ms(25), ms(30))
+	require.Equal(t, 3, st.Depth())
+
+	// Overlapping calls count once between them.
+	st = NewRpcStats()
+	rec(st, "a", ms(0), ms(10))
+	rec(st, "b", ms(1), ms(11))
+	rec(st, "c", ms(2), ms(12))
+	require.Equal(t, 1, st.Depth())
+
+	// Fan-out after a first call, then one more: 1 + 1 + 1.
+	st = NewRpcStats()
+	rec(st, "probe", ms(0), ms(10))
+	rec(st, "x", ms(11), ms(20))
+	rec(st, "y", ms(12), ms(30))
+	rec(st, "z", ms(31), ms(40))
+	require.Equal(t, 3, st.Depth())
+
+	// A nested scope reports its own depth; the parent sees the whole.
+	ctx, outer := WithRpcStats(context.Background())
+	_, inner := WithRpcStats(ctx)
+	rec(outer, "a", ms(0), ms(10))
+	rec(inner, "b", ms(20), ms(30))
+	require.Equal(t, 1, inner.Depth())
+	require.Equal(t, 2, outer.Depth())
+}
+
+// The simulated latency gives way to a cancelled context.
+func TestSimulatedLatencyRespectsCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(WithSimulatedRpcLatency(context.Background(), time.Hour))
+	cancel()
+	start := time.Now()
+	_, err := applyRpcTestKnobs(ctx, "User.ping")
+	require.ErrorIs(t, err, context.Canceled)
+	require.Less(t, time.Since(start), time.Second)
+
+	missing, err := applyRpcTestKnobs(WithSimulatedMissingMethods(context.Background(), "User.sync"), "User.sync")
+	require.NoError(t, err)
+	require.True(t, missing)
+}

@@ -8,15 +8,29 @@ import (
 	"time"
 
 	"github.com/foks-proj/go-foks/client/libclient"
+	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/keybase/clockwork"
 	"github.com/stretchr/testify/require"
 )
 
 // coldListMemberships lists memberships in a fresh context over home, as the
-// next process would, and returns its RPC counts by method.
+// next process would, and returns its load counts by method: calls that went
+// to the network plus calls answered from a User.sync batch. User.sync itself
+// counts as the network call it is.
 func coldListMemberships(t *testing.T, tew *TestEnvWrapper, u *TestUser, home string, nTeams int,
 	prep func(libclient.MetaContext)) map[string]int {
+	net, served := coldListMembershipsSplit(t, tew, u, home, nTeams, prep)
+	for k, v := range served {
+		net[k] += v
+	}
+	return net
+}
+
+// coldListMembershipsSplit is coldListMemberships with the network calls and
+// the batch-served calls counted apart.
+func coldListMembershipsSplit(t *testing.T, tew *TestEnvWrapper, u *TestUser, home string, nTeams int,
+	prep func(libclient.MetaContext)) (net map[string]int, served map[string]int) {
 	m := tew.NewClientMetaContextAtHome(t, u, home)
 	if prep != nil {
 		prep(m)
@@ -24,10 +38,11 @@ func coldListMemberships(t *testing.T, tew *TestEnvWrapper, u *TestUser, home st
 	tmm, err := m.G().TeamMinder()
 	require.NoError(t, err)
 	m, stats := m.WithRpcStats()
+	m = libclient.WithPrefetchScope(m)
 	lst, err := tmm.ListMemberships(m, nil)
 	require.NoError(t, err)
 	require.Len(t, lst.Teams, nTeams)
-	return rpcCountsByMethod(stats)
+	return rpcCountsByMethod(stats), core.PrefetchScopeFromContext(m.Ctx()).HitsByMethod()
 }
 
 // TestColdStartReusesSavedViewTokens: a cold start presents the team view

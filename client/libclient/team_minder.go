@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/foks-proj/go-foks/lib/core"
@@ -31,6 +32,16 @@ type TeamMinderTestHooks struct {
 	// user or a team) so it can confirm the server's team player rejects it.
 	// Production code never sets this.
 	AdHocMutateFoundingMembers func([]proto.MemberRole)
+
+	// IndexResolution, if set, is told the outcome each time LoadTeam acts
+	// on a team taken from the persisted index while an exploration ran:
+	// the team, and whether that answer was used (false: LoadTeam goes on to
+	// resolve the checked way).
+	IndexResolution func(fqt proto.FQTeam, used bool)
+
+	// LoadUnderExploreMu, if set, is called each time a load takes
+	// exploreMu (lockForLoad), once it is counted as running.
+	LoadUnderExploreMu func()
 }
 
 // teamEditorTestOpts returns the test-only overrides to apply to TeamEditors
@@ -59,6 +70,13 @@ type TeamMinder struct {
 	au *UserContext
 
 	exploreMu sync.Mutex
+	// loadsUnderExploreMu counts the loads running right now under
+	// exploreMu (lockForLoad): an exploration, or a load of my membership
+	// chain (DumpMembershipChain, refreshUserTML). It is what exploring()
+	// reads. Whether exploreMu is merely taken is not that signal: UserTMW
+	// takes it for an instant, and so did each probe of it, so two
+	// concurrent probes saw each other as a running exploration.
+	loadsUnderExploreMu atomic.Int32
 	// The team membership wrapper for the current user. We'll have others for
 	// the teams that we are members of.
 	userTMW *TeamMembershipLoaderAndWrapper
@@ -125,8 +143,7 @@ func (t *TeamMinder) activeUser(m MetaContext) (*UserContext, error) {
 }
 
 func (t *TeamMinder) refreshUserTML(m MetaContext) (*TeamMembershipWrapper, error) {
-	t.exploreMu.Lock()
-	defer t.exploreMu.Unlock()
+	defer t.lockForLoad()()
 
 	// The role in user's team membership chain is the role of the device that
 	// the user is on. Read-only devices won't be able to update the chain
@@ -302,6 +319,11 @@ type LoadTeamOpts struct {
 	Members   MemberLoadLevel
 	Refresh   bool
 	NoUpdates bool
+	// UnlessExplored narrows Refresh: a team this same operation's
+	// exploration just loaded is not reloaded. Only the party cache sets it,
+	// for its ordinary freshness reload right after a restart resolved the
+	// team; a forced refresh (a stale token, new keys) never does.
+	UnlessExplored bool
 }
 
 // nextMemberLoad decides the level a reloading TeamRecord's loader runs at,
@@ -383,6 +405,19 @@ func (t *TeamMinder) getTeamWithRefresh(
 ) {
 	get := func() *TeamRecord { return t.getTeam(fqt) }
 	tr := get()
+
+	// The party cache's first load of a team, while an exploration is running
+	// (on a cold start, the Chats list's): queuing behind it and then
+	// exploring again would hold a read up for the whole listing. Load just
+	// this team, for this operation; the exploration indexes it as usual.
+	if tr == nil && opts != nil && opts.Refresh && opts.UnlessExplored && t.exploring() {
+		tr2, err := t.loadOnlyThisTeam(m, fqt)
+		if err == nil {
+			return tr2, nil
+		}
+		// Not one I'm in directly (or it failed): explore, as below.
+		m.Infow("getTeamWithRefresh", "stage", "loadOnlyThisTeam", "err", err)
+	}
 	// An offline-born record is a stopgap (no membership loader, no member
 	// CryptoPartier); a requested refresh must try to replace it with a full
 	// exploration, so a transient outage does not leave the team on the
@@ -491,6 +526,19 @@ func (t *TeamMinder) LoadTeamWithFQTeam(
 	}
 
 	if !opts.Refresh && tr.ldr.Arg.MemberLoad >= opts.Members {
+		return tr, nil
+	}
+	// Loaded by this same operation's exploration a moment ago (a restart
+	// resolving the team, say): a refresh the caller allows to be skipped
+	// would repeat that load.
+	// Never for an ad-hoc record below Names (minMemberLoad): its name is
+	// its member list, and the reload below is what would add the names.
+	if opts.Refresh && opts.UnlessExplored &&
+		tr.ldr.Arg.MemberLoad >= minMemberLoad(fqt, opts.Members) &&
+		exploredInScope(m, fqt) {
+		// As a load through here always does: the exploration's loads
+		// don't fill the teamname cache.
+		_ = t.fillTeamnameCache(m, tr.tw, fqt)
 		return tr, nil
 	}
 
@@ -673,18 +721,80 @@ func (t *TeamMinder) postMembershipLink(
 // caching machinery of the TeamMinder. This is useful in exploration, so we don't recursively
 // call into the TeamMinder under the same lock. Note that the TeamRecord returned does not
 // have a valid Tmw field, since team membership isn't loaded here.
+// directTeamArg is how a team I'm in directly is loaded on its own
+// (directLoadTeam), shared with the planner that asks for that load ahead of
+// time (prefetchForTeam).
+func (t *TeamMinder) directTeamArg(fqt proto.FQTeam, puks *PUKSet) LoadTeamArg {
+	return LoadTeamArg{
+		Team:    fqt,
+		As:      t.au.FQU().FQParty(),
+		SrcRole: team.UserSrcRole,
+		Keys:    puks,
+		// An ad-hoc team is named by its member list, so it is never loaded
+		// below Names (as planTeamLoad and nextMemberLoad have it).
+		MemberLoad: minMemberLoad(fqt, MemberLoadNone),
+	}
+}
+
+// minMemberLoad is the least member detail a load of fqt may run at, given
+// what the caller asked for: at least Names for an ad-hoc team.
+func minMemberLoad(fqt proto.FQTeam, req MemberLoadLevel) MemberLoadLevel {
+	if fqt.Team.IsAdHocTeam() && req < MemberLoadNames {
+		return MemberLoadNames
+	}
+	return req
+}
+
+// lockForLoad takes exploreMu for a load that may take round trips (an
+// exploration, a load of my membership chain), counted for exploring(),
+// until the returned func is called.
+func (t *TeamMinder) lockForLoad() func() {
+	t.exploreMu.Lock()
+	t.loadsUnderExploreMu.Add(1)
+	if t.TestHooks != nil && t.TestHooks.LoadUnderExploreMu != nil {
+		t.TestHooks.LoadUnderExploreMu()
+	}
+	return func() {
+		t.loadsUnderExploreMu.Add(-1)
+		t.exploreMu.Unlock()
+	}
+}
+
+// LockExploreForTest stands in for a running exploration (lockForLoad)
+// until the returned func is called. For tests only.
+func (t *TeamMinder) LockExploreForTest() func() {
+	return t.lockForLoad()
+}
+
+// exploring reports whether an exploration, or another load holding
+// exploreMu, is running right now: what a caller about to explore would
+// queue behind.
+func (t *TeamMinder) exploring() bool {
+	return t.loadsUnderExploreMu.Load() > 0
+}
+
+// loadOnlyThisTeam loads fqt on its own, as a team I'm in directly, with
+// its loads asked for in one batch first (prefetchForTeam). The record is
+// this operation's, marked loaded in its scope so a refresh in the same
+// operation doesn't repeat the load; the team index is the exploration's.
+func (t *TeamMinder) loadOnlyThisTeam(m MetaContext, fqt proto.FQTeam) (*TeamRecord, error) {
+	if err := t.prefetchForTeam(m, fqt); err != nil {
+		return nil, err
+	}
+	tr, err := t.directLoadTeam(m, fqt)
+	if err != nil {
+		return nil, err
+	}
+	markExploredInScope(m, []proto.FQTeam{fqt})
+	return tr, nil
+}
+
 func (t *TeamMinder) directLoadTeam(m MetaContext, fqt proto.FQTeam) (*TeamRecord, error) {
 	puks, err := t.au.RefreshPUKs(m)
 	if err != nil {
 		return nil, err
 	}
-	arg := LoadTeamArg{
-		Team:    fqt,
-		As:      t.au.FQU().FQParty(),
-		SrcRole: team.UserSrcRole,
-		Keys:    puks,
-	}
-	ldr, tw, err := LoadTeamReturnLoader(m, arg)
+	ldr, tw, err := LoadTeamReturnLoader(m, t.directTeamArg(fqt, puks))
 	if err != nil {
 		return nil, err
 	}
@@ -1163,8 +1273,15 @@ func (t *TeamMinder) Explore(
 
 	// For now, let's single-flight all explorations. This guards
 	// access to t.UserTWM, which is the seed of the exploration.
-	t.exploreMu.Lock()
-	defer t.exploreMu.Unlock()
+	defer t.lockForLoad()()
+
+	// Ask for this exploration's loads in one round trip, if the operation
+	// has a prefetch scope to keep the replies in (sync_plan.go).
+	// Offline, the exploration fails here, as its first load would have,
+	// rather than dialing once for the batch and again for that load.
+	if err := t.prefetchForExplore(m); err != nil {
+		return nil, err
+	}
 
 	err := t.seedExplore(m)
 	if err != nil {
@@ -1370,6 +1487,11 @@ func (t *TeamMinder) ExploreAndIndex(m MetaContext, opts *LoadTeamOpts) error {
 		return err
 	}
 	t.persistTeamIndex(m)
+	explored := make([]proto.FQTeam, 0, len(state.Teams))
+	for fqt := range state.Teams {
+		explored = append(explored, fqt)
+	}
+	markExploredInScope(m, explored)
 	return nil
 }
 
@@ -1762,29 +1884,32 @@ func (t *TeamMinder) resolveTeamNamed(m MetaContext, arg proto.FQTeamParsed) (*p
 // never deleted) and leaving loadedTeams unpopulated for non-refresh callers.
 // Offline, a stale answer carries the same verified-but-possibly-behind
 // semantics as every other snapshot.
-func (t *TeamMinder) resolveTeamNamedFromDB(
+// namedFromDB is the team arg names, from the persisted name index, and the
+// name it was looked up by ("" for a team named by ID, which needs no
+// lookup). Unchecked: see resolveTeamNamedFromDB and teamResolution.
+func (t *TeamMinder) namedFromDB(
 	m MetaContext,
 	arg lcl.ConfigTeam,
-) *proto.FQTeam {
+) (*proto.FQTeam, proto.FQTeamString) {
 	typ, err := arg.GetT()
 	if err != nil || typ != lcl.ConfigTeamType_Named {
-		return nil
+		return nil, ""
 	}
 	named := arg.Named()
 	hostID, _, err := t.fromParsedHostname(named.Host)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	isTeamName, err := named.Team.GetS()
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	if !isTeamName {
 		tmp := named.Team.False()
 		if hostID == nil {
-			return nil
+			return nil, ""
 		}
-		return &proto.FQTeam{Host: *hostID, Team: tmp}
+		return &proto.FQTeam{Host: *hostID, Team: tmp}, ""
 	}
 	var h string
 	switch {
@@ -1793,37 +1918,72 @@ func (t *TeamMinder) resolveTeamNamedFromDB(
 	case named.Host != nil:
 		h, err = named.Host.StringErr()
 	default:
-		return nil
+		return nil, ""
 	}
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	tm, err := named.Team.StringErr()
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	ntm, err := core.NormalizeName(proto.NameUtf8(tm))
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	want := proto.FQTeamString(ntm.String() + "@" + h)
-	fqt := t.lookupTeamNameFromDB(m, want)
-	if fqt == nil {
-		return nil
+	return t.lookupTeamNameFromDB(m, want), want
+}
+
+func (t *TeamMinder) resolveTeamNamedFromDB(
+	m MetaContext,
+	arg lcl.ConfigTeam,
+) *proto.FQTeam {
+	fqt, want := t.namedFromDB(m, arg)
+	if fqt == nil || want == "" {
+		return fqt
 	}
 	if !t.cachedTeamClaimsName(m, *fqt, want) {
 		m.Warnw("resolveTeamNamedFromDB",
 			"note", "persisted name row contradicts the team's cached snapshot; refusing to resolve",
-			"name", ntm.String())
+			"name", want)
 		return nil
 	}
 	return fqt
+}
+
+// teamClaimsName reports whether tw, loaded, goes by want: what makes a
+// name taken from the persisted index (unchecked) safe to act on.
+func teamClaimsName(tw *TeamWrapper, want proto.FQTeamString) (bool, error) {
+	names, err := tw.AllFQStrings()
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(names, want), nil
 }
 
 func (t *TeamMinder) Resolve(m MetaContext, arg proto.FQTeamParsed) (*proto.FQTeam, error) {
 	return t.resolveTeam(m, team.WrapNamed(arg))
 }
 
+// teamResolution is the team a ConfigTeam names. fromIndex is set when it
+// was taken from the persisted index while an exploration was running,
+// without waiting for that exploration: the team may not be loaded yet, and
+// a name may since have moved to another team (see indexResolution).
+type teamResolution struct {
+	fqt       proto.FQTeam
+	fromIndex *indexResolution
+}
+
+// indexResolution is how a teamResolution taken from the persisted index
+// must be checked. claimedName is the name it was looked up by, which the
+// loaded team must still go by (teamClaimsName); nil for a team named by
+// ID, which needs no lookup.
+type indexResolution struct {
+	claimedName *proto.FQTeamString
+}
+
+// ResolveAndReindex is the team arg names, checked.
 func (t *TeamMinder) ResolveAndReindex(
 	m MetaContext,
 	arg lcl.ConfigTeam,
@@ -1832,12 +1992,65 @@ func (t *TeamMinder) ResolveAndReindex(
 	*proto.FQTeam,
 	error,
 ) {
+	res, err := t.resolveAndReindex(m, arg, opts, false)
+	if err != nil || res == nil {
+		return nil, err
+	}
+	return &res.fqt, nil
+}
+
+// TeamKey keys per-team state (librt's and libkv's minders) by the team a
+// ConfigTeam names. It may have been resolved from the persisted name index
+// without loading the team to check it, so it is deliberately not a
+// proto.FQTeam: nothing that loads, seals or shows a team takes one. Those
+// paths (GetParty, LoadTeam) resolve and check for themselves. Comparable, for
+// use as a map key.
+type TeamKey struct {
+	fqt proto.FQTeam
+}
+
+// ResolveForKey is the key for the team arg names. While an exploration
+// runs it may come from the persisted name index unchecked, rather than wait
+// (see TeamKey).
+func (t *TeamMinder) ResolveForKey(m MetaContext, arg lcl.ConfigTeam) (TeamKey, error) {
+	res, err := t.resolveAndReindex(m, arg, nil, true)
+	if err != nil {
+		return TeamKey{}, err
+	}
+	if res == nil {
+		return TeamKey{}, core.TeamNotFoundError{}
+	}
+	return TeamKey{fqt: res.fqt}, nil
+}
+
+func (t *TeamMinder) resolveAndReindex(
+	m MetaContext,
+	arg lcl.ConfigTeam,
+	opts *LoadTeamOpts,
+	uncheckedOK bool,
+) (
+	*teamResolution,
+	error,
+) {
 	fqt, err := t.resolveTeam(m, arg)
 	if err != nil {
 		return nil, err
 	}
 	if fqt != nil {
-		return fqt, nil
+		return &teamResolution{fqt: *fqt}, nil
+	}
+	// An exploration is running already (on a cold start, the Chats list's):
+	// rather than queue behind it to explore again, take the name from the
+	// index the last exploration persisted, to be checked against the team
+	// once it is loaded.
+	if uncheckedOK && t.exploring() {
+		if hit, want := t.namedFromDB(m, arg); hit != nil {
+			ir := &indexResolution{}
+			if want != "" {
+				ir.claimedName = &want
+			}
+			return &teamResolution{fqt: *hit, fromIndex: ir}, nil
+		}
 	}
 	err = t.ExploreAndIndex(m, opts)
 	if err != nil {
@@ -1848,7 +2061,7 @@ func (t *TeamMinder) ResolveAndReindex(
 			if hit := t.resolveTeamNamedFromDB(m, arg); hit != nil {
 				m.Warnw("ResolveAndReindex", "err", err,
 					"note", "server unreachable; name resolved from persisted index")
-				return hit, nil
+				return &teamResolution{fqt: *hit}, nil
 			}
 		}
 		return nil, err
@@ -1860,7 +2073,49 @@ func (t *TeamMinder) ResolveAndReindex(
 	if fqt == nil {
 		return nil, core.TeamNotFoundError{}
 	}
-	return fqt, nil
+	return &teamResolution{fqt: *fqt}, nil
+}
+
+// loadFromIndexResolution loads a team resolved from the persisted index
+// while an exploration runs. Not ok -- the caller resolves the checked way --
+// whenever the shortcut can't answer: the load fails for any reason (with
+// Refresh unset, say, a team the running exploration has not indexed yet is
+// simply not found), or the loaded team no longer goes by the name.
+func (t *TeamMinder) loadFromIndexResolution(
+	m MetaContext,
+	fqt proto.FQTeam,
+	ir indexResolution,
+	opts LoadTeamOpts,
+) (*TeamWrapper, bool) {
+	tw, ok := t.tryIndexResolution(m, fqt, ir, opts)
+	if t.TestHooks != nil && t.TestHooks.IndexResolution != nil {
+		t.TestHooks.IndexResolution(fqt, ok)
+	}
+	return tw, ok
+}
+
+func (t *TeamMinder) tryIndexResolution(
+	m MetaContext,
+	fqt proto.FQTeam,
+	ir indexResolution,
+	opts LoadTeamOpts,
+) (*TeamWrapper, bool) {
+	tm, err := t.LoadTeamWithFQTeam(m, fqt, opts)
+	if err != nil {
+		m.Infow("LoadTeam", "stage", "indexResolution", "err", err,
+			"note", "resolving the checked way")
+		return nil, false
+	}
+	if ir.claimedName == nil {
+		return tm.Tw(), true
+	}
+	ok, err := teamClaimsName(tm.Tw(), *ir.claimedName)
+	if err != nil || !ok {
+		m.Warnw("LoadTeam", "note", "persisted name row no longer names this team; exploring",
+			"name", *ir.claimedName, "err", err)
+		return nil, false
+	}
+	return tm.Tw(), true
 }
 
 func (t *TeamMinder) LoadTeam(
@@ -1871,6 +2126,25 @@ func (t *TeamMinder) LoadTeam(
 	*TeamWrapper,
 	error,
 ) {
+	res, err := t.resolveAndReindex(m, arg, &opts, true)
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return nil, core.TeamNotFoundError{}
+	}
+	if res.fromIndex == nil {
+		tm, err := t.LoadTeamWithFQTeam(m, res.fqt, opts)
+		if err != nil {
+			return nil, err
+		}
+		return tm.Tw(), nil
+	}
+	if tw, ok := t.loadFromIndexResolution(m, res.fqt, *res.fromIndex, opts); ok {
+		return tw, nil
+	}
+	// Resolve it the long way, checked: wait for the exploration, as
+	// without the shortcut.
 	fqt, err := t.ResolveAndReindex(m, arg, &opts)
 	if err != nil {
 		return nil, err
@@ -2023,7 +2297,7 @@ func (t *TeamMinder) ListMemberships(
 	var ret lcl.ListMembershipsRes
 	// The membership loader and the PUK minder both load my chain during the
 	// exploration; let them share one load.
-	m = withLoadMeScope(m)
+	m = WithReadOperationScopes(m)
 	err := t.ExploreAndIndex(m, opts)
 	if err != nil {
 		return nil, err
@@ -2116,8 +2390,7 @@ func (t *TeamMinder) DumpMembershipChain(
 	// userTMW is guarded by exploreMu, as in UserTMW, refreshUserTML and
 	// Explore. Without it a dump racing an exploration reads and writes
 	// userTMW concurrently.
-	t.exploreMu.Lock()
-	defer t.exploreMu.Unlock()
+	defer t.lockForLoad()()
 	err := t.loadUserTMLLocked(m)
 	if err != nil {
 		return nil, err

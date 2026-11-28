@@ -5,8 +5,12 @@ package libclient
 
 import (
 	"context"
+
 	"errors"
+	"github.com/foks-proj/go-ctxlog"
 	"sync"
+
+	"github.com/foks-proj/go-foks/lib/core"
 
 	proto "github.com/foks-proj/go-foks/proto/lib"
 )
@@ -30,6 +34,9 @@ import (
 //   - UserContext.UnlockKeys (loads my chain while the SSO ping is out, so
 //     PopulateWithDevkey joins that load; unlocking reads keys, it posts no
 //     sigchain link).
+//   - Through WithReadOperationScopes: librt GetThreadView and libkv's
+//     GetFile / List (reads; any write they lead to is to a team's RT or KV
+//     store, never the user's sigchain).
 
 type loadMeScopeKey struct{}
 
@@ -41,6 +48,11 @@ type loadMeScope struct {
 	// onWait, if set (tests only), runs when a caller starts waiting on a
 	// load in flight.
 	onWait func()
+	// explored holds the teams this operation loaded -- by exploring, or on
+	// their own (loadOnlyThisTeam) -- so a refresh asked for later in the same
+	// operation is not a second load of a team just loaded (see
+	// TeamMinder.LoadTeamWithFQTeam).
+	explored map[proto.FQTeam]bool
 }
 
 type loadMeFlight struct {
@@ -56,8 +68,9 @@ var errLoadMeAbandoned = errors.New("load-me flight abandoned")
 
 func newLoadMeScope() *loadMeScope {
 	return &loadMeScope{
-		loads:   make(map[proto.UID]*UserWrapper),
-		flights: make(map[proto.UID]*loadMeFlight),
+		loads:    make(map[proto.UID]*UserWrapper),
+		flights:  make(map[proto.UID]*loadMeFlight),
+		explored: make(map[proto.FQTeam]bool),
 	}
 }
 
@@ -143,4 +156,66 @@ func (s *loadMeScope) load(
 	}()
 	f.res, f.err = fn()
 	return f.res, f.err
+}
+
+// markExploredInScope records that this operation's exploration just loaded
+// these teams. No-op outside a scope.
+func markExploredInScope(m MetaContext, teams []proto.FQTeam) {
+	scope := loadMeScopeOf(m)
+	if scope == nil {
+		return
+	}
+	scope.mu.Lock()
+	defer scope.mu.Unlock()
+	for _, fqt := range teams {
+		scope.explored[fqt] = true
+	}
+}
+
+// exploredInScope reports whether this operation's exploration loaded fqt.
+func exploredInScope(m MetaContext, fqt proto.FQTeam) bool {
+	scope := loadMeScopeOf(m)
+	if scope == nil {
+		return false
+	}
+	scope.mu.Lock()
+	defer scope.mu.Unlock()
+	return scope.explored[fqt]
+}
+
+// WithReadOperationScopes starts the scopes of one read-only operation outside
+// this package (an RT thread view, a KV read): a load-me scope (see the list
+// at the top of this file before adding a caller) and a prefetch scope.
+func WithReadOperationScopes(m MetaContext) MetaContext {
+	return WithPrefetchScope(withLoadMeScope(m))
+}
+
+// WithPrefetchScope starts a prefetch scope (core.PrefetchScope) for one
+// operation, unless it already runs in one: replies a batched call fetches
+// ahead of time answer the operation's own calls, and nothing else's.
+func WithPrefetchScope(m MetaContext) MetaContext {
+	ctx, _ := core.WithPrefetchScope(m.Ctx())
+	ret := m
+	ret.MetaContext = m.MetaContext.WithContext(ctx)
+	return ret
+}
+
+// DetachFromOperation is m for work its operation leaves running after it
+// returns (a read mark sent once the view is shown, say). Its context is a
+// fresh one carrying only m's log tags: not cancelled with the operation,
+// and none of the operation's values -- not its RPC stats, its load-me or
+// prefetch scopes, or anything added later. A scope ends with its operation,
+// even for work the operation started.
+func DetachFromOperation(m MetaContext) MetaContext {
+	ret := m
+	ret.MetaContext = m.MetaContext.WithContext(detachContext(m.Ctx()))
+	return ret
+}
+
+func detachContext(ctx context.Context) context.Context {
+	ret := context.Background()
+	if tags, ok := ctxlog.TagsFromContext(ctx); ok {
+		ret = ctxlog.AddTagsToContext(ret, tags)
+	}
+	return ret
 }

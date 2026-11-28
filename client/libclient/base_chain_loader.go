@@ -33,6 +33,18 @@ func (u *BaseChainLoader) queueFatalError(err error) {
 	}
 }
 
+// resetRun drops what a run accumulated (link hashes, merkle leaves, the last
+// hash, a queued testing error) so a retried run starts clean: checkChain and
+// checkMerklePaths append and index from 0, so a second run on top of the
+// first would compare against the first run's hashes and persist duplicate
+// leaves.
+func (b *BaseChainLoader) resetRun() {
+	b.linkHashes = nil
+	b.lastHash = nil
+	b.merkleLeaves = nil
+	b.fatalError = nil
+}
+
 func (u *BaseChainLoader) SetTesting(t *ChainLoaderTesting) {
 	u.testing = t
 }
@@ -252,6 +264,15 @@ func (b *BaseChainLoader) checkMerklePaths(
 func (b *BaseChainLoader) runMany(m MetaContext, runOnce func(m MetaContext) error, resetState func()) error {
 	var err error
 
+	// Every retry starts from a clean slate: the loader's own state (via
+	// resetState) and the state this base accumulated during the run.
+	reset := func() {
+		b.resetRun()
+		if resetState != nil {
+			resetState()
+		}
+	}
+
 	params, err := m.G().MerkleRaceConfig()
 	if err != nil {
 		return err
@@ -260,9 +281,26 @@ func (b *BaseChainLoader) runMany(m MetaContext, runOnce func(m MetaContext) err
 	n := params.Cfg.NumRetries
 	wait := params.Cfg.Wait
 
+	// A reply fetched ahead in a batch (core.PrefetchScope) predates
+	// whatever this device stored after the batch went out -- a newer merkle
+	// root from another load, say -- so checking it can fail where a reply
+	// fetched now would pass. A run that used one and failed is run once
+	// more: the batch's reply is used up, so that run asks the server.
+	fellBack := false
+
 	for i := 0; true; i++ {
 
-		err = runOnce(m)
+		mi := m
+		ctx, served := core.WithPrefetchServedCount(m.Ctx())
+		mi.MetaContext = m.MetaContext.WithContext(ctx)
+		err = runOnce(mi)
+		if err != nil && served.Load() > 0 && !fellBack {
+			fellBack = true
+			m.Infow("BaseChainLoader::Run", "retry", "batched reply failed", "err", err.Error())
+			reset()
+			i--
+			continue
+		}
 		if err == nil || i >= n {
 			return err
 		}
@@ -276,9 +314,7 @@ func (b *BaseChainLoader) runMany(m MetaContext, runOnce func(m MetaContext) err
 			"wait", wait,
 			"iter", i,
 		)
-		if resetState != nil {
-			resetState()
-		}
+		reset()
 
 		// If an Eracer is present (likely during a test), we'll synchronously wait for it before
 		// moving on to the next iteration. Otherwise, we'll just do a regular timed backoff.

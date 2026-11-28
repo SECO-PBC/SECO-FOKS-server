@@ -245,7 +245,8 @@ func (p *PartyLoaderCache) loadTeam(
 
 	// cache miss path, or cache was hit but team wasn't fresh
 
-	tw, err := p.au.TeamMinder().LoadTeam(m, tm, LoadTeamOpts{Refresh: true})
+	forced := opts != nil && opts.ForceRefresh
+	tw, err := p.au.TeamMinder().LoadTeam(m, tm, LoadTeamOpts{Refresh: true, UnlessExplored: !forced})
 	if err != nil {
 		return nil, err
 	}

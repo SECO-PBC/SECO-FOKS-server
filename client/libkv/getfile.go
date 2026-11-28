@@ -111,6 +111,7 @@ func (k *Minder) GetFile(
 	// level first keeps both off the hot path when nobody is looking.
 	m, done := k.instrumentScope(m, "KVMinder.GetFile")
 	defer done()
+	m = m.withOperationScopes()
 
 	kvp, err := k.initReqAnyStore(m, cfg)
 	if err != nil {
