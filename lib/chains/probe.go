@@ -594,14 +594,18 @@ func (p *Probe) WithRegCli(m MetaContext, f func(rem.RegClient) error) error {
 // service, each when it is first used. The next RPCClient call for the same
 // service and certificate takes the connecting client over; one nobody takes
 // within prewarmUnclaimedAfter is shut down.
+//
+// Prewarm makes no network call itself (no probe refresh, no dial on the
+// caller's goroutine), so it is safe to call under a caller's lock.
 func (p *Probe) Prewarm(m MetaContext, sts []proto.ServerType, cliCert *tls.Certificate) {
 	// Offline, or on a probe hydrated from cache, there is nothing to gain,
 	// and each client would refresh the probe first.
 	if p == nil || !p.IsConnected() || p.PublicZone() == nil {
 		return
 	}
+	certID := core.ClientCertID(cliCert)
 	for _, st := range sts {
-		k := prewarmKey{st: st, cert: cliCert}
+		k := prewarmKey{st: st, cert: certID}
 		if p.prewarmed.has(k) {
 			continue
 		}
@@ -609,7 +613,11 @@ func (p *Probe) Prewarm(m MetaContext, sts []proto.ServerType, cliCert *tls.Cert
 		if srv := p.PublicZone().Services.Select(st); srv == nil || *srv == "" {
 			continue
 		}
-		cli, err := p.newRPCClient(m, st, cliCert)
+		// Built without refreshing the probe: connectivity was checked above,
+		// and a refresh is a full probe on the network. Should the probe fail
+		// in between, the connect below fails and the taker's first call sees
+		// it, as it would on any client.
+		cli, err := p.buildRPCClient(m, st, cliCert)
 		if err != nil {
 			m.Warnw("Probe.Prewarm", "server", st, "err", err)
 			continue
@@ -625,7 +633,6 @@ func (p *Probe) Prewarm(m MetaContext, sts []proto.ServerType, cliCert *tls.Cert
 			// retries the connection; nothing to report yet.
 			_, _ = cli.Connect(ctx)
 		}()
-		time.AfterFunc(prewarmUnclaimedAfter, func() { p.prewarmed.expire(k, cli) })
 	}
 }
 
@@ -633,7 +640,7 @@ func (p *Probe) RPCClient(m MetaContext, st proto.ServerType, cliCert *tls.Certi
 	if p == nil {
 		return nil, core.InternalError("probe was nil")
 	}
-	if cli, ok := p.prewarmed.take(prewarmKey{st: st, cert: cliCert}); ok {
+	if cli, ok := p.prewarmed.take(prewarmKey{st: st, cert: core.ClientCertID(cliCert)}); ok {
 		return cli, nil
 	}
 	return p.newRPCClient(m, st, cliCert)
@@ -644,7 +651,12 @@ func (p *Probe) newRPCClient(m MetaContext, st proto.ServerType, cliCert *tls.Ce
 	if err != nil {
 		return nil, err
 	}
+	return p.buildRPCClient(m, st, cliCert)
+}
 
+// buildRPCClient makes a client for st from the probe as it stands, without
+// refreshing it first.
+func (p *Probe) buildRPCClient(m MetaContext, st proto.ServerType, cliCert *tls.Certificate) (*core.RpcClient, error) {
 	if p.PublicZone() == nil {
 		return nil, core.InternalError("probe has no public zone")
 	}

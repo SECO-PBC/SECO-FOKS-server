@@ -38,10 +38,9 @@ type UserContext struct {
 	treeLocMu sync.Mutex
 	treeLocs  map[proto.Seqno]proto.TreeLocation
 
-	userGCli      *core.RpcClient
-	userGCliChain [][]byte // the cert chain userGCli was built with
-	regCli        *rem.RegClient
-	mqCli         *rem.MerkleQueryClient
+	userGCli *certBoundClient
+	regCli   *rem.RegClient
+	mqCli    *rem.MerkleQueryClient
 
 	// Single-flight unlocking keys
 	unlockKeysMu sync.Mutex
@@ -53,14 +52,29 @@ type UserContext struct {
 
 	apps *Apps
 
-	// A client certificate built from a saved chain stays unconfirmed until a
-	// background fetch from the reg server succeeds (refreshSavedCert).
+	// The memoized client certificate, while it is built from a saved chain
+	// the reg server has not yet confirmed (refreshSavedCert); nil otherwise.
 	// Guarded by the UserContext lock.
-	savedCertUsed       *tls.Certificate // nil once confirmed, or if none was used
-	savedCertEid        proto.EntityID
-	savedCertRefreshing bool
-	savedCertTriedAt    time.Time
-	prewarmed           bool // connections were pre-warmed for this user once
+	savedCert *savedCertPending
+	prewarmed bool // connections were pre-warmed for this user once
+}
+
+// certBoundClient is a client together with the identity of the certificate
+// it presents, so a cache can tell when the certificate in use has moved on.
+type certBoundClient struct {
+	gcli *core.RpcClient
+	cert core.CertChainID
+}
+
+// savedCertPending is a client certificate built from a saved chain that the
+// reg server has not confirmed yet. It exists only while unconfirmed: once a
+// fetch succeeds, or the server refuses the key, UserContext.savedCert drops
+// it. Its fields are guarded by the UserContext lock.
+type savedCertPending struct {
+	cert     *tls.Certificate
+	eid      proto.EntityID
+	triedAt  time.Time // when the last confirmation started
+	inflight bool      // a confirmation is running for this certificate
 }
 
 func (u *UserContext) Eq(u2 *UserContext) bool {
@@ -104,7 +118,7 @@ func (u *UserContext) ClearConnections() {
 	u.Lock()
 	defer u.Unlock()
 	if u.userGCli != nil {
-		u.userGCli.Shutdown()
+		u.userGCli.gcli.Shutdown()
 		u.userGCli = nil
 	}
 	u.regCli = nil
@@ -720,17 +734,17 @@ func (c *UserContext) clientCertLocked(m MetaContext) (*tls.Certificate, error) 
 			core.NoDefaultHostError{})
 	}
 
-	certChain, src, err := c.fetchClientCertChain(m, eid)
+	chain, err := c.fetchClientCertChain(m, eid)
 	if err != nil {
 		return nil, err
 	}
 
 	cert := &tls.Certificate{
 		PrivateKey:  priv,
-		Certificate: certChain,
+		Certificate: chain.certs,
 	}
 
-	switch src {
+	switch chain.src {
 	case certFromOfflineCache:
 		// Not memoized. A cache-served chain may have expired or rotated
 		// during the outage; pinning it in memory would keep presenting it
@@ -742,17 +756,18 @@ func (c *UserContext) clientCertLocked(m MetaContext) (*tls.Certificate, error) 
 		// Memoized so every client shares it, but unconfirmed until a fetch
 		// from the reg server succeeds; until then it is retried
 		// (maybeRefreshSavedCertLocked).
-		c.savedCertUsed = cert
-		c.savedCertEid = eid
-		c.startSavedCertRefreshLocked(m)
+		c.savedCert = &savedCertPending{cert: cert, eid: eid}
+		c.startSavedCertRefreshLocked(m, c.savedCert)
 	case certFromServer:
+		c.savedCert = nil
 	}
 	c.PrivKeys.SetCert(cert)
 
 	// Every user-authenticated service needs this certificate, so start
 	// connecting to all of them now, in parallel, rather than one at a time
 	// as each is first used. Once per user: a cert rebuilt after a lock and
-	// unlock finds its clients already made.
+	// unlock presents the same saved chain, so its clients are kept. Prewarm
+	// makes no network call, so it is fine under c's lock.
 	if !c.prewarmed {
 		c.prewarmed = true
 		c.homeServer.Prewarm(m, []proto.ServerType{
@@ -778,6 +793,12 @@ const (
 	certFromOfflineCache
 )
 
+// sourcedCertChain is a client certificate chain and where it came from.
+type sourcedCertChain struct {
+	certs [][]byte
+	src   certSource
+}
+
 // fetchClientCertChain gets the cert chain the reg server issued for the
 // given key, caching it in the soft DB (it is derived state: the reg server
 // reissues it on demand, so losing the row costs nothing while online).
@@ -794,8 +815,7 @@ func (c *UserContext) fetchClientCertChain(
 	m MetaContext,
 	eid proto.EntityID,
 ) (
-	[][]byte,
-	certSource,
+	*sourcedCertChain,
 	error,
 ) {
 	// Callers hold c's lock (clientCertLocked); touch fields directly rather
@@ -803,24 +823,24 @@ func (c *UserContext) fetchClientCertChain(
 	uid := c.Info.Fqu.Uid
 
 	if saved := usableSavedCertChain(m, uid, eid); saved != nil {
-		return saved, certFromSaved, nil
+		return &sourcedCertChain{certs: saved, src: certFromSaved}, nil
 	}
 
 	certChain, err := c.fetchClientCertChainFromServer(m, uid, eid)
 	if err == nil {
-		return certChain, certFromServer, nil
+		return &sourcedCertChain{certs: certChain, src: certFromServer}, nil
 	}
 	if !core.IsTransportError(err) {
-		return nil, certFromServer, err
+		return nil, err
 	}
 	var cached lcl.UserCertChain
 	_, derr := m.DbGet(&cached, DbTypeSoft, &uid, lcl.DataType_UserCertChain, eid)
 	if derr != nil || len(cached.Certs) == 0 {
-		return nil, certFromServer, err
+		return nil, err
 	}
 	m.Warnw("fetchClientCertChain", "err", err,
 		"note", "server unreachable; using cached cert chain")
-	return cached.Certs, certFromOfflineCache, nil
+	return &sourcedCertChain{certs: cached.Certs, src: certFromOfflineCache}, nil
 }
 
 // certChainMinRemaining is how long a saved chain must still be valid for to
@@ -861,39 +881,61 @@ func certChainValidFor(chain [][]byte, now time.Time, d time.Duration) bool {
 }
 
 // maybeRefreshSavedCertLocked retries confirming a certificate built from a
-// saved chain, when it is the one in use, unconfirmed, and the last attempt
-// failed at least savedCertRetry ago (offline, say). Caller holds c's lock.
+// saved chain, when it is the one in use, unconfirmed, no confirmation is
+// running, and the last one started at least savedCertRetry ago (offline,
+// say). Caller holds c's lock.
 func (c *UserContext) maybeRefreshSavedCertLocked(m MetaContext, cert *tls.Certificate) {
-	if c.savedCertUsed != cert || c.savedCertRefreshing ||
-		m.G().Now().Sub(c.savedCertTriedAt) < savedCertRetry {
+	p := c.savedCert
+	if p == nil || p.cert != cert || p.inflight ||
+		m.G().Now().Sub(p.triedAt) < savedCertRetry {
 		return
 	}
-	c.startSavedCertRefreshLocked(m)
+	c.startSavedCertRefreshLocked(m, p)
 }
 
-func (c *UserContext) startSavedCertRefreshLocked(m MetaContext) {
-	c.savedCertRefreshing = true
-	c.savedCertTriedAt = m.G().Now()
-	go c.refreshSavedCert(m.G(), c.Info.Fqu.Uid, c.savedCertEid, c.savedCertUsed)
+func (c *UserContext) startSavedCertRefreshLocked(m MetaContext, p *savedCertPending) {
+	p.inflight = true
+	p.triedAt = m.G().Now()
+	go c.refreshSavedCert(m.G(), c.Info.Fqu.Uid, p)
 }
 
-// refreshSavedCert fetches the chain from the reg server after a saved one
-// was used, and saves it for the next start. It replaces the certificate in
-// use only when the saved chain stops being good enough (replaceSavedCert),
-// and only if that certificate is still the one held, so a UserLock in the
-// meantime is not undone. Clients notice the replacement by its content and
-// rebuild (UserGCli, and the KV and realtime minders). Never holds c's lock
-// across the network.
-func (c *UserContext) refreshSavedCert(g *GlobalContext, uid proto.UID, eid proto.EntityID, used *tls.Certificate) {
+// savedCertOutcome is how a confirmation of a saved chain ended.
+type savedCertOutcome int
+
+const (
+	// savedCertUnreachable: no answer from the reg server (offline, say);
+	// the certificate stays unconfirmed and is retried.
+	savedCertUnreachable savedCertOutcome = iota
+	// savedCertConfirmed: the reg server issued a chain for the key.
+	savedCertConfirmed
+	// savedCertRefused: the reg server refused the key (a revoked device).
+	savedCertRefused
+)
+
+// refreshSavedCert asks the reg server for the chain after a saved one was
+// used. It never holds c's lock across the network.
+//
+//   - Issued, and the saved chain is still good (replaceSavedCert false):
+//     nothing changes, not even the saved row, so the chain presented stays
+//     the same across lock/unlock and restarts and no client is rebuilt.
+//   - Issued, and the saved chain stopped being good enough (CA changed,
+//     close to expiry): the fresh chain is saved and swapped in, only if the
+//     saved certificate is still the one held (so a UserLock in between is
+//     not undone). Clients notice by CertChainID and rebuild.
+//   - Refused (AuthError): the saved row is dropped and the certificate
+//     un-memoized, so the next use asks the reg server and its caller gets
+//     the refusal, as it did before saved chains were used.
+//   - No answer: retried on a later use (maybeRefreshSavedCertLocked).
+func (c *UserContext) refreshSavedCert(g *GlobalContext, uid proto.UID, p *savedCertPending) {
 	m, cancel := NewMetaContextBackground(g).WithContextTimeout(time.Minute)
 	defer cancel()
-	confirmed := false
+	outcome := savedCertUnreachable
 	defer func() {
 		c.Lock()
 		defer c.Unlock()
-		c.savedCertRefreshing = false
-		if confirmed && c.savedCertUsed == used {
-			c.savedCertUsed = nil
+		p.inflight = false
+		if outcome != savedCertUnreachable && c.savedCert == p {
+			c.savedCert = nil
 		}
 	}()
 
@@ -902,7 +944,17 @@ func (c *UserContext) refreshSavedCert(g *GlobalContext, uid proto.UID, eid prot
 		m.Warnw("refreshSavedCert", "stage", "regClient", "err", err)
 		return
 	}
-	fresh, err := cli.GetClientCertChain(m.Ctx(), rem.GetClientCertChainArg{Uid: uid, Key: eid})
+	fresh, err := cli.GetClientCertChain(m.Ctx(), rem.GetClientCertChainArg{Uid: uid, Key: p.eid})
+	if core.IsAuthError(err) {
+		outcome = savedCertRefused
+		m.Warnw("refreshSavedCert", "stage", "fetch", "err", err, "note", "key refused; dropping saved chain")
+		derr := m.DbDelete(DbTypeSoft, &uid, lcl.DataType_UserCertChain, p.eid)
+		if derr != nil {
+			m.Warnw("refreshSavedCert", "stage", "delete", "err", derr)
+		}
+		c.PrivKeys.ReplaceCert(p.cert, nil)
+		return
+	}
 	if err != nil {
 		m.Warnw("refreshSavedCert", "stage", "fetch", "err", err)
 		return
@@ -912,15 +964,24 @@ func (c *UserContext) refreshSavedCert(g *GlobalContext, uid proto.UID, eid prot
 		m.Warnw("refreshSavedCert", "stage", "check", "err", "reg server returned an unusable chain")
 		return
 	}
+	outcome = savedCertConfirmed
+	if !replaceSavedCert(p.cert.Certificate, fresh, now) {
+		return
+	}
 	store := lcl.UserCertChain{Certs: fresh}
-	err = m.DbPut(DbTypeSoft, PutArg{Scope: &uid, Typ: lcl.DataType_UserCertChain, Key: eid, Val: &store})
+	err = m.DbPut(DbTypeSoft, PutArg{Scope: &uid, Typ: lcl.DataType_UserCertChain, Key: p.eid, Val: &store})
 	if err != nil {
 		m.Warnw("refreshSavedCert", "stage", "store", "err", err)
 	}
-	confirmed = true
-	if replaceSavedCert(used.Certificate, fresh, now) {
-		c.PrivKeys.ReplaceCert(used, &tls.Certificate{PrivateKey: used.PrivateKey, Certificate: fresh})
-	}
+	c.PrivKeys.ReplaceCert(p.cert, &tls.Certificate{PrivateKey: p.cert.PrivateKey, Certificate: fresh})
+}
+
+// SavedCertUnconfirmedForTest reports that the certificate in use was built
+// from a saved chain the reg server has not confirmed yet.
+func (c *UserContext) SavedCertUnconfirmedForTest() bool {
+	c.Lock()
+	defer c.Unlock()
+	return c.savedCert != nil
 }
 
 // replaceSavedCert says whether a certificate built from the saved chain
@@ -946,21 +1007,6 @@ func sameCertIssuer(a, b [][]byte) bool {
 		return false
 	}
 	return bytes.Equal(la.AuthorityKeyId, lb.AuthorityKeyId) && bytes.Equal(la.RawIssuer, lb.RawIssuer)
-}
-
-// SameCertChain reports that two certificate chains are byte-for-byte equal:
-// how a cached client tells whether the certificate it was built with is
-// still the one in use.
-func SameCertChain(a, b [][]byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !bytes.Equal(a[i], b[i]) {
-			return false
-		}
-	}
-	return true
 }
 
 // fetchClientCertChainFromServer asks the reg server for the chain and caches
@@ -1000,12 +1046,12 @@ func (c *UserContext) UserGCli(m MetaContext) (*core.RpcClient, error) {
 	defer c.Unlock()
 
 	// Keep the client unless the memoized certificate has changed under it
-	// (refreshSavedCert). A replaced client is left to idle out, not shut
-	// down, since calls may still be in flight on it.
+	// (refreshSavedCert). A replaced client is retired: shut down once the
+	// calls still in flight on it are done.
 	if c.userGCli != nil {
 		cur := c.PrivKeys.GetCert()
-		if cur == nil || SameCertChain(c.userGCliChain, cur.Certificate) {
-			return c.userGCli, nil
+		if cur == nil || core.ClientCertID(cur) == c.userGCli.cert {
+			return c.userGCli.gcli, nil
 		}
 	}
 
@@ -1018,8 +1064,10 @@ func (c *UserContext) UserGCli(m MetaContext) (*core.RpcClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.userGCli = gcli
-	c.userGCliChain = cert.Certificate
+	if c.userGCli != nil {
+		c.userGCli.gcli.Retire()
+	}
+	c.userGCli = &certBoundClient{gcli: gcli, cert: core.ClientCertID(cert)}
 	return gcli, nil
 }
 

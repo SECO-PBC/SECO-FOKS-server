@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/stretchr/testify/require"
 )
 
@@ -105,11 +106,15 @@ func TestReplaceSavedCert(t *testing.T) {
 		"one about to expire gives way, same CA or not")
 }
 
-func TestSameCertChain(t *testing.T) {
-	require.True(t, SameCertChain([][]byte{{1, 2}, {3}}, [][]byte{{1, 2}, {3}}))
-	require.False(t, SameCertChain([][]byte{{1, 2}}, [][]byte{{1, 3}}))
-	require.False(t, SameCertChain([][]byte{{1}}, [][]byte{{1}, {2}}))
-	require.True(t, SameCertChain(nil, nil))
+func TestCertChainID(t *testing.T) {
+	id := core.ChainID
+	require.Equal(t, id([][]byte{{1, 2}, {3}}), id([][]byte{{1, 2}, {3}}))
+	require.NotEqual(t, id([][]byte{{1, 2}}), id([][]byte{{1, 3}}))
+	require.NotEqual(t, id([][]byte{{1}}), id([][]byte{{1}, {2}}))
+	require.NotEqual(t, id([][]byte{{1, 2}}), id([][]byte{{1}, {2}}), "the split matters")
+	require.Equal(t, core.NoClientCert, core.ClientCertID(nil))
+	require.NotEqual(t, core.NoClientCert, core.ClientCertID(&tls.Certificate{}))
+	require.Equal(t, id([][]byte{{7}}), core.ClientCertID(&tls.Certificate{Certificate: [][]byte{{7}}}))
 }
 
 // ReplaceCert is a compare-and-swap: a Clear (UserLock) or another

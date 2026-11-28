@@ -5,20 +5,30 @@ package chains
 
 import (
 	"crypto/tls"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
+	"github.com/keybase/clockwork"
 	"github.com/stretchr/testify/require"
 )
 
-type fakeClient struct{ down bool }
+type fakeClient struct{ down atomic.Bool }
 
-func (f *fakeClient) Shutdown() { f.down = true }
+func (f *fakeClient) Shutdown() { f.down.Store(true) }
+
+func newTestPool() (*prewarmPool[*fakeClient], clockwork.FakeClock) {
+	clk := clockwork.NewFakeClock()
+	return &prewarmPool[*fakeClient]{clock: clk}, clk
+}
+
+func certWith(chain ...[]byte) *tls.Certificate { return &tls.Certificate{Certificate: chain} }
 
 func TestPrewarmPoolHandsOverOnce(t *testing.T) {
-	var p prewarmPool[*fakeClient]
-	cert := &tls.Certificate{}
-	k := prewarmKey{st: proto.ServerType_KVStore, cert: cert}
+	p, _ := newTestPool()
+	k := prewarmKey{st: proto.ServerType_KVStore, cert: core.ClientCertID(certWith([]byte{1}))}
 	c := &fakeClient{}
 
 	require.True(t, p.put(k, c))
@@ -34,34 +44,55 @@ func TestPrewarmPoolHandsOverOnce(t *testing.T) {
 
 	// Taken clients belong to their taker: expiry leaves them alone.
 	p.expire(k, c)
-	require.False(t, c.down)
+	require.False(t, c.down.Load())
 }
 
-func TestPrewarmPoolKeysOnServiceAndCert(t *testing.T) {
-	var p prewarmPool[*fakeClient]
-	a, b := &tls.Certificate{}, &tls.Certificate{}
+// The pool keys on the chain presented, the identity every client cache
+// uses: a certificate rebuilt with the same chain finds the client.
+func TestPrewarmPoolKeysOnServiceAndChain(t *testing.T) {
+	p, _ := newTestPool()
+	a := core.ClientCertID(certWith([]byte{1}))
 	require.True(t, p.put(prewarmKey{st: proto.ServerType_KVStore, cert: a}, &fakeClient{}))
 
 	_, ok := p.take(prewarmKey{st: proto.ServerType_RealTime, cert: a})
 	require.False(t, ok, "another service")
-	_, ok = p.take(prewarmKey{st: proto.ServerType_KVStore, cert: b})
-	require.False(t, ok, "another certificate")
+	_, ok = p.take(prewarmKey{st: proto.ServerType_KVStore, cert: core.ClientCertID(certWith([]byte{2}))})
+	require.False(t, ok, "another chain")
+	_, ok = p.take(prewarmKey{st: proto.ServerType_KVStore, cert: core.ClientCertID(certWith([]byte{1}))})
+	require.True(t, ok, "the same chain in another *tls.Certificate")
 }
 
 func TestPrewarmPoolExpiresUnclaimed(t *testing.T) {
-	var p prewarmPool[*fakeClient]
+	p, clk := newTestPool()
 	k := prewarmKey{st: proto.ServerType_User}
 	c := &fakeClient{}
 	require.True(t, p.put(k, c))
 
-	p.expire(k, c)
-	require.True(t, c.down, "an unclaimed client is shut down")
+	clk.BlockUntil(1)
+	clk.Advance(prewarmUnclaimedAfter - time.Second)
+	require.True(t, p.has(k), "still waiting to be taken")
+	clk.Advance(time.Second)
+	require.Eventually(t, c.down.Load, time.Second, time.Millisecond, "an unclaimed client is shut down")
 	require.False(t, p.has(k))
 
 	// A newer client held under the same key is not the expired one.
 	c2 := &fakeClient{}
 	require.True(t, p.put(k, c2))
 	p.expire(k, c)
-	require.False(t, c2.down)
+	require.False(t, c2.down.Load())
 	require.True(t, p.has(k))
+}
+
+// A client taken before its expiry is never shut down by it.
+func TestPrewarmPoolLateExpiryLeavesTakenClient(t *testing.T) {
+	p, clk := newTestPool()
+	k := prewarmKey{st: proto.ServerType_RealTime}
+	c := &fakeClient{}
+	require.True(t, p.put(k, c))
+	clk.BlockUntil(1)
+	_, ok := p.take(k)
+	require.True(t, ok)
+	clk.Advance(prewarmUnclaimedAfter)
+	time.Sleep(20 * time.Millisecond)
+	require.False(t, c.down.Load())
 }

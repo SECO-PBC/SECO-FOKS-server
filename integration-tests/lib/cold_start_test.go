@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/foks-proj/go-foks/client/libclient"
+	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/foks-proj/go-foks/proto/lcl"
+	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/foks-proj/go-foks/proto/rem"
 	"github.com/stretchr/testify/require"
 )
@@ -43,15 +45,65 @@ func TestColdStartUsesSavedCertChain(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, u.uid, uid)
 
-	// In the background the chain is fetched from the reg server and saved
-	// for the next start; wait for that write before the home is removed.
+	// In the background the reg server confirms the key. The saved chain is
+	// still good, so nothing is rewritten: the row stays the chain in use, and
+	// a lock/unlock or the next start presents the same chain (no client is
+	// rebuilt for a reissued leaf).
+	require.Eventually(t, func() bool { return !au.SavedCertUnconfirmedForTest() },
+		10*time.Second, 50*time.Millisecond)
 	eid, err := au.ClientCertKeyForTest(cold)
 	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		var row lcl.UserCertChain
-		_, err := cold.DbGet(&row, libclient.DbTypeSoft, &u.uid, lcl.DataType_UserCertChain, eid)
-		return err == nil && !libclient.SameCertChain(row.Certs, warmCert.Certificate)
-	}, 10*time.Second, 50*time.Millisecond)
+	var row lcl.UserCertChain
+	_, err = cold.DbGet(&row, libclient.DbTypeSoft, &u.uid, lcl.DataType_UserCertChain, eid)
+	require.NoError(t, err)
+	require.Equal(t, core.ChainID(warmCert.Certificate), core.ChainID(row.Certs),
+		"a confirmed saved chain is not replaced by the reissued one")
+
+	// So a third start presents it again.
+	third := tew.NewClientMetaContextAtHome(t, u, home)
+	thirdCert, err := third.G().ActiveUser().ClientCert(third)
+	require.NoError(t, err)
+	require.Equal(t, core.ClientCertID(warmCert), core.ClientCertID(thirdCert))
+}
+
+// TestSavedCertRefusedAfterRevoke: a cold start on a device revoked since
+// the last run presents its saved chain at once, but the background
+// confirmation's refusal drops it, so the next use asks the reg server and
+// sees the refusal, rather than retrying the confirmation forever.
+func TestSavedCertRefusedAfterRevoke(t *testing.T) {
+	tew := testEnvBeta(t)
+	u := tew.NewTestUserFakeRoot(t)
+	tew.DirectMerklePokeForLeafCheck(t)
+	other := u.ProvisionNewDevice(t, u.eldest, "other", proto.DeviceType_Computer,
+		proto.NewRoleDefault(proto.RoleType_OWNER))
+	tew.DirectMerklePokeForLeafCheck(t)
+
+	home := t.TempDir()
+	warm := tew.NewClientMetaContextAtHome(t, u, home)
+	_, err := warm.G().ActiveUser().ClientCert(warm)
+	require.NoError(t, err)
+
+	cold := tew.NewClientMetaContextAtHome(t, u, home)
+	au := cold.G().ActiveUser()
+	eid, err := au.ClientCertKeyForTest(cold)
+	require.NoError(t, err)
+
+	tew.DirectMerklePokeForLeafCheck(t)
+	u.RevokeDevice(t, other, u.eldest)
+	tew.DirectMerklePokeForLeafCheck(t)
+
+	_, err = au.ClientCert(cold)
+	require.NoError(t, err, "the saved chain is used without asking the reg server")
+
+	require.Eventually(t, func() bool { return !au.SavedCertUnconfirmedForTest() },
+		10*time.Second, 50*time.Millisecond)
+	var row lcl.UserCertChain
+	_, err = cold.DbGet(&row, libclient.DbTypeSoft, &u.uid, lcl.DataType_UserCertChain, eid)
+	require.Error(t, err, "the refused chain is no longer saved")
+
+	_, err = au.ClientCert(cold)
+	require.Error(t, err)
+	require.True(t, core.IsAuthError(err), "got %T: %v", err, err)
 }
 
 // TestReplacedCertReachesClients: when the certificate in use is replaced (a

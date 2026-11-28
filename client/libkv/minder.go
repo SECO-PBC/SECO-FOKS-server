@@ -125,6 +125,15 @@ func newCaches(p proto.FQParty, settings libclient.CacheSettings) *caches {
 	}
 }
 
+// localClient is the home server's client together with what it was built
+// from: its RPC client (to retire it when replaced) and the identity of the
+// certificate it presents.
+type localClient struct {
+	cli  rem.KVStoreClient
+	gcli *core.RpcClient
+	cert core.CertChainID
+}
+
 type Minder struct {
 	sync.RWMutex
 
@@ -133,9 +142,8 @@ type Minder struct {
 	probes        libclient.ProbeCollection
 	cacheSettings libclient.CacheSettings
 
-	localCliMu    sync.Mutex
-	localCli      *rem.KVStoreClient
-	localCliChain [][]byte // the client cert chain localCli was built with
+	localCliMu sync.Mutex
+	localCli   *localClient // nil until first use
 
 	testHooks *MinderTestHooks
 }
@@ -201,6 +209,12 @@ func (k *Minder) clientLocal(
 	*rem.KVStoreClient,
 	error,
 ) {
+	// The certificate is read under localCliMu, so two callers racing a
+	// certificate replacement cannot rebuild the client back onto the
+	// replaced one.
+	k.localCliMu.Lock()
+	defer k.localCliMu.Unlock()
+
 	cert, err := au.ClientCert(m)
 	if err != nil {
 		return nil, nil, err
@@ -210,23 +224,23 @@ func (k *Minder) clientLocal(
 		return nil, nil, core.HomeError("no home server")
 	}
 
-	k.localCliMu.Lock()
-	defer k.localCliMu.Unlock()
-
 	// A client made with an older certificate (the saved chain, replaced
-	// after a CA change) is rebuilt; the old one is left to idle out.
-	if k.localCli != nil && libclient.SameCertChain(k.localCliChain, cert.Certificate) {
-		return pr, k.localCli, nil
+	// after a CA change) is rebuilt; the old one is retired, shut down once
+	// the calls still in flight on it are done.
+	certID := core.ClientCertID(cert)
+	if k.localCli != nil && k.localCli.cert == certID {
+		return pr, &k.localCli.cli, nil
 	}
 
 	gcli, err := pr.RPCClient(m, proto.ServerType_KVStore, cert)
 	if err != nil {
 		return nil, nil, err
 	}
-	ret := core.NewKVStoreClient(gcli, m)
-	k.localCli = &ret
-	k.localCliChain = cert.Certificate
-	return pr, &ret, nil
+	if k.localCli != nil {
+		k.localCli.gcli.Retire()
+	}
+	k.localCli = &localClient{cli: core.NewKVStoreClient(gcli, m), gcli: gcli, cert: certID}
+	return pr, &k.localCli.cli, nil
 }
 
 func (k *Minder) probe(m libclient.MetaContext, host proto.HostID) (*chains.Probe, error) {
