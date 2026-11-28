@@ -2046,6 +2046,7 @@ func (k *Minder) List(
 	// it could not.
 	m, done := k.instrumentScope(m, "KVMinder.List")
 	defer done()
+	m = m.withOperationScopes()
 
 	kvp, err := k.initReq(m, cfg)
 	if err != nil {

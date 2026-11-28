@@ -6,7 +6,9 @@ package lib
 import (
 	"testing"
 
+	"github.com/foks-proj/go-foks/client/libclient"
 	"github.com/foks-proj/go-foks/integration-tests/common"
+	"github.com/foks-proj/go-foks/lib/core"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,16 +43,32 @@ func TestListMembershipsRoundTripBudget(t *testing.T) {
 	require.NoError(t, err)
 
 	mc, stats := mc.WithRpcStats()
+	mc = libclient.WithPrefetchScope(mc)
 	lst, err := tmm.ListMemberships(mc, nil)
 	require.NoError(t, err)
 	require.Equal(t, nTeams, len(lst.Teams))
 
+	// Loads are counted whether they went to the network on their own or
+	// came back in the exploration's User.sync batch: the per-method numbers
+	// below are about how many loads the listing needs, not how they travel.
+	served := core.PrefetchScopeFromContext(mc.Ctx()).HitsByMethod()
 	byMethod := make(map[string]int)
 	for _, ms := range stats.ByMethod() {
 		byMethod[ms.Method] = ms.Calls
 	}
-	t.Logf("ListMemberships over %d teams: %d RPCs, by method %v",
-		nTeams, stats.Calls(), byMethod)
+	for k, v := range served {
+		byMethod[k] += v
+	}
+	t.Logf("ListMemberships over %d teams: %d RPCs, depth %d, loads by method %v (of which batched %v)",
+		nTeams, stats.Calls(), stats.Depth(), byMethod, served)
+
+	// A first run has no local state to plan team loads from (and no saved
+	// view tokens), so the batch carries just my chain, my membership chain
+	// and the team list: three round trips become one.
+	require.Equal(t, 1, byMethod["User.sync"])
+	require.Equal(t, 1, served["User.loadUserChain"])
+	require.Equal(t, 1, served["User.loadGenericChain"])
+	require.Equal(t, 1, served["User.getTeamListServerTrust"])
 
 	// One chain load per team. This was two per team until the explore path
 	// started handing its completed loader to the membership loader instead

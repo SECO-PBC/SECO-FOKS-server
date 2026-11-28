@@ -260,9 +260,28 @@ func (b *BaseChainLoader) runMany(m MetaContext, runOnce func(m MetaContext) err
 	n := params.Cfg.NumRetries
 	wait := params.Cfg.Wait
 
+	// A reply fetched ahead in a batch (core.PrefetchScope) predates
+	// whatever this device stored after the batch went out -- a newer merkle
+	// root from another load, say -- so checking it can fail where a reply
+	// fetched now would pass. A run that used one and failed is run once
+	// more: the batch's reply is used up, so that run asks the server.
+	fellBack := false
+
 	for i := 0; true; i++ {
 
-		err = runOnce(m)
+		mi := m
+		ctx, served := core.WithPrefetchServedCount(m.Ctx())
+		mi.MetaContext = m.MetaContext.WithContext(ctx)
+		err = runOnce(mi)
+		if err != nil && served.Load() > 0 && !fellBack {
+			fellBack = true
+			m.Infow("BaseChainLoader::Run", "retry", "batched reply failed", "err", err.Error())
+			if resetState != nil {
+				resetState()
+			}
+			i--
+			continue
+		}
 		if err == nil || i >= n {
 			return err
 		}

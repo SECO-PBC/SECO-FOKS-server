@@ -56,6 +56,9 @@ type Minder struct {
 	localCliMu sync.Mutex
 	localCli   *rem.RealTimeClient
 
+	// laterMarks tracks marks markLater has in flight.
+	laterMarks sync.WaitGroup
+
 	// Always-on instrumentation counters; read via Metrics(). Useful for tests
 	// and debugging (e.g. asserting a read was served entirely from cache).
 	serverThreadReads atomic.Int64
@@ -2356,6 +2359,10 @@ func (d *Minder) GetThreadView(
 	if err != nil {
 		return nil, err
 	}
+	// One operation: loads of my own chain are shared across its steps, and
+	// replies a batch fetched ahead answer its calls (docs/rtt-budget.md).
+	m = NewMetaContext(libclient.WithReadOperationScopes(m.Base()))
+
 	page, err := d.GetThreadPage(m, team, appID, channel, before, num)
 	if err != nil {
 		return nil, err
@@ -2409,10 +2416,16 @@ func (d *Minder) GetThreadView(
 		for i := range msgs[1:] {
 			maxSeq = max(maxSeq, msgs[i+1].Seq)
 		}
-		// The page names the channel it resolved; no second listing.
-		if page.Chid != (proto.RTChannelID{}) {
+		// The page names the channel it resolved; no second listing. The
+		// head page's mark goes out only now that the page is built and
+		// verified, and without holding up the view (markLater).
+		switch {
+		case before == 0 && page.Chid != (proto.RTChannelID{}):
+			d.markLater(m, page.Chid, maxSeq)
+			err = nil
+		case page.Chid != (proto.RTChannelID{}):
 			err = d.readThroughChid(m, page.Chid, maxSeq, false, false)
-		} else {
+		default:
 			err = d.ReadThrough(m, team, appID, channel, maxSeq)
 		}
 		if err != nil {
@@ -2420,6 +2433,28 @@ func (d *Minder) GetThreadView(
 		}
 	}
 	return &ret, nil
+}
+
+// markLater marks chid read through seq once the view that built, verified
+// and showed the page through seq has returned, so the mark costs the view no
+// round trip and is never sent for a page that failed. It runs detached from
+// the view's operation (libclient.DetachFromOperation): not cancelled with
+// it, not in its RPC stats, and outside its load-me and prefetch scopes.
+// Queued for the outbox drain if the server is unreachable, as any mark is.
+func (d *Minder) markLater(m MetaContext, chid proto.RTChannelID, seq proto.RTMsgSeq) {
+	mm := NewMetaContext(libclient.DetachFromOperation(m.Base()))
+	d.laterMarks.Add(1)
+	go func() {
+		defer d.laterMarks.Done()
+		if err := d.readThroughChid(mm, chid, seq, false, false); err != nil {
+			mm.Warnw("GetThreadView", "stage", "markLater", "err", err)
+		}
+	}()
+}
+
+// WaitLaterMarks waits for the marks markLater sent. For tests.
+func (d *Minder) WaitLaterMarks() {
+	d.laterMarks.Wait()
 }
 
 // threadMessageToView converts a decrypted ThreadMessage to the app-layer
@@ -2449,6 +2484,12 @@ func threadMessageToView(
 	return ret
 }
 
+// partyResult carries a team load run alongside a server read.
+type partyResult struct {
+	rtp *RTParty
+	err error
+}
+
 // Get the num most recent messages that we don't already have.
 func (d *Minder) GetThreadRecentMsgs(
 	m MetaContext,
@@ -2468,12 +2509,55 @@ func (d *Minder) GetThreadRecentMsgs(
 		num = 128
 	}
 	inc := -1
+
 	// The head page asks the server, which refuses a channel the caller cannot
 	// see; an id needs no listing to be found. The one answer served without
-	// the server (the degraded read below) checks the listing first.
-	irr, err := d.initReq(m, team, appID, channel, resolveIDWithoutListing)
-	if err != nil {
-		return nil, err
+	// the server (the degraded read below) checks the listing first. And the
+	// request needs
+	// nothing from the team -- only the channel id and how far the local cache
+	// goes -- so for a channel named by id, load the team (which may itself
+	// take round trips after a restart) alongside the read rather than before
+	// it. The team's keys are needed only to open the messages, below.
+	var irr *initReqResult
+	var partyC chan partyResult
+	if t, terr := channel.GetT(); terr == nil && t == lcl.RTChannelSpecifierType_ID {
+		partyC = make(chan partyResult, 1)
+		go func() {
+			rtp, err := d.base.GetParty(m.Base(), team)
+			partyC <- partyResult{rtp: rtp, err: err}
+		}()
+		pr, cli, err := d.clientLocal(m.Base(), d.au)
+		if err != nil {
+			<-partyC
+			return nil, err
+		}
+		irr = &initReqResult{
+			hostId: pr.Chain().HostID(),
+			ch:     &lcl.RTChannelMetadataPlaintext{Id: channel.Id()},
+			cli:    cli,
+			appID:  appID,
+			// Not listed: the degraded read must confirm visibility before
+			// serving the cache (confirmVisibleForCachedRead).
+			resolvedBy: resolveIDWithoutListing,
+		}
+	} else {
+		irr, err = d.initReq(m, team, appID, channel, resolveIDWithoutListing)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// waitParty joins the team load started above, if any.
+	waitParty := func() error {
+		if partyC == nil {
+			return nil
+		}
+		res := <-partyC
+		partyC = nil
+		if res.err != nil {
+			return res.err
+		}
+		irr.rtp = res.rtp
+		return nil
 	}
 
 	sess := newMsgSession()
@@ -2485,21 +2569,14 @@ func (d *Minder) GetThreadRecentMsgs(
 		num,
 	)
 	if err != nil {
+		_ = waitParty()
 		return nil, err
 	}
-	cached, err := d.decodeMsgs(
-		m,
-		irr.rtp,
-		appID,
-		irr.ch.Id,
-		cachedMsgsEnc,
-	)
-	if err != nil {
-		return nil, err
-	}
+	// Cached rows carry their seq in the clear, and opening them is one to
+	// one, so the newest cached seq is known before the team is.
 	var stopAt proto.RTMsgSeq
-	if len(cached) > 0 {
-		stopAt = cached[0].Seq
+	if len(cachedMsgsEnc) > 0 {
+		stopAt = cachedMsgsEnc[0].Seq
 	}
 	d.serverRecentReads.Add(1)
 	var fresh rem.RTMsgList
@@ -2515,6 +2592,19 @@ func (d *Minder) GetThreadRecentMsgs(
 			},
 		)
 	}
+	if perr := waitParty(); perr != nil {
+		return nil, perr
+	}
+	cached, cerr := d.decodeMsgs(
+		m,
+		irr.rtp,
+		appID,
+		irr.ch.Id,
+		cachedMsgsEnc,
+	)
+	if cerr != nil {
+		return nil, cerr
+	}
 	if err != nil {
 		// Degraded read (docs/rt_offline.md, D4): serve the cached tail,
 		// flagged stale. An empty cache still errors, and so does a channel
@@ -2528,6 +2618,25 @@ func (d *Minder) GetThreadRecentMsgs(
 		}
 		return nil, err
 	}
+	return d.finishRecents(m, sess, irr, appID, num, inc, fresh, cached)
+}
+
+// finishRecents opens a recents reply, merges it with the cached tail and
+// fills any holes, as the head page has always done.
+func (d *Minder) finishRecents(
+	m MetaContext,
+	sess *msgSession,
+	irr *initReqResult,
+	appID proto.RTAppID,
+	num uint,
+	inc int,
+	fresh rem.RTMsgList,
+	cached []ThreadMessage,
+) (
+	*ThreadReadResult,
+	error,
+) {
+	var err error
 	d.hookRecentsRes(&fresh)
 	err = sess.loadFromServer(extractAllSeqIDPairsFromMsgList(fresh.Lst))
 	if err != nil {

@@ -358,6 +358,15 @@ func (m MetaContext) WithRpcStats() (MetaContext, *core.RpcStats) {
 	return ret, st
 }
 
+// withOperationScopes runs m as one operation: loads of my own chain are
+// shared across its steps, and replies a batch fetched ahead (the team's
+// exploration, as one User.sync) answer its calls. docs/rtt-budget.md.
+func (m MetaContext) withOperationScopes() MetaContext {
+	ret := m
+	ret.MetaContext = libclient.WithReadOperationScopes(m.MetaContext)
+	return ret
+}
+
 func NewMetaContext(m libclient.MetaContext) MetaContext {
 	return MetaContext{
 		MetaContext: m,

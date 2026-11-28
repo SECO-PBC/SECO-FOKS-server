@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/foks-proj/go-foks/lib/core"
 	proto "github.com/foks-proj/go-foks/proto/lib"
 	"github.com/stretchr/testify/require"
 )
@@ -173,4 +174,25 @@ func TestLoadMeScopeWaiterSharesFailureNotCancel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Work detached from an operation keeps none of its scopes, and is not
+// cancelled with it.
+func TestDetachContextDropsScopes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx, _ = core.WithRpcStats(ctx)
+	ctx, _ = core.WithPrefetchScope(ctx)
+	ctx = context.WithValue(ctx, loadMeScopeKey{}, &loadMeScope{})
+	cancel()
+
+	d := detachContext(ctx)
+	require.NoError(t, d.Err())
+	require.Nil(t, core.RpcStatsFromContext(d))
+	require.Nil(t, core.PrefetchScopeFromContext(d))
+	s, _ := d.Value(loadMeScopeKey{}).(*loadMeScope)
+	require.Nil(t, s)
+
+	// A new operation started from detached work gets a scope of its own.
+	_, fresh := core.WithPrefetchScope(d)
+	require.NotNil(t, fresh)
 }

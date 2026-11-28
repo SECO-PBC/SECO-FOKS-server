@@ -103,6 +103,22 @@ func (t *Telemetry) wrapRPC(
 	}
 }
 
+// ObserveCall records f, a call made inside another RPC (one of User.sync's
+// batched loads), as the RPC it stands in for: its own span, latency, and
+// error or expected-error counts under method. A batched load then shows in
+// telemetry as the standalone call would, rather than vanishing into a
+// successful batch.
+func (t *Telemetry) ObserveCall(ctx context.Context, method string, f func(context.Context) error) error {
+	if t == nil || !t.Enabled() {
+		return f(ctx)
+	}
+	h := t.wrapRPC(method, func(ctx context.Context, _ interface{}) (interface{}, error) {
+		return nil, f(ctx)
+	})
+	_, err := h(ctx, nil)
+	return err
+}
+
 // expectedRPCErrors maps a method to the status codes that answer the
 // request rather than report a failure: "no such key" or "your cache is
 // stale" from a kvGet, "your cache is stale" from kvCacheCheck. The same

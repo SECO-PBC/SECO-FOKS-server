@@ -320,6 +320,9 @@ func (c *connectionMgr) connectLoop(m RpcClientMetaContexter) (*tls.Conn, error)
 
 type RpcClient struct {
 	sync.Mutex
+	// refused: the optional methods this client's current connection
+	// answered "method not found" (optional_method.go).
+	refused       refusals
 	tlsConfig     *tls.Config
 	remote        proto.TCPAddr
 	nOut          int
@@ -510,10 +513,28 @@ func (c *RpcClient) Call2(ctx context.Context, method rpc.Methoder, arg interfac
 		defer canc()
 	}
 
-	gcli, err := c.ConnectCli(ctx)
+	name := method.String()
+
+	// A reply fetched ahead for this exact call, by a batched call earlier in
+	// the same operation, answers it without a round trip (see prefetch.go).
+	if PrefetchScopeFromContext(ctx).serve(c, name, arg, res) {
+		countPrefetchServed(ctx)
+		return nil
+	}
+
+	xp, err := c.Connect(ctx)
 	if err != nil {
 		return err
 	}
+	// An optional method this connection's server said it doesn't have is
+	// answered the same way here, without asking again: the caller falls
+	// back to the older calls at no extra cost. Only for the connection the
+	// refusal came over -- a re-dial may reach an upgraded server.
+	optional := optionalMethodFromContext(ctx) == name
+	if optional && c.refused.has(xp, name) {
+		return rpc.NewMethodV2NotFoundError(0, 0, name)
+	}
+	gcli := rpc.NewClient(xp, nil, nil)
 	c.inc()
 	defer c.dec()
 
@@ -524,8 +545,18 @@ func (c *RpcClient) Call2(ctx context.Context, method rpc.Methoder, arg interfac
 	st := RpcStatsFromContext(ctx)
 	start := c.now()
 	st.Begin(start)
-	err = gcli.Call2(ctx, method, arg, res, timeout, ew)
-	st.End(method.String(), start, c.now(), err)
+	missing, err := applyRpcTestKnobs(ctx, name)
+	switch {
+	case err != nil:
+	case missing:
+		err = rpc.NewMethodV2NotFoundError(0, 0, name)
+	default:
+		err = gcli.Call2(ctx, method, arg, res, timeout, ew)
+	}
+	st.End(name, start, c.now(), err)
+	if optional && IsMethodNotFound(err) {
+		c.refused.note(xp, name)
+	}
 
 	if errors.Is(err, io.EOF) {
 		return RPCEOFError{}

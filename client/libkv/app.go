@@ -22,14 +22,14 @@ type App struct {
 	sync.Mutex
 	parent *libclient.UserContext
 	user   *Minder
-	teams  map[proto.FQTeam]*Minder
+	teams  map[libclient.TeamKey]*Minder
 	rest   *RESTServer
 }
 
 func NewApp(u *libclient.UserContext) *App {
 	return &App{
 		parent: u,
-		teams:  make(map[proto.FQTeam]*Minder),
+		teams:  make(map[libclient.TeamKey]*Minder),
 	}
 }
 
@@ -54,20 +54,18 @@ func (a *App) Minder(m MetaContext, actingAs *proto.FQTeamParsed) (*Minder, erro
 	if actingAs == nil {
 		return a.getUser(), nil
 	}
-	fqp, err := a.parent.TeamMinder().ResolveAndReindex(
-		m.MetaContext,
-		team.WrapNamed(*actingAs),
-		nil,
-	)
+	// Only a key for this team's minder: may be resolved unchecked while an
+	// exploration runs (ResolveForKey); the minder's loads check for themselves.
+	key, err := a.parent.TeamMinder().ResolveForKey(m.MetaContext, team.WrapNamed(*actingAs))
 	if err != nil {
 		return nil, err
 	}
 	a.Lock()
 	defer a.Unlock()
 	var ret *Minder
-	if ret = a.teams[*fqp]; ret == nil {
+	if ret = a.teams[key]; ret == nil {
 		ret = NewMinder(a.parent)
-		a.teams[*fqp] = ret
+		a.teams[key] = ret
 	}
 	return ret, nil
 }

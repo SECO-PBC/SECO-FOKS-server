@@ -53,6 +53,14 @@ type RpcStats struct {
 	active    int
 	busyStart time.Time
 	busy      time.Duration
+
+	// spans holds every call's interval, for Depth. Kept per scope (not only
+	// on the outermost) so an inner scope can report its own depth.
+	spans []rpcSpan
+}
+
+type rpcSpan struct {
+	start, end time.Time
 }
 
 // RpcMethodStat is the per-method rollup returned by ByMethod.
@@ -78,6 +86,12 @@ func WithRpcStats(ctx context.Context) (context.Context, *RpcStats) {
 	st := NewRpcStats()
 	st.parent = RpcStatsFromContext(ctx)
 	return context.WithValue(ctx, rpcStatsKey{}, st), st
+}
+
+// WithoutRpcStats returns ctx with no collector: for work an operation leaves
+// running after it returns, which is not part of what its scope measured.
+func WithoutRpcStats(ctx context.Context) context.Context {
+	return context.WithValue(ctx, rpcStatsKey{}, (*RpcStats)(nil))
 }
 
 // RpcStatsFromContext returns the collector in ctx, or nil if the caller did
@@ -126,6 +140,7 @@ func (s *RpcStats) endSelf(method string, start, end time.Time, err error) {
 	}
 	s.calls++
 	s.dur += end.Sub(start)
+	s.spans = append(s.spans, rpcSpan{start: start, end: end})
 	if err != nil {
 		s.errs++
 	}
@@ -175,6 +190,40 @@ func (s *RpcStats) Busy() time.Duration {
 	return s.busy
 }
 
+// Depth is the number of round trips the scope's calls cost when laid end to
+// end: the longest chain of calls in which each one started only after the
+// previous one had finished. Calls that overlapped count once between them,
+// so this -- not Calls -- is what a slow link multiplies by its round-trip
+// time. Two calls that merely happened not to overlap (a loop issuing them one
+// after another) count as two, which is the point: they were sequential.
+func (s *RpcStats) Depth() int {
+	if s == nil {
+		return 0
+	}
+	s.Lock()
+	spans := append([]rpcSpan(nil), s.spans...)
+	s.Unlock()
+	return rpcDepth(spans)
+}
+
+// rpcDepth is the longest chain of non-overlapping spans, ordered by time.
+// Quadratic, which is fine for the tens of calls one operation makes.
+func rpcDepth(spans []rpcSpan) int {
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start.Before(spans[j].start) })
+	chain := make([]int, len(spans))
+	best := 0
+	for i := range spans {
+		chain[i] = 1
+		for j := 0; j < i; j++ {
+			if !spans[j].end.After(spans[i].start) && chain[j]+1 > chain[i] {
+				chain[i] = chain[j] + 1
+			}
+		}
+		best = max(best, chain[i])
+	}
+	return best
+}
+
 // ByMethod returns the per-method rollup, costliest first.
 func (s *RpcStats) ByMethod() []RpcMethodStat {
 	if s == nil {
@@ -213,6 +262,7 @@ func (s *RpcStats) LogArgs(wall time.Duration, topN int) []any {
 	ret := []any{
 		"wallMs", wall.Milliseconds(),
 		"rpcs", s.Calls(),
+		"rpcDepth", s.Depth(),
 		"rpcMs", rpc.Milliseconds(),
 		"localMs", local.Milliseconds(),
 	}
@@ -249,6 +299,64 @@ func (s *RpcStats) ErrCount() int {
 	s.Lock()
 	defer s.Unlock()
 	return s.errs
+}
+
+// ── Test knobs: simulated latency and older servers ──
+//
+// On loopback a round trip takes microseconds, so two calls a client issues
+// concurrently may still not overlap, and Depth would count them as
+// sequential. Tests that pin a round-trip budget add a fixed delay per call,
+// which makes overlap (or its absence) reflect how the client issued them.
+// Tests of the fallbacks for servers without a method make calls to it fail
+// as such a server would.
+//
+// Both ride the call's context, and are read only once a test has used one
+// (rpcTestKnobsOn): a production process never pays more than an atomic load
+// for them.
+
+var rpcTestKnobsOn atomic.Bool
+
+type rpcLatencyKey struct{}
+
+// WithSimulatedRpcLatency makes every RPC issued under ctx wait d before it
+// is sent. For tests only.
+func WithSimulatedRpcLatency(ctx context.Context, d time.Duration) context.Context {
+	rpcTestKnobsOn.Store(true)
+	return context.WithValue(ctx, rpcLatencyKey{}, d)
+}
+
+type rpcRefuseKey struct{}
+
+// WithSimulatedMissingMethods makes every call under ctx to one of methods
+// fail as an older server without it would: rpc.MethodV2NotFoundError,
+// after a round trip. For tests only.
+func WithSimulatedMissingMethods(ctx context.Context, methods ...string) context.Context {
+	rpcTestKnobsOn.Store(true)
+	set := make(map[string]bool, len(methods))
+	for _, meth := range methods {
+		set[meth] = true
+	}
+	return context.WithValue(ctx, rpcRefuseKey{}, set)
+}
+
+// applyRpcTestKnobs runs the knobs ctx carries for a call to method: waits
+// out the simulated latency (or the context), and reports whether the call
+// is to fail as missing.
+func applyRpcTestKnobs(ctx context.Context, method string) (missing bool, err error) {
+	if !rpcTestKnobsOn.Load() {
+		return false, nil
+	}
+	if d, _ := ctx.Value(rpcLatencyKey{}).(time.Duration); d > 0 {
+		timer := time.NewTimer(d)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return false, ctx.Err()
+		}
+	}
+	set, _ := ctx.Value(rpcRefuseKey{}).(map[string]bool)
+	return set[method], nil
 }
 
 // ── Scope reporting ──

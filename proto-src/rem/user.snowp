@@ -137,6 +137,52 @@ struct YubiEncryptedManagementKey {
     role @3 : lib.Role;
 }
 
+
+// ── Batched loads (fork-only; docs/rtt-budget.md) ──
+//
+// sync runs several of this server's read-only loads in one round trip. Each
+// call is exactly the argument the client would otherwise send on its own,
+// and each reply exactly what that call would return, so the client verifies
+// the replies with the code it already has.
+
+enum SyncCallType {
+    LoadUserChain @1;
+    LoadGenericChain @2;
+    TeamListServerTrust @3;
+    LoadTeamChain @4;
+    LoadTeamMembershipChain @5;
+}
+
+struct SyncLoadGenericChainArg {
+    eid @0 : lib.EntityID;
+    typ @1 : lib.ChainType;
+    start @2 : lib.Seqno;
+}
+
+variant SyncCall switch (t : SyncCallType) {
+    case LoadUserChain @1 : LoadUserChainArg;
+    case LoadGenericChain @2 : SyncLoadGenericChainArg;
+    case TeamListServerTrust : void;
+    case LoadTeamChain @4 : LoadTeamChainArg;
+    case LoadTeamMembershipChain @5 : LoadTeamMembershipChainArg;
+}
+
+variant SyncReply switch (t : SyncCallType) {
+    case LoadUserChain @1 : UserChain;
+    case LoadGenericChain @2 : GenericChain;
+    case TeamListServerTrust @3 : LocalTeamList;
+    case LoadTeamChain @4 : TeamChain;
+    case LoadTeamMembershipChain @5 : GenericChain;
+}
+
+// One per call, in the order sent: the call's reply, or its error. A failed
+// call fails alone; the rest of the batch still answers. A reply is of the
+// same SyncCallType as its call.
+variant SyncResult switch (ok : Bool) {
+    case true @1 : SyncReply;
+    case false @0 : lib.Status;
+}
+
 protocol User 
     errors lib.Status 
     argHeader lib.Header 
@@ -276,4 +322,9 @@ protocol User
     reportClientAnalytics @201 (
         batch @0 : lib.ClientAnalyticsBatch
     );
+
+    // Several loads in one round trip (docs/rtt-budget.md). Fork-only.
+    sync @202 (
+        calls @0 : List(SyncCall)
+    ) -> List(SyncResult);
 }

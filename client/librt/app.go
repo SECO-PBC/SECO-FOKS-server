@@ -14,7 +14,7 @@ var AppID = libclient.AppID("rt")
 type App struct {
 	sync.Mutex
 	parent *libclient.UserContext
-	teams  map[proto.FQTeam]*Minder
+	teams  map[libclient.TeamKey]*Minder
 	user   *Minder // team-independent flows (e.g. the inbox); lazily made
 
 	// One lock per appID serializes inbox syncs for this user (the App is a
@@ -26,7 +26,7 @@ type App struct {
 func NewApp(u *libclient.UserContext) *App {
 	return &App{
 		parent:         u,
-		teams:          make(map[proto.FQTeam]*Minder),
+		teams:          make(map[libclient.TeamKey]*Minder),
 		inboxSyncLocks: make(map[proto.RTAppID]*sync.Mutex),
 	}
 }
@@ -49,16 +49,18 @@ func (a *App) Minder(m MetaContext, actingAs lcl.ConfigTeam) (*Minder, error) {
 	if typ == lcl.ConfigTeamType_None {
 		return nil, core.InternalError("no actingAs team in librt.App.Minder")
 	}
-	fqp, err := a.parent.TeamMinder().ResolveAndReindex(m.MetaContext, actingAs, nil)
+	// Only a key for this team's minder: may be resolved unchecked while an
+	// exploration runs (ResolveForKey); the minder's loads check for themselves.
+	key, err := a.parent.TeamMinder().ResolveForKey(m.MetaContext, actingAs)
 	if err != nil {
 		return nil, err
 	}
 	a.Lock()
 	defer a.Unlock()
 	var ret *Minder
-	if ret = a.teams[*fqp]; ret == nil {
+	if ret = a.teams[key]; ret == nil {
 		ret = NewMinder(a.parent)
-		a.teams[*fqp] = ret
+		a.teams[key] = ret
 	}
 	return ret, nil
 }
