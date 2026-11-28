@@ -179,11 +179,11 @@ func (m MetaContext) NetworkConditioner() core.NetworkConditioner {
 	return m.g.NetworkConditioner()
 }
 
-// WithoutCancel is m with a context that outlives m's: for work a call
-// leaves running after it returns (chains.DiscoveryMgr's background probe).
-func (m MetaContext) WithoutCancel() chains.MetaContext {
+// WithContextI is m over ctx, for chains code that derives a context of its
+// own (chains.DiscoveryMgr's background probe).
+func (m MetaContext) WithContextI(ctx context.Context) chains.MetaContext {
 	ret := m
-	ret.MetaContext = m.MetaContext.WithContext(context.WithoutCancel(m.Ctx()))
+	ret.MetaContext = m.MetaContext.WithContext(ctx)
 	return ret
 }
 

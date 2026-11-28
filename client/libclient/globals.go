@@ -282,6 +282,9 @@ func (g *GlobalContext) Shutdown() {
 	g.Lock()
 	defer g.Unlock()
 	_ = g.log.Sync()
+	if g.discovery != nil {
+		g.discovery.Shutdown()
+	}
 	hook := g.shutdownHook
 	if hook == nil {
 		return
@@ -621,10 +624,10 @@ func (g *GlobalContext) Probe(ctx context.Context, h proto.HostID, timeout time.
 
 // ProbeCachedOK is Probe for loading the active user: a host this device
 // has verified before is used at once from its stored identity while a full
-// probe re-verifies it in the background (chains.ProbeArg.CachedOK).
+// probe re-verifies it in the background (chains.DiscoveryMgr.ProbeCachedOK).
 func (g *GlobalContext) ProbeCachedOK(ctx context.Context, h proto.HostID, timeout time.Duration) (*chains.Probe, error) {
 	m := NewMetaContext(ctx, g)
-	return g.discovery.Probe(m, chains.ProbeArg{HostID: h, Timeout: timeout, CachedOK: true})
+	return g.discovery.ProbeCachedOK(m, h, timeout)
 }
 
 func (g *GlobalContext) ProbeWithAddr(ctx context.Context, h proto.HostID, addr proto.TCPAddr, timeout time.Duration) (*chains.Probe, error) {

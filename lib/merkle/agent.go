@@ -112,6 +112,13 @@ func (a *Agent) HostID() proto.HostID {
 
 func (a *Agent) Shutdown() {}
 
+// ShutdownClient closes the agent's connection, for its owner to call once
+// nobody else holds the agent. (Shutdown is a no-op on purpose: callers that
+// borrow a shared agent defer it.)
+func (a *Agent) ShutdownClient() {
+	a.gcli.Shutdown()
+}
+
 func (a *Agent) Reset() {
 	a.gcli.Reset()
 }
