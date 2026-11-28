@@ -535,8 +535,9 @@ type DrainResult struct {
 	Failed     []proto.RTMsgID
 	FailedErrs map[proto.RTMsgID]error
 	// TransportErr is the first transport-level failure, if the pass ended
-	// early because the server was unreachable; the remaining rows stay
-	// queued.
+	// early because the server was unreachable or the caller's context was
+	// done (while sending, or while waiting for another drain of a channel);
+	// the remaining rows stay queued.
 	TransportErr error
 }
 
@@ -594,12 +595,47 @@ func (d *Minder) snapshotQueue(
 	return ret, nil
 }
 
+// drainChannel drains one channel's queued rows under its drain lock. Drains
+// of a channel run one at a time: two at once would race to send the same
+// rows, and the one that lost could not tell its own message had been
+// delivered (its row gone, its ack the other drain's) -- a send online would
+// come back "queued for delivery on reconnect".
+//
+// The lock is taken before the channel is read, even when the caller's own
+// snapshot found nothing queued: a drain running beside this one may have
+// settled a row (removed it, or marked it Failed) and not yet handed the
+// outcome to the Send waiting on it, and that hand-off happens before the
+// lock is released. So a DrainChannel returns only after every drain of the
+// channel already under way has handed off what it settled.
+//
+// The wait gives up when m's context is done, as a transport error would:
+// the channel's rows stay queued for the next trigger.
+func (d *Minder) drainChannel(
+	m MetaContext,
+	chid proto.RTChannelID,
+	res *DrainResult,
+	mu *sync.Mutex,
+) {
+	lk, err := d.drainLocks.AcquireCtx(m.Ctx(), chid)
+	if err != nil {
+		res.noteTransport(mu, err)
+		return
+	}
+	defer lk.Release()
+	snapshot, err := d.snapshotQueue(m, &chid)
+	if err != nil {
+		m.Warnw("drainChannel", "stage", "snapshot", "err", err)
+		return
+	}
+	d.drainChannelRows(m, snapshot[chid], res, mu)
+}
+
 // drainChannelRows walks one channel's queued rows in FIFO order. A transport
 // error stops the channel (everything behind stays queued for the next
 // trigger); a semantic rejection -- from the server, or from a deterministic
 // finalize failure like a seq/msgID conflict -- marks the row Failed and
 // steps past it, so one undeliverable message doesn't block the rest of the
-// channel.
+// channel. Callers hold the channel's drain lock (drainChannel).
 //
 // Each row is re-read just before its attempt: an entry discarded or retried
 // concurrently since the snapshot is skipped, and a snapshot entry whose row
@@ -640,6 +676,8 @@ func (d *Minder) drainChannelRows(
 			}
 			_ = d.setOutboxState(m, msgID, lcl.RTOutboxState_Failed, err)
 			res.noteFailed(mu, msgID, err)
+			d.afterOutboxSettle(msgID)
+			d.handOff(msgID, sendRefused(err))
 			continue
 		}
 		err = d.finalizeAck(m, entry.Msg, ack, 0)
@@ -655,11 +693,110 @@ func (d *Minder) drainChannelRows(
 			// aside as Failed rather than wedging the channel forever.
 			_ = d.setOutboxState(m, msgID, lcl.RTOutboxState_Failed, err)
 			res.noteFailed(mu, msgID, err)
+			d.afterOutboxSettle(msgID)
+			d.handOff(msgID, sendRefused(err))
 			continue
 		}
 		mu.Lock()
 		res.Acked[msgID] = ack
 		mu.Unlock()
+		d.afterOutboxSettle(msgID)
+		d.handOff(msgID, sendAcked(*ack))
+	}
+}
+
+func (d *Minder) afterOutboxSettle(msgID proto.RTMsgID) {
+	if d.testHooks != nil && d.testHooks.AfterOutboxSettle != nil {
+		d.testHooks.AfterOutboxSettle(msgID)
+	}
+}
+
+// sendOutcome is how a drain settled a message a Send is waiting on: either
+// sendAcked (delivered, with the server's ack) or sendRefused (refused, with
+// the error). Only those two constructors make one, so an outcome is always
+// exactly one of the two.
+type sendOutcome interface {
+	result() (*rem.RTSendRes, error)
+}
+
+type sendAckedOutcome struct{ ack rem.RTSendRes }
+
+type sendRefusedOutcome struct{ err error }
+
+func (o sendAckedOutcome) result() (*rem.RTSendRes, error) {
+	ack := o.ack
+	return &ack, nil
+}
+
+func (o sendRefusedOutcome) result() (*rem.RTSendRes, error) { return nil, o.err }
+
+func sendAcked(ack rem.RTSendRes) sendOutcome { return sendAckedOutcome{ack: ack} }
+
+func sendRefused(err error) sendOutcome {
+	if err == nil {
+		err = core.InternalError("outbox refusal without an error")
+	}
+	return sendRefusedOutcome{err: err}
+}
+
+// outcomeWaiter is one Send's registration for its message's outcome
+// (awaitOutcome). settled holds at most one outcome; a hand-off that finds
+// it full is dropped, as drains of a channel run one at a time and a row is
+// settled once.
+type outcomeWaiter struct {
+	d       *Minder
+	msgID   proto.RTMsgID
+	settled chan sendOutcome
+}
+
+// awaitOutcome registers a Send's interest in msgID's outcome, before the
+// message is queued, so whichever drain settles it -- the Send's own or one
+// running beside it -- hands the outcome over. The Send defers done.
+// Several Sends of one msgID (only a test pins msgIDs) each get their own
+// registration and each is handed the outcome.
+func (d *Minder) awaitOutcome(msgID proto.RTMsgID) *outcomeWaiter {
+	w := &outcomeWaiter{d: d, msgID: msgID, settled: make(chan sendOutcome, 1)}
+	d.outcomesMu.Lock()
+	defer d.outcomesMu.Unlock()
+	if d.outcomes == nil {
+		d.outcomes = make(map[proto.RTMsgID][]*outcomeWaiter)
+	}
+	d.outcomes[msgID] = append(d.outcomes[msgID], w)
+	return w
+}
+
+// take returns the outcome a drain handed over, if one has.
+func (w *outcomeWaiter) take() (sendOutcome, bool) {
+	select {
+	case o := <-w.settled:
+		return o, true
+	default:
+		return nil, false
+	}
+}
+
+// done deregisters w; later hand-offs no longer reach it.
+func (w *outcomeWaiter) done() {
+	d := w.d
+	d.outcomesMu.Lock()
+	defer d.outcomesMu.Unlock()
+	ws := slices.DeleteFunc(d.outcomes[w.msgID], func(x *outcomeWaiter) bool { return x == w })
+	if len(ws) == 0 {
+		delete(d.outcomes, w.msgID)
+	} else {
+		d.outcomes[w.msgID] = ws
+	}
+}
+
+// handOff gives a drain's outcome for msgID to every Send waiting on it.
+func (d *Minder) handOff(msgID proto.RTMsgID, o sendOutcome) {
+	d.outcomesMu.Lock()
+	defer d.outcomesMu.Unlock()
+	for _, w := range d.outcomes[msgID] {
+		select {
+		case w.settled <- o:
+		default:
+		}
 	}
 }
 
@@ -699,14 +836,26 @@ func (d *Minder) drain(
 		Acked:      make(map[proto.RTMsgID]*rem.RTSendRes),
 		FailedErrs: make(map[proto.RTMsgID]error),
 	}
+	// The snapshot only says which channels to visit; each channel is read
+	// again under its drain lock (drainChannel). A single-channel drain
+	// visits its channel even when nothing is queued there, so it waits out
+	// a drain of it already under way.
+	chids := make([]proto.RTChannelID, 0, len(snapshot))
+	if only != nil {
+		chids = append(chids, *only)
+	} else {
+		for chid := range snapshot {
+			chids = append(chids, chid)
+		}
+	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for _, rows := range snapshot {
+	for _, chid := range chids {
 		wg.Add(1)
-		go func(rows []lcl.RTOutboxIndexEntry) {
+		go func() {
 			defer wg.Done()
-			d.drainChannelRows(m, rows, res, &mu)
-		}(rows)
+			d.drainChannel(m, chid, res, &mu)
+		}()
 	}
 	wg.Wait()
 
